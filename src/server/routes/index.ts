@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { ApiContext } from "types";
+import { ApiContext } from "../../types";
 import config from "../../config";
 
 export function indexRoutes(context: ApiContext) {

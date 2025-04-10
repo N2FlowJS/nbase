@@ -1,4 +1,4 @@
-import { Vector } from 'types';
+import { Vector } from '../types';
 
 /**
  * KMeans class for clustering a set of vectors into k clusters using the k-means algorithm.

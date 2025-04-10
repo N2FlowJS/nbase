@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { ApiContext, UnifiedSearchOptions } from 'types';
+import { ApiContext, UnifiedSearchOptions } from '../../types';
 
 /**
  * Creates and configures Express router for vector search functionality.
@@ -190,7 +190,7 @@ export function searchRoutes(context: ApiContext) {
       // If includeVectors is true, fetch vectors for each result
       if (includeVectors) {
         const resultsWithVectors = await Promise.all(
-          results.map(async (item) => {
+          results.map(async (item: { partitionId: string; vectorId: number | string; metadata: Record<string, any> }) => {
             const vectorData = await database.getVector(item.vectorId);
             return {
               ...item,

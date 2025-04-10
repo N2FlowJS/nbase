@@ -1,19 +1,18 @@
+import { exec } from 'child_process';
 import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-import path from 'path';
+import net from 'net';
+import { promisify } from 'util';
 import { default as config, default as configDefaults } from '../config';
 import { createTimer } from '../utils/profiling';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import net from 'net';
 
 // Import Database class
 import { Database } from '../database/database';
 
 // Import middleware
-import { addRequestId, loggingMiddleware } from './middleware/common';
+import { loggingMiddleware } from './middleware/common';
 
 // Import routes
 import { indexRoutes } from './routes/index';
@@ -21,11 +20,11 @@ import { searchRoutes } from './routes/search';
 import { vectorRoutes } from './routes/vectors';
 
 // Import helpers
-import { ApiContext, IServerInstance, IServerOptions } from 'types';
+import { ApiContext, IServerInstance, IServerOptions } from '../types';
 import { createFilterFunction } from './utils/filters';
 
 // Export request interfaces for type checking
-export { AddVectorRequest, BatchSearchRequest, BulkAddRequest, DatabaseOptions, FilterConfig, IServerOptions, SaveLoadDatabaseRequest, SearchRequest, TrainIndexRequest, UpdateMetadataRequest } from 'types';
+export type { AddVectorRequest, BatchSearchRequest, BulkAddRequest, DatabaseOptions, FilterConfig, IServerOptions, SaveLoadDatabaseRequest, SearchRequest, TrainIndexRequest, UpdateMetadataRequest } from '../types';
 
 /**
  * Checks if a port is in use

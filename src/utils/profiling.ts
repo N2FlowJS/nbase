@@ -1,4 +1,4 @@
-import { TimerData, TimerResult } from 'types';
+import { TimerData, TimerResult } from '../types';
 
 export function createTimer() {
   const timers: Record<string, TimerData> = {};

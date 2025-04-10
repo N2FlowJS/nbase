@@ -1,7 +1,7 @@
-import { Database } from 'database/database';
-import { PartitionedVectorDB } from 'vector/partitioned_vector_db';
+import { Database } from './database/database';
+import { PartitionedVectorDB } from './vector/partitioned_vector_db';
 import express, { Request, Response, NextFunction, Express } from 'express';
-import { Timer } from 'utils/profiling';
+import { Timer } from './utils/profiling';
 
 /**
  * Vector data with ID for bulk operations

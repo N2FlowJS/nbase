@@ -1,4 +1,4 @@
-import { PartitionedVectorDB } from "vector/partitioned_vector_db";
+import { PartitionedVectorDB } from "../../vector/partitioned_vector_db";
 import { FilterConfig } from "../../types";
 
 /**

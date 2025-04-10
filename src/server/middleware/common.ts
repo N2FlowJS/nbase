@@ -1,4 +1,4 @@
-import { Database } from 'database/database';
+import { Database } from '../../database/database';
 import { Request, Response, NextFunction } from 'express';
 
 /**

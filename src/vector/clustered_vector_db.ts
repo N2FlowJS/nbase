@@ -2,7 +2,7 @@
 
 import { VectorDB } from './vector_db';
 import config from '../config'; // Assuming config exists and has defaults
-import { ClusteredVectorDBOptions, DBStats, DistanceMetric, IDVector, SearchResult, Vector } from 'types';
+import { ClusteredVectorDBOptions, DBStats, DistanceMetric, IDVector, SearchResult, Vector } from '../types';
 import { existsSync, promises as fsPromises } from 'fs';
 import path from 'path';
 import zlib from 'zlib'; // Import zlib for potential compression
