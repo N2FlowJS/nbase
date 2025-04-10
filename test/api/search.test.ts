@@ -97,7 +97,6 @@ describe('Search Routes', () => {
         query: [0.1, 0.2, 0.3],
         k: 5,
         method: 'hnsw',
-        probes: 10,
         efSearch: 100,
       });
 
@@ -107,7 +106,6 @@ describe('Search Routes', () => {
     // Verify correct options were passed to database.findNearest
     const searchOptionsArg = mockDatabase.findNearest.args[0][2];
     expect(searchOptionsArg.useHNSW).to.be.true;
-    expect(searchOptionsArg.probes).to.equal(10);
     expect(searchOptionsArg.efSearch).to.equal(100);
   });
 

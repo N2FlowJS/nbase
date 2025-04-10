@@ -97,7 +97,6 @@ const results = await db.search(queryVector, {
   rerankingMethod: 'diversity', // Method for reranking
   partitionIds: ['p1', 'p2'], // Specific partitions to search
   efSearch: 100,           // HNSW search parameter
-  probes: 3,               // Clustered search parameter
 });
 ```
 

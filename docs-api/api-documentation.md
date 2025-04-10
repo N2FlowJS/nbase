@@ -398,7 +398,6 @@ Search for similar vectors based on a query vector.
   "k": 10,                    // Optional: Number of results to return (default: 10)
   "method": "hnsw",          // Optional: Search method ("hnsw" or default clustered)
   "partitionIds": ["partition1", "partition2"],  // Optional: Specific partitions to search
-  "probes": 10,              // Optional: Number of probes for HNSW search
   "efSearch": 100,           // Optional: Exploration factor for HNSW search
   "distanceMetric": "cosine", // Optional: Distance metric (default: cosine)
   "rerank": true,            // Optional: Whether to rerank results

@@ -28,7 +28,6 @@ export const defaultSystemConfiguration: SystemConfiguration = {
 
   clustering: {
     clusterSize: 100,
-    searchProbes: 3,
     newClusterThresholdFactor: 1.5,
     newClusterDistanceThreshold: 0.5,
     maxClusters: 1000,

@@ -109,7 +109,7 @@ export class KNNEngineSearch {
   async findNearest(
     query: Vector,
     k: number = 10,
-    options: SearchOptions = {} // Options passed down to DB (filter, probes, etc.)
+    options: SearchOptions = {} // Options passed down to DB (filter, etc.)
   ): Promise<SearchResult[]> {
     const timer = this.timer;
     timer.start("knn_partitioned_search");
@@ -135,13 +135,12 @@ export class KNNEngineSearch {
 
     // Call findNearest of PartitionedVectorDB
     // PartitionedDB will handle searching on loaded partitions,
-    // applying filters, metrics, probes and aggregating results.
+    // applying filters, metrics and aggregating results.
     let results: SearchResult[];
     try {
       results = await this.db.findNearest(typedQuery, k, {
         filter: options.filter, // Pass down filter
         distanceMetric: this.options.metric, // Use metric from KNN options
-        probes: options.probes, // Pass down probes if included in SearchOptions
         // Other options in SearchOptions can also be passed if PartitionedDB supports them
       });
     } catch (error) {
@@ -180,8 +179,7 @@ export class KNNEngineSearch {
     const filterInfo = options.filter
       ? `filterHash:${options.filter.toString().length}`
       : "noFilter"; // Simplified filter hash
-    const probesInfo = options.probes ? `probes${options.probes}` : "";
-    return `${queryHash}_k${k}_${this.options.metric}_${filterInfo}_${probesInfo}`;
+    return `${queryHash}_k${k}_${this.options.metric}_${filterInfo}}`;
   }
 
   /**

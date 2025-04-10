@@ -448,7 +448,6 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       k,
       filter: options.filter ? 'present' : 'absent', // Simplify filter representation
       distanceMetric: options.distanceMetric ?? 'default', // Use default marker
-      probes: options.probes,
       efSearch: options.efSearch,
       useHNSW: options.useHNSW,
       rerank: options.rerank,
@@ -714,6 +713,8 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    * Handles caching and concurrency limits.
    */
   async findNearest(query: Vector, k?: number, options: UnifiedSearchOptions = {}): Promise<SearchResult[]> {
+    console.log(`[Database] Searching for nearest vectors to query...`);
+
     await this._assertReady('findNearest');
     const operationTimer = createTimer();
     operationTimer.start('findNearest_total');

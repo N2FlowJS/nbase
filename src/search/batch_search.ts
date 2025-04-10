@@ -135,7 +135,6 @@ export class BatchEngineSearch {
 
           // SearchExecutionOptions
           partitionIds: options.partitionIds,
-          probes: options.probes, // For Clustered search
           efSearch: options.efSearch, // For HNSW search
         };
 

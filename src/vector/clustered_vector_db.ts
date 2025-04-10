@@ -39,7 +39,6 @@ function getRandomElements<T>(arr: T[], k: number): T[] {
  * ```ts
  * const db = new ClusteredVectorDB(128, './vector-db', {
  *   clusterSize: 100,
- *   searchProbes: 3,
  *   distanceMetric: 'cosine'
  * });
  *
@@ -55,7 +54,6 @@ function getRandomElements<T>(arr: T[], k: number): T[] {
 export class ClusteredVectorDB extends VectorDB {
   // Configuration
   public readonly targetClusterSize: number;
-  protected readonly searchProbes: number;
   protected readonly newClusterThresholdFactor: number;
   protected readonly newClusterDistanceThreshold: number;
   protected readonly maxClusters: number;
@@ -82,7 +80,6 @@ export class ClusteredVectorDB extends VectorDB {
 
     // Set configuration with defaults from config or reasonable values
     this.targetClusterSize = options.clusterSize ?? config.clustering.clusterSize ?? 100;
-    this.searchProbes = options.searchProbes ?? config.clustering.searchProbes ?? 3;
     this.newClusterThresholdFactor = options.newClusterThresholdFactor ?? 1.5;
     this.newClusterDistanceThreshold = options.newClusterDistanceThreshold ?? 0.5;
     this.maxClusters = options.maxClusters ?? config.clustering.maxClusters ?? 1000; // Set a reasonable max
@@ -290,12 +287,12 @@ export class ClusteredVectorDB extends VectorDB {
     options: {
       filter?: (id: number | string, metadata?: Record<string, any>) => boolean;
       metric?: DistanceMetric;
-      probes?: number; // Allow overriding probes per query
     } = {}
   ): SearchResult[] {
+    console.log(`[ClusteredVectorDB] [findNearest] Searching for nearest vectors... with k=${k}}`);
+
     const typedQuery = query instanceof Float32Array ? query : new Float32Array(query);
     const metric = options.metric ?? this.distanceMetric; // Use instance default or override
-    const numProbes = options.probes ?? this.searchProbes; // Use instance default or override
     const filter = options.filter;
 
     // Fallback to linear search if no clusters exist
@@ -325,10 +322,9 @@ export class ClusteredVectorDB extends VectorDB {
       return [];
     }
 
-    // Sort clusters by distance and select top 'probes'
-    clusterDistances.sort((a, b) => a.dist - b.dist);
-    const clustersToSearch = clusterDistances.slice(0, numProbes);
-
+    const clustersToSearch = clusterDistances.sort((a, b) => a.dist - b.dist);
+    console.log(`[ClusteredVectorDB] [findNearest] Found ${clustersToSearch.length} candidate clusters.`);
+    
     // 2. Collect candidate vectors from selected clusters
     const candidateIds = new Set<number | string>();
     for (const { key } of clustersToSearch) {
@@ -360,6 +356,7 @@ export class ClusteredVectorDB extends VectorDB {
       const dist = this._calculateDistance(typedQuery, vector, metric);
       results.push({ id, dist });
     }
+    console.log(`[ClusteredVectorDB] [findNearest] Found ${results.length} candidates.`);
 
     // 4. Sort final results and return top k
     return results.sort((a, b) => a.dist - b.dist).slice(0, k);

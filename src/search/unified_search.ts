@@ -128,7 +128,6 @@ export class UnifiedSearch extends EventEmitter {
 
       // SearchExecutionOptions
       partitionIds,
-      probes, // For clustered search
       efSearch, // For HNSW search
 
       // UnifiedSearchOptions specific
@@ -155,7 +154,6 @@ export class UnifiedSearch extends EventEmitter {
         includeMetadata: false, // Don't include metadata yet, fetch later if needed
         distanceMetric,
         partitionIds,
-        probes,
         efSearch,
       };
 
@@ -170,11 +168,10 @@ export class UnifiedSearch extends EventEmitter {
         const hnswOptions: BaseSearchOptions & SearchExecutionOptions = {
           ...dbSearchOptions,
         };
-        delete hnswOptions.probes; // Probes are not for HNSW
         searchPromise = this.db.findNearestHNSW(query, k, hnswOptions);
       } else if (typeof this.db.findNearest === 'function') {
         methodUsed = 'partitioned-clustered';
-        if (this.debug) console.log(`Using ${methodUsed} search with probes=${probes}...`);
+        if (this.debug) console.log(`Using ${methodUsed} search..`);
         // Pass only relevant options for Clustered/findNearest
         const clusteredOptions: BaseSearchOptions & SearchExecutionOptions = {
           ...dbSearchOptions,

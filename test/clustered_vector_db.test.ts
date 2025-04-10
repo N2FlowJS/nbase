@@ -39,7 +39,6 @@ describe("ClusteredVectorDB", () => {
     it("should initialize with custom parameters", () => {
       const db = new ClusteredVectorDB(vectorDimension, null, {
         clusterSize: 50,
-        searchProbes: 5,
         distanceMetric: "cosine",
         maxClusters: 100,
       });

@@ -20,7 +20,6 @@ import { ApiContext, UnifiedSearchOptions } from '../../types';
  * - k: Number of results to return
  * - method: Search method ("hnsw" or default clustered search)
  * - partitionIds: Specific partitions to search
- * - probes: Number of probes for HNSW search
  * - efSearch: Exploration factor for HNSW search
  * - distanceMetric: Distance metric to use
  * - rerank: Whether to rerank results
@@ -47,8 +46,8 @@ export function searchRoutes(context: ApiContext) {
     async (req: Request, res: Response) => {
       timer.start('search');
 
-      const { query, k, method, partitionIds, probes, efSearch, distanceMetric, rerank, rerankingMethod, rerankLambda, filters = {}, includeMetadata, includeVectors, skipCache, searchTimeoutMs } = req.body;
-
+      const { query, k, method, partitionIds, efSearch, distanceMetric, rerank, rerankingMethod, rerankLambda, filters = {}, includeMetadata, includeVectors, skipCache, searchTimeoutMs } = req.body;
+      
       if (!query || !Array.isArray(query)) {
         res.status(400).json({
           error: 'Invalid request: query vector array is required',
@@ -69,7 +68,6 @@ export function searchRoutes(context: ApiContext) {
           includeVectors,
           skipCache,
           partitionIds,
-          probes,
           efSearch,
           distanceMetric,
           rerank,

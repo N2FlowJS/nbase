@@ -593,6 +593,8 @@ class HNSW {
    * @returns Array of nearest neighbors
    */
   findNearest(query: Vector, k: number = 10, options: SearchOptions & { exactDimensions?: boolean } = {}): SearchResult[] {
+    console.log(`[HNSW] Searching for ${k} nearest neighbors`);
+    
     if (!this.entryPointId || !this.initialized) {
       // Fall back to linear search (optimized linear search call)
       return this._linearSearch(query, k, options);

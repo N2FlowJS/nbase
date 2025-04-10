@@ -1570,7 +1570,6 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           return partition.findNearest(queryVector, k, {
             filter: options.filter,
             metric: options.distanceMetric,
-            probes: options.probes, // Pass probes if provided
           });
         } catch (err) {
           console.error(`[PartitionedVectorDB] Error searching partition ${partitionId}:`, err);

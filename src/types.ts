@@ -520,8 +520,6 @@ export interface ClusteredVectorDBOptions {
   useCompression?: boolean;
   clusterSize?: number; // Target cluster size
   // Search parameters
-  searchProbes?: number; // Number of clusters to check during search (higher = more accurate, slower)
-  // Cluster creation parameters
   newClusterThresholdFactor?: number; // e.g., 1.5 -> create new if best cluster > 1.5 * target size
   newClusterDistanceThreshold?: number; // e.g., 0.5 -> create new if distance > threshold
   maxClusters?: number; // Hard limit on the number of clusters
@@ -953,7 +951,6 @@ export interface ImportExportOptions {
 
 export interface ClusteringConfiguration {
   clusterSize?: number; // Target cluster size
-  searchProbes?: number; // Number of clusters to check during search
   newClusterThresholdFactor?: number;
   newClusterDistanceThreshold?: number;
   maxClusters?: number; // Hard limit
@@ -1095,8 +1092,6 @@ export interface BaseSearchOptions {
 // Options specific to *how* the search is performed, especially within PartitionedDB
 export interface SearchExecutionOptions {
   partitionIds?: string[]; // Limit search to specific partitions
-  // Clustered search specific
-  probes?: number; // Alias for searchProbes in clustering, specific to this search
   // HNSW search specific
   efSearch?: number; // Overrides HNSW efSearch config for this query
 }

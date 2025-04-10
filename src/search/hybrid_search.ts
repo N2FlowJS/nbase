@@ -224,7 +224,6 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
         includeMetadata: options.includeMetadata,
         distanceMetric: distanceMetric,
         partitionIds: options.partitionIds,
-        probes: options.probes,
         efSearch: options.efSearch,
       };
 
