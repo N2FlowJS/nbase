@@ -19,14 +19,12 @@ describe("BatchEngineSearch", () => {
       findNearest: sinon.stub(),
       findNearestHNSW: sinon.stub(),
     } as unknown as sinon.SinonStubbedInstance<PartitionedVectorDBInterface>;
-
     const config: BatchSearchConfiguration = {
       maxBatchSize: 2,
       prioritizeOrder: true,
       groupSimilarQueries: false,
       defaultSearchTimeoutMs: 5000,
     };
-
     batchEngineSearch = new BatchEngineSearch(mockSearchEngine, config);
   });
 
