@@ -1,6 +1,6 @@
 # PartitionedVectorDB Benchmark Results - Suite 2 - v0.1.3
 
-*Run at: 2025-04-10T04:36:35.520Z*
+*Run at: 2025-04-10T16:16:37.717Z*
 
 ## Configuration
 - Vector Size: 128
@@ -13,10 +13,10 @@
 
 | Operation | Average Time (ms) | Total Time (ms) |
 |-----------|------------------:|-----------------:|
-| addVector | 0.89 | 88.54 |
-| bulkAdd | 17.02 | 1701.73 |
-| findNearest | 0.43 | 43.41 |
-| findNearestHNSW | 0.79 | 78.90 |
+| addVector | 1.12 | 111.57 |
+| bulkAdd | 17.39 | 1738.55 |
+| findNearest | 1.37 | 137.34 |
+| findNearestHNSW | 0.97 | 97.05 |
 
 ## Search Performance Summary
 
@@ -24,7 +24,7 @@
 
 | Search Method | Average Time (ms) | Relative Performance |
 |---------------|------------------:|---------------------:|
-| Standard Search | 0.43 | Fastest (1.00x) |
-| HNSW Search | 0.79 | 1.82x slower |
+| Standard Search | 1.37 | 1.42x slower |
+| HNSW Search | 0.97 | Fastest (1.00x) |
 
-**Summary**: Standard search is approximately 1.82x faster than HNSW search in this benchmark.
+**Summary**: HNSW search is approximately 1.42x faster than Standard search in this benchmark.
