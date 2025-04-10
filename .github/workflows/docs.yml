@@ -1,0 +1,76 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        # Update to v4 (latest stable as of writing)
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        # Update to v4 (latest stable as of writing)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Keep your desired Node version
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm i
+
+      - name: Build project # Optional: Only if docs generation depends on the build
+        run: npm run build
+
+      - name: Generate documentation
+        run: npm run docs:generate # Ensure this outputs to './docs'
+        
+      - name: Create .nojekyll file
+        run: touch ./docs/.nojekyll
+
+      # Optional: This step uploads the artifact for general storage/debugging.
+      # It's NOT strictly required for the Pages deployment itself if the next step works.
+      - name: Upload build artifacts (for debugging/archival)
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-archive # Renamed slightly to avoid confusion
+          path: './docs'
+          retention-days: 1
+
+      - name: Setup Pages
+        # Update to v5 (latest stable as of writing)
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact for Pages deployment
+        # Update to v3 (latest stable as of writing)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Path is relative to the runner's workspace GITHUB_WORKSPACE
+          path: './docs'
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build # Wait for the build job to complete
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        # Update to v4 (latest stable as of writing)
+        uses: actions/deploy-pages@v4
+        # No 'with:' section needed; it automatically uses the artifact
+        # uploaded by actions/upload-pages-artifact

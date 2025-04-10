@@ -1,0 +1,14 @@
+{
+  "entryPoints": ["src/index.ts"],
+  "out": "docs",
+  "name": "N-Base",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "hideGenerator": true,
+  "readme": "README.md",
+  "theme": "default",
+  "navigationLinks": {
+    "GitHub": "https://github.com/n2flowjs/nbase"
+  },
+  "entryPointStrategy": "expand"
+}

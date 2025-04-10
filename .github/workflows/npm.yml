@@ -1,0 +1,44 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run test
+        run: npm test
+
+      - name: Check if version exists on npm
+        id: check_version
+        run: |
+          set -e
+          VERSION=$(node -p "require('./package.json').version")
+          if npm show @n2flowjs/nbase@$VERSION > /dev/null 2>&1; then
+            echo "Version $VERSION already exists. Skipping publish."
+            echo "skip_publish=true" >> $GITHUB_ENV
+          else
+            echo "Version $VERSION does not exist. Proceeding with publish."
+          fi
+        shell: /usr/bin/bash -e {0}
+
+      - name: Publish to npm
+        if: env.skip_publish != 'true'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

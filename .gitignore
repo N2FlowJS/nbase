@@ -1,0 +1,6 @@
+﻿node_modules
+dist
+database
+test-data
+/test/benchmarks/benchmark_db_data
+/docs
