@@ -126,6 +126,8 @@ server.start();
 - `GET /vectors/:id`: Get a vector
 - `DELETE /vectors/:id`: Delete a vector
 - `POST /search`: Search for similar vectors
+- `GET /health`: Check server health
+- `POST /search/metadata`: Search with metadata filtering
 
 ## Advanced Usage
 
