@@ -8,7 +8,7 @@ import path from 'path';
 import HNSW from '../ann/hnsw'; // Assuming HNSW is a class for the clustering algorithm
 
 import defaultSystemConfiguration from '../config';
-import { BuildIndexHNSWOptions, ClusteredVectorDBOptions, DBStats, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData } from '../types'; // Adjust path as needed
+import { BuildIndexHNSWOptions, ClusteredVectorDBOptions, DBStats, DistanceMetric, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData } from '../types'; // Adjust path as needed
 import { ClusteredVectorDB } from './clustered_vector_db';
 
 // --- Types ---
@@ -1733,6 +1733,276 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   getPartitionConfigs(): PartitionConfig[] {
     // No need for ensureInitialized check here, return what's available
     return Array.from(this.partitionConfigs.values());
+  }
+
+  /**
+   * Extract communities of related vectors based on distance threshold across specified partitions.
+   * A community is a group of vectors where each vector is related to at least one other vector in the group.
+   *
+   * @param threshold - The maximum distance between vectors to consider them related
+   * @param options - Options including distance metric, partition IDs, and metadata inclusion
+   * @returns Array of communities, where each community is an array of related vector information
+   */
+  async extractCommunities(
+    threshold: number,
+    options: {
+      metric?: DistanceMetric;
+      partitionIds?: string[];
+      includeMetadata?: boolean;
+    } = {}
+  ): Promise<
+    Array<
+      Array<{
+        id: number | string;
+        partitionId: string;
+        metadata?: Record<string, any>;
+      }>
+    >
+  > {
+    await this._ensureInitialized();
+
+    // Determine partitions to process
+    const partitionIds = options.partitionIds
+      ? options.partitionIds.filter((id) => this.loadedPartitions.has(id)) // Filter to loaded partitions
+      : Array.from(this.loadedPartitions.keys()); // Default: process all loaded partitions
+
+    if (partitionIds.length === 0) {
+      console.warn('[PartitionedVectorDB] No valid partitions to extract communities from');
+      return [];
+    }
+
+    console.log(`[PartitionedVectorDB] Extracting vector communities with threshold ${threshold} from ${partitionIds.length} partitions...`);
+
+    // Step 1: Extract communities from individual partitions
+    const partitionCommunities: Map<
+      string,
+      Array<
+        Array<{
+          id: number | string;
+          metadata?: Record<string, any>;
+        }>
+      >
+    > = new Map();
+
+    for (const partitionId of partitionIds) {
+      const partition = await this._loadPartition(partitionId);
+      if (!partition) {
+        console.warn(`[PartitionedVectorDB] Skipping partition ${partitionId} - could not load`);
+        continue;
+      }
+
+      try {
+        const communities = partition.extractCommunities(threshold, options.metric || this.defaultClusterOptions.distanceMetric);
+        partitionCommunities.set(partitionId, communities);
+        console.log(`[PartitionedVectorDB] Extracted ${communities.length} communities from partition ${partitionId}`);
+      } catch (error) {
+        console.error(`[PartitionedVectorDB] Error extracting communities from partition ${partitionId}:`, error);
+        this.emit('partition:error', {
+          id: partitionId,
+          error,
+          operation: 'extractCommunities',
+        });
+      }
+    }
+
+    // Step 2: Process cross-partition relationships (using extractRelationships)
+    // This could be expensive for large datasets, but provides more accurate communities
+    const crossPartitionGraph = new Map<string, Set<string>>();
+
+    // Function to create a globally unique ID
+    const getGlobalId = (partitionId: string, localId: number | string) => `${partitionId}:${localId}`;
+
+    // Initialize graph with all vectors from communities
+    for (const [partitionId, communities] of partitionCommunities.entries()) {
+      for (const community of communities) {
+        for (const node of community) {
+          const globalId = getGlobalId(partitionId, node.id);
+          if (!crossPartitionGraph.has(globalId)) {
+            crossPartitionGraph.set(globalId, new Set());
+          }
+        }
+      }
+    }
+
+    // Add connections within each partition's communities
+    for (const [partitionId, communities] of partitionCommunities.entries()) {
+      for (const community of communities) {
+        // For each community, add edges between all nodes
+        for (let i = 0; i < community.length; i++) {
+          const nodeId1 = getGlobalId(partitionId, community[i].id);
+
+          for (let j = i + 1; j < community.length; j++) {
+            const nodeId2 = getGlobalId(partitionId, community[j].id);
+
+            // Add bidirectional connections
+            crossPartitionGraph.get(nodeId1)?.add(nodeId2);
+            crossPartitionGraph.get(nodeId2)?.add(nodeId1);
+          }
+        }
+      }
+    }
+
+    // Step 3: Build global communities using depth-first search
+    const globalCommunities: Array<
+      Array<{
+        id: number | string;
+        partitionId: string;
+        metadata?: Record<string, any>;
+      }>
+    > = [];
+
+    const visited = new Set<string>();
+
+    for (const [globalId] of crossPartitionGraph.entries()) {
+      if (!visited.has(globalId)) {
+        const community: Array<{
+          id: number | string;
+          partitionId: string;
+          metadata?: Record<string, any>;
+        }> = [];
+
+        // DFS to find connected components
+        const dfs = (nodeGlobalId: string) => {
+          if (visited.has(nodeGlobalId)) return;
+
+          visited.add(nodeGlobalId);
+
+          // Parse the global ID
+          const [partId, localId] = nodeGlobalId.split(':');
+
+          // Find metadata if requested
+          let metadata: Record<string, any> | null = null;
+          if (options.includeMetadata !== false) {
+            const partition = this.loadedPartitions.peek(partId);
+            if (partition) {
+              metadata = partition.getMetadata(localId);
+            }
+          }
+
+          // Add to community
+          community.push({
+            id: localId,
+            partitionId: partId,
+            metadata: metadata || undefined,
+          });
+
+          // Visit neighbors
+          const neighbors = crossPartitionGraph.get(nodeGlobalId) || new Set();
+          for (const neighbor of neighbors) {
+            dfs(neighbor);
+          }
+        };
+
+        dfs(globalId);
+
+        // Add community if it contains at least 2 members
+        if (community.length > 1) {
+          globalCommunities.push(community);
+        }
+      }
+    }
+
+    console.log(`[PartitionedVectorDB] Final result: ${globalCommunities.length} communities identified across partitions`);
+    return globalCommunities;
+  }
+
+  /**
+   * Extract relationships between vectors based on distance threshold across specified partitions.
+   *
+   * @param threshold - The maximum distance between vectors to consider them related
+   * @param options - Options including distance metric, partition filtering, and metadata inclusion
+   * @returns Array of relationships with vectorIds, partitionIds, optional metadata, and distances
+   */
+  async extractRelationships(
+    threshold: number,
+    options: {
+      metric?: DistanceMetric;
+      partitionIds?: string[];
+      includeMetadata?: boolean;
+    } = {}
+  ): Promise<
+    Array<{
+      vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      distance: number;
+    }>
+  > {
+    await this._ensureInitialized();
+
+    // Determine partitions to process
+    const partitionIds = options.partitionIds ? options.partitionIds.filter((id) => this.loadedPartitions.has(id)) : Array.from(this.loadedPartitions.keys());
+
+    if (partitionIds.length === 0) {
+      console.warn('[PartitionedVectorDB] No valid partitions to extract relationships from');
+      return [];
+    }
+
+    console.log(`[PartitionedVectorDB] Extracting vector relationships with threshold ${threshold} from ${partitionIds.length} partitions...`);
+
+    const relationships: Array<{
+      vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      distance: number;
+    }> = [];
+
+    // Process each partition individually
+    for (const partitionId of partitionIds) {
+      const partition = await this._loadPartition(partitionId);
+      if (!partition) {
+        console.warn(`[PartitionedVectorDB] Skipping partition ${partitionId} - could not load`);
+        continue;
+      }
+
+      try {
+        // Extract relationships within this partition
+        const partitionRelationships = partition.extractRelationships(threshold, options.metric || this.defaultClusterOptions.distanceMetric);
+
+        // Transform the results to include partition IDs and optionally metadata
+        for (const rel of partitionRelationships) {
+          const relationship = {
+            vector1: {
+              id: rel.vector1,
+              partitionId,
+              metadata: undefined as Record<string, any> | undefined,
+            },
+            vector2: {
+              id: rel.vector2,
+              partitionId,
+              metadata: undefined as Record<string, any> | undefined,
+            },
+            distance: rel.distance,
+          };
+
+          // Add metadata if requested
+          if (options.includeMetadata !== false) {
+            const metadata1 = partition.getMetadata(rel.vector1);
+            const metadata2 = partition.getMetadata(rel.vector2);
+
+            if (metadata1) {
+              relationship.vector1.metadata = metadata1;
+            }
+
+            if (metadata2) {
+              relationship.vector2.metadata = metadata2;
+            }
+          }
+
+          relationships.push(relationship);
+        }
+
+        console.log(`[PartitionedVectorDB] Extracted ${partitionRelationships.length} relationships from partition ${partitionId}`);
+      } catch (error) {
+        console.error(`[PartitionedVectorDB] Error extracting relationships from partition ${partitionId}:`, error);
+        this.emit('partition:error', {
+          id: partitionId,
+          error,
+          operation: 'extractRelationships',
+        });
+      }
+    }
+
+    console.log(`[PartitionedVectorDB] Total: ${relationships.length} relationships extracted across partitions`);
+    return relationships;
   }
 }
 

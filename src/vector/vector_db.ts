@@ -759,6 +759,164 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     return this.memoryStorage.size;
   }
 
+  /**
+   * Extract relationships between vectors based on distance or custom criteria.
+   *
+   * @param threshold - The maximum distance between vectors to consider them related.
+   * @param metric - Distance metric to use (e.g., 'cosine', 'euclidean').
+   * @returns An array of relationships, where each relationship links two vector IDs, their distance, and optional metadata.
+   */
+  extractRelationships(
+    threshold: number,
+    metric: DistanceMetric = 'euclidean'
+  ): Array<{ 
+    vector1: number | string; 
+    vector2: number | string; 
+    distance: number;
+    metadata1?: Record<string, any>;
+    metadata2?: Record<string, any>;
+  }> {
+    const relationships: Array<{ 
+      vector1: number | string; 
+      vector2: number | string; 
+      distance: number;
+      metadata1?: Record<string, any>;
+      metadata2?: Record<string, any>;
+    }> = [];
+
+    // Iterate over all vectors
+    const vectorEntries = Array.from(this.memoryStorage.entries());
+    for (let i = 0; i < vectorEntries.length; i++) {
+      const [id1, vector1] = vectorEntries[i];
+
+      for (let j = i + 1; j < vectorEntries.length; j++) {
+        const [id2, vector2] = vectorEntries[j];
+
+        // Ensure dimension compatibility
+        if (vector1.length !== vector2.length) {
+          console.warn(`Dimension mismatch between vector ${id1} and ${id2}, skipping.`);
+          continue;
+        }
+
+        // Calculate distance
+        const distance = this._calculateDistance(vector1, vector2, metric);
+
+        // Check if the distance is within the threshold
+        if (distance <= threshold) {
+          // Get metadata for both vectors if available
+          const metadata1 = this.metadata.get(id1);
+          const metadata2 = this.metadata.get(id2);
+          
+          relationships.push({ 
+            vector1: id1, 
+            vector2: id2, 
+            distance,
+            metadata1: metadata1 ? { ...metadata1 } : undefined,
+            metadata2: metadata2 ? { ...metadata2 } : undefined 
+          });
+        }
+      }
+    }
+
+    console.log(`[VectorDB] Extracted ${relationships.length} relationships.`);
+    return relationships;
+  }
+
+  /**
+   * Extract communities of related vectors based on distance threshold.
+   * A community is a group of vectors where each vector is related to at least one other vector in the group.
+   * 
+   * @param threshold - The maximum distance between vectors to consider them related
+   * @param metric - Distance metric to use (e.g., 'cosine', 'euclidean')
+   * @returns Array of communities, where each community is an array of related vector information
+   */
+  extractCommunities(
+    threshold: number,
+    metric: DistanceMetric = 'euclidean'
+  ): Array<Array<{
+    id: number | string;
+    metadata?: Record<string, any>;
+  }>> {
+    console.log(`[VectorDB] Extracting vector communities with threshold ${threshold}...`);
+    
+    // First build a graph representation where each vector is a node
+    // and edges exist between vectors with distance <= threshold
+    const graph = new Map<number | string, Set<number | string>>();
+    const vectorEntries = Array.from(this.memoryStorage.entries());
+    
+    // Initialize the graph with empty adjacency lists
+    for (const [id] of vectorEntries) {
+      graph.set(id, new Set());
+    }
+    
+    // Build edges
+    for (let i = 0; i < vectorEntries.length; i++) {
+      const [id1, vector1] = vectorEntries[i];
+      
+      for (let j = i + 1; j < vectorEntries.length; j++) {
+        const [id2, vector2] = vectorEntries[j];
+        
+        // Ensure dimension compatibility
+        if (vector1.length !== vector2.length) {
+          continue;
+        }
+        
+        // Calculate distance
+        const distance = this._calculateDistance(vector1, vector2, metric);
+        
+        // Add edge if distance is within threshold
+        if (distance <= threshold) {
+          graph.get(id1)?.add(id2);
+          graph.get(id2)?.add(id1);
+        }
+      }
+    }
+    
+    // Use depth-first search to find connected components (communities)
+    const visited = new Set<number | string>();
+    const communities: Array<Array<{
+      id: number | string;
+      metadata?: Record<string, any>;
+    }>> = [];
+    
+    for (const [id] of graph.entries()) {
+      if (!visited.has(id)) {
+        const community: Array<{
+          id: number | string;
+          metadata?: Record<string, any>;
+        }> = [];
+        
+        // DFS to find all connected vectors
+        const dfs = (nodeId: number | string) => {
+          visited.add(nodeId);
+          const metadata = this.metadata.get(nodeId);
+          community.push({
+            id: nodeId,
+            metadata: metadata ? { ...metadata } : undefined
+          });
+          
+          // Visit all neighbors
+          const neighbors = graph.get(nodeId) || new Set();
+          for (const neighbor of neighbors) {
+            if (!visited.has(neighbor)) {
+              dfs(neighbor);
+            }
+          }
+        };
+        
+        dfs(id);
+        
+        // Only include communities with at least 2 vectors
+        if (community.length > 1) {
+          communities.push(community);
+        }
+      }
+    }
+    
+    console.log(`[VectorDB] Found ${communities.length} communities`);
+    return communities;
+  }
+
   async close(): Promise<void> {
     if (this.isClosed) return;
     this.isClosed = true; // Mark as closed immediately

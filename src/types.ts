@@ -2,6 +2,7 @@ import { Database } from './database/database';
 import { PartitionedVectorDB } from './vector/partitioned_vector_db';
 import express, { Request, Response, NextFunction, Express } from 'express';
 import { Timer } from './utils/profiling';
+import { ClusteredVectorDB } from 'vector';
 
 /**
  * Vector data with ID for bulk operations
@@ -694,7 +695,7 @@ export interface PartitionedVectorDBInterface {
   // Partition management
   createPartition(id: string, name: string, options?: any): Promise<string>;
   setActivePartition(id: string): Promise<void>;
-  getPartition(id: string): Promise<any>;
+  getPartition(id: string): Promise<ClusteredVectorDB | null>;
   getActivePartition(): Promise<any>;
   getPartitionConfigs(): any[];
 
@@ -717,13 +718,12 @@ export interface PartitionedVectorDBInterface {
   save(): Promise<void>;
   IsReady(): boolean;
   initializationPromise: Promise<void>;
-  getMetadataWithFieldAcrossPartitions(
-    criteria: string | string[] | Record<string, any>,
-    values?: any | any[],
-    option?: {
-      limit: number;
-    }
-  ): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, any> }>>;
+  getMetadataWithFieldAcrossPartitions(criteria: string | string[] | Record<string, any>, values?: any | any[], option?: { limit: number }): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, any> }>>;
+  extractRelationships(
+    threshold: number,
+    options: { metric?: DistanceMetric; partitionIds?: string[]; includeMetadata?: boolean }
+  ): Promise<Array<{ vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> }; vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> }; distance: number }>>;
+  extractCommunities(threshold: number, options: { metric?: DistanceMetric; partitionIds?: string[]; includeMetadata?: boolean }): Promise<Array<Array<{ id: number | string; partitionId: string; metadata?: Record<string, any> }>>>;
 }
 
 /**

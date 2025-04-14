@@ -17,6 +17,8 @@ This document provides detailed specifications for all API endpoints in the NBas
   - [Find Similar Vectors](#find-similar-vectors)
 - [Vector Search](#vector-search)
   - [Search](#search)
+  - [Extract Relationships](#extract-relationships)
+  - [Extract Communities](#extract-communities)
 
 ## Health and Status
 
@@ -464,6 +466,97 @@ Search for similar vectors based on a query vector.
 
 - `400 Bad Request`: Missing or invalid query vector
 - `500 Internal Server Error`: Search error (with details)
+
+### Extract Relationships
+
+Find relationships between vectors based on a distance threshold.
+
+**URL:** `/api/search/relationships`
+
+**Method:** `POST`
+
+**Request Body:**
+
+```json
+{
+  "threshold": 0.3,           // Required: Maximum distance between vectors to consider them related
+  "metric": "cosine",         // Optional: Distance metric (e.g., 'cosine', 'euclidean'). Default depends on database implementation.
+  "partitionIds": ["p1", "p2"] // Optional: Array of partition IDs to restrict the search. Searches all loaded partitions if omitted.
+}
+```
+
+**Response:**
+
+```json
+{
+  "relationships": [
+    {
+      "vector1": { "id": 123, "partitionId": "partition1" },
+      "vector2": { "id": 456, "partitionId": "partition1" },
+      "distance": 0.25
+    },
+    {
+      "vector1": { "id": 789, "partitionId": "partition2" },
+      "vector2": { "id": 101, "partitionId": "partition2" },
+      "distance": 0.15
+    }
+    // ... more relationships
+  ],
+  "count": 2, // Total number of relationships found
+  "duration": 345 // Time taken in milliseconds
+}
+```
+
+**Error Responses:**
+
+- `400 Bad Request`: Missing or invalid `threshold`
+- `500 Internal Server Error`: Error during relationship extraction
+
+### Extract Communities
+
+Find communities (clusters) of related vectors based on a distance threshold.
+
+**URL:** `/api/search/communities`
+
+**Method:** `POST`
+
+**Request Body:**
+
+```json
+{
+  "threshold": 0.3,           // Required: Maximum distance between vectors to consider them related
+  "metric": "cosine",         // Optional: Distance metric (e.g., 'cosine', 'euclidean'). Default depends on database implementation.
+  "partitionIds": ["p1", "p2"], // Optional: Array of partition IDs to restrict the search. Searches all loaded partitions if omitted.
+  "includeMetadata": true     // Optional: Whether to include metadata for each vector in the results (default: true)
+}
+```
+
+**Response:**
+
+```json
+{
+  "communities": [
+    [
+      { "id": 123, "partitionId": "partition1", "metadata": { "label": "doc1" } },
+      { "id": 456, "partitionId": "partition1", "metadata": { "label": "doc2" } }
+    ],
+    [
+      { "id": 789, "partitionId": "partition2", "metadata": { "label": "doc3" } },
+      { "id": 101, "partitionId": "partition2", "metadata": { "label": "doc4" } },
+      { "id": 102, "partitionId": "partition2", "metadata": { "label": "doc5" } }
+    ]
+    // ... more communities
+  ],
+  "count": 2, // Number of communities
+  "totalVectors": 5, // Total number of vectors across all communities
+  "duration": 345 // Time taken in milliseconds
+}
+```
+
+**Error Responses:**
+
+- `400 Bad Request`: Missing or invalid `threshold`
+- `500 Internal Server Error`: Error during community extraction
 
 ## Filter Operators
 

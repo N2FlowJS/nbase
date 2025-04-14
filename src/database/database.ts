@@ -1,7 +1,23 @@
 import { EventEmitter } from 'events';
 import configDefaults from '../config'; // Import the default config object
 import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
-import { Vector, SearchResult, UnifiedSearchOptions, PartitionedDBEventData, TypedEventEmitter, PerformanceMetrics, DatabaseOptions, DatabaseEvents, PartitionedVectorDBInterface, PartitionedDBStats, DatabaseStats, BuildIndexHNSWOptions, UnifiedSearchPartitionedStats, VectorData } from '../types';
+import {
+  Vector,
+  SearchResult,
+  UnifiedSearchOptions,
+  PartitionedDBEventData,
+  TypedEventEmitter,
+  PerformanceMetrics,
+  DatabaseOptions,
+  DatabaseEvents,
+  PartitionedVectorDBInterface,
+  PartitionedDBStats,
+  DatabaseStats,
+  BuildIndexHNSWOptions,
+  UnifiedSearchPartitionedStats,
+  VectorData,
+  DistanceMetric,
+} from '../types';
 import { LRUCache } from 'lru-cache';
 import { createTimer, Timer } from '../utils/profiling';
 import { VectorDBMonitor } from '../utils/vector_monitoring';
@@ -993,5 +1009,110 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     await this._assertReady('getLoadedPartitionIds');
     const stats = await this.vectorDB.getStats();
     return stats?.partitions?.loadedIds ?? [];
+  }
+
+  /**
+   * Extract relationships between vectors based on distance threshold across all loaded partitions.
+   *
+   * @param threshold - The maximum distance between vectors to consider them related
+   * @param options - Options including distance metric, partition filtering, and metadata inclusion
+   * @returns An array of relationships with vectorIds, partitionIds, optional metadata, and distances
+   */
+  async extractRelationships(
+    threshold: number,
+    options: {
+      metric?: DistanceMetric;
+      partitionIds?: string[];
+      includeMetadata?: boolean;
+    } = {}
+  ): Promise<
+    Array<{
+      vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      distance: number;
+    }>
+  > {
+    await this._assertReady('extractRelationships');
+    this.timer.start('extractRelationships');
+
+    try {
+      console.log(`[Database] Extracting relationships with threshold ${threshold}...`);
+
+      const relationships = await this.vectorDB.extractRelationships(threshold, options);
+
+      const duration = this.timer.stop('extractRelationships');
+      console.log(`[Database] Extracted ${relationships.length} relationships in ${duration.total.toFixed(2)}ms`);
+
+      return relationships;
+    } catch (error: any) {
+      this.timer.stop('extractRelationships');
+      console.error(`[Database] Error extracting relationships:`, error);
+      this.emit('error', {
+        message: `Extract relationships failed: ${error.message}`,
+        error,
+        context: 'extractRelationships',
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Extract communities of related vectors based on distance threshold across all loaded partitions.
+   * A community is a group of vectors where each vector is related to at least one other vector in the group.
+   *
+   * @param threshold - The maximum distance between vectors to consider them related
+   * @param options - Options including distance metric and partition filtering
+   * @returns An array of communities, where each community is an array of related vector information
+   */
+  async extractCommunities(
+    threshold: number,
+    options: {
+      metric?: DistanceMetric;
+      partitionIds?: string[];
+      includeMetadata?: boolean;
+    } = {}
+  ): Promise<
+    Array<
+      Array<{
+        id: number | string;
+        partitionId: string;
+        metadata?: Record<string, any>;
+      }>
+    >
+  > {
+    await this._assertReady('extractCommunities');
+    this.timer.start('extractCommunities');
+
+    try {
+      // Determine which partitions to process
+      let partitionIds = options.partitionIds;
+      if (!partitionIds || partitionIds.length === 0) {
+        const stats = await this.vectorDB.getStats();
+        partitionIds = stats.partitions.loadedIds;
+      }
+
+      console.log(`[Database] Extracting vector communities across ${partitionIds.length} partitions with threshold ${threshold}...`);
+
+      // Delegate to the vectorDB implementation
+      const communities = await this.vectorDB.extractCommunities(threshold, {
+        metric: options.metric,
+        partitionIds,
+        includeMetadata: options.includeMetadata ?? true,
+      });
+
+      const duration = this.timer.stop('extractCommunities');
+      console.log(`[Database] Extracted ${communities.length} communities with ${communities.reduce((sum, c) => sum + c.length, 0)} total vectors in ${duration.total.toFixed(2)}ms`);
+
+      return communities;
+    } catch (error: any) {
+      this.timer.stop('extractCommunities');
+      console.error(`[Database] Error extracting communities:`, error);
+      this.emit('error', {
+        message: `Extract communities failed: ${error.message}`,
+        error,
+        context: 'extractCommunities',
+      });
+      throw error;
+    }
   }
 }

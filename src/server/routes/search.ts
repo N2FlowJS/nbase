@@ -50,6 +50,23 @@ import { ApiContext, UnifiedSearchOptions } from '../../types';
  * Errors:
  * - Returns a 400 status code for invalid requests (e.g., missing or invalid `query` or `criteria`).
  * - Returns a 500 status code for internal server errors, with optional stack trace in development mode.
+ *
+ * ### POST `/relationships`
+ * Finds relationships between vectors based on a distance threshold.
+ *
+ * Request Body:
+ * - `threshold` (number): The maximum distance between vectors to consider them related. **Required**.
+ * - `metric` (string): Distance metric to use (e.g., 'cosine', 'euclidean'). Default depends on database implementation.
+ * - `partitionIds` (array): Optional array of partition IDs to restrict the relationship search.
+ *
+ * Response:
+ * - `relationships` (array): Array of relationships between vectors.
+ * - `count` (number): The number of relationships found.
+ * - `duration` (number): The time taken to extract relationships in milliseconds.
+ *
+ * Errors:
+ * - Returns a 400 status code for invalid requests (e.g., missing or invalid `threshold`).
+ * - Returns a 500 status code for internal server errors, with optional stack trace in development mode.
  */
 export function searchRoutes(context: ApiContext) {
   const router = Router();
@@ -102,7 +119,7 @@ export function searchRoutes(context: ApiContext) {
    *                  "vectorId": 123,
    *                  "distance": 0.1,
    *                  "metadata": { "field": "value" }
-   *                },  
+   *                },
    *                {
    *                  "partitionId": "partition2",
    *                  "vectorId": 456,
@@ -293,6 +310,168 @@ export function searchRoutes(context: ApiContext) {
     } catch (error) {
       const duration = timer.stop('metadata_search').total;
       console.error('Metadata search error:', error);
+
+      res.status(500).json({
+        error: (error as Error).message,
+        stack: process.env.NODE_ENV === 'development' ? (error as Error).stack : undefined,
+        duration,
+      });
+    }
+  });
+
+  /**
+   * Vector relationships extraction endpoint
+   *
+   * Finds relationships between vectors based on a distance threshold.
+   *
+   * Request body:
+   * - threshold: The maximum distance between vectors to consider them related (required)
+   * - metric: Distance metric to use (e.g., 'cosine', 'euclidean')
+   * - partitionIds: Optional array of partition IDs to restrict the relationship search
+   * - `includeMetadata` (boolean): Whether to include metadata for each vector in the results.
+   *
+   * Example:
+   * ```json
+   * {
+   *   "threshold": 0.3,
+   *   "metric": "cosine",
+   *   "partitionIds": ["partition1", "partition2"]
+   *   "includeMetadata": true
+   * }
+   * ```
+   * @returns Array of relationships between vectors
+   *
+   * Example response:
+   * ```json
+   * {
+   *   "relationships": [
+   *     {
+   *       "vector1": { "id": 123, "partitionId": "partition1" },
+   *       "vector2": { "id": 456, "partitionId": "partition1" },
+   *       "distance": 0.25
+   *     },
+   *     {
+   *       "vector1": { "id": 789, "partitionId": "partition2" },
+   *       "vector2": { "id": 101, "partitionId": "partition2" },
+   *       "distance": 0.15
+   *     }
+   *   ],
+   *   "count": 2,
+   *   "duration": 345
+   * }
+   * ```
+   */
+  router.post('/relationships', async function (req: Request, res: Response) {
+    timer.start('extract_relationships');
+
+    const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
+
+    if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
+      res.status(400).json({
+        error: 'Invalid request: threshold must be a positive number',
+      });
+      return;
+    }
+
+    try {
+      const relationships = await database.extractRelationships(threshold, {
+        metric,
+        partitionIds,
+        includeMetadata,
+      });
+
+      const duration = timer.stop('extract_relationships').total;
+
+      res.json({
+        relationships,
+        count: relationships.length,
+        duration,
+      });
+    } catch (error) {
+      const duration = timer.stop('extract_relationships').total;
+      console.error('Relationship extraction error:', error);
+
+      res.status(500).json({
+        error: (error as Error).message,
+        stack: process.env.NODE_ENV === 'development' ? (error as Error).stack : undefined,
+        duration,
+      });
+    }
+  });
+
+  /**
+   * Vector communities extraction endpoint
+   *
+   * Finds communities (clusters) of vectors based on a distance threshold across loaded partitions.
+   * A community is a group of vectors where each vector is related to at least one other vector in the group.
+   *
+   * Request body:
+   * - `threshold` (number): The maximum distance between vectors to consider them related. **Required**.
+   * - `metric` (string): Distance metric to use (e.g., 'cosine', 'euclidean'). Default depends on database implementation.
+   * - `partitionIds` (array): Optional array of partition IDs to restrict the community extraction.
+   * - `includeMetadata` (boolean): Whether to include metadata for each vector in the results.
+   *
+   * Example:
+   * ```json
+   * {
+   *   "threshold": 0.3,
+   *   "metric": "cosine",
+   *   "partitionIds": ["partition1", "partition2"],
+   *   "includeMetadata": true
+   * }
+   * ```
+   * @returns Array of communities, where each community is an array of related vectors
+   *
+   * Example response:
+   * ```json
+   * {
+   *   "communities": [
+   *     [
+   *       { "id": 123, "partitionId": "partition1", "metadata": { "label": "doc1" } },
+   *       { "id": 456, "partitionId": "partition1", "metadata": { "label": "doc2" } }
+   *     ],
+   *     [
+   *       { "id": 789, "partitionId": "partition2", "metadata": { "label": "doc3" } },
+   *       { "id": 101, "partitionId": "partition2", "metadata": { "label": "doc4" } },
+   *       { "id": 102, "partitionId": "partition2", "metadata": { "label": "doc5" } }
+   *     ]
+   *   ],
+   *   "count": 2,
+   *   "totalVectors": 5,
+   *   "duration": 345
+   * }
+   * ```
+   */
+  router.post('/communities', async function (req: Request, res: Response) {
+    timer.start('extract_communities');
+
+    const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
+
+    if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
+      res.status(400).json({
+        error: 'Invalid request: threshold must be a positive number',
+      });
+      return;
+    }
+
+    try {
+      const communities = await database.extractCommunities(threshold, {
+        metric,
+        partitionIds,
+        includeMetadata,
+      });
+
+      const duration = timer.stop('extract_communities').total;
+
+      res.json({
+        communities,
+        count: communities.length,
+        totalVectors: communities.reduce((sum, community) => sum + community.length, 0),
+        duration,
+      });
+    } catch (error) {
+      const duration = timer.stop('extract_communities').total;
+      console.error('Community extraction error:', error);
 
       res.status(500).json({
         error: (error as Error).message,

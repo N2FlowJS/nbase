@@ -10,7 +10,7 @@ import { BatchEngineSearch } from './search/batch_search';
 import SearchReranker from './search/reranking';
 import { UnifiedSearch } from './search/unified_search';
 
-import ProductQuantization from './compression/product_quantization';
+import { ProductQuantization, KMeans } from './compression';
 
 import { createTimer } from './utils/profiling';
 import { VectorDBMonitor } from './utils/vector_monitoring';
@@ -36,6 +36,7 @@ export {
 
   // Compression
   ProductQuantization,
+  KMeans,
 
   // Utils
   createTimer,

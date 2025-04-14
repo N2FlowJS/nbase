@@ -35,7 +35,7 @@ import { Vector } from '../types';
  * @param {number} [maxIterations=100] - The maximum number of iterations for the algorithm.
  * @param {number} [tolerance=0.001] - The threshold for centroid movement to determine convergence.
  */
-class KMeans {
+export class KMeans {
   private k: number;
   private maxIterations: number;
   private tolerance: number;
@@ -267,5 +267,3 @@ class KMeans {
     return sum;
   }
 }
-
-export default KMeans;

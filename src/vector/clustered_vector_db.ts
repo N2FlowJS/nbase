@@ -7,7 +7,7 @@ import { existsSync, promises as fsPromises } from 'fs';
 import path from 'path';
 import zlib from 'zlib'; // Import zlib for potential compression
 import { promisify } from 'util'; // Import promisify
-import KMeans from '../compression/kmeans'; // Import KMeans
+import {KMeans} from '../compression/kmeans'; // Import KMeans
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -795,13 +795,25 @@ export class ClusteredVectorDB extends VectorDB {
  *
  * @param threshold - The maximum distance between vectors to consider them related.
  * @param metric - Distance metric to use (e.g., 'cosine', 'euclidean').
- * @returns An array of relationships, where each relationship links two vector IDs and their distance.
+ * @returns An array of relationships, where each relationship links two vector IDs, their distance, and optional metadata.
  */
 public extractRelationships(
   threshold: number,
   metric: DistanceMetric = this.distanceMetric
-): Array<{ vector1: number | string; vector2: number | string; distance: number }> {
-  const relationships: Array<{ vector1: number | string; vector2: number | string; distance: number }> = [];
+): Array<{ 
+  vector1: number | string; 
+  vector2: number | string; 
+  distance: number;
+  metadata1?: Record<string, any>;
+  metadata2?: Record<string, any>;
+}> {
+  const relationships: Array<{ 
+    vector1: number | string; 
+    vector2: number | string; 
+    distance: number;
+    metadata1?: Record<string, any>;
+    metadata2?: Record<string, any>;
+  }> = [];
 
   // Iterate over all vectors
   const vectorEntries = Array.from(this.memoryStorage.entries());
@@ -822,7 +834,17 @@ public extractRelationships(
 
       // Check if the distance is within the threshold
       if (distance <= threshold) {
-        relationships.push({ vector1: id1, vector2: id2, distance });
+        // Get metadata for both vectors if available
+        const metadata1 = this.metadata.get(id1);
+        const metadata2 = this.metadata.get(id2);
+        
+        relationships.push({ 
+          vector1: id1, 
+          vector2: id2, 
+          distance,
+          metadata1: metadata1 ? { ...metadata1 } : undefined,
+          metadata2: metadata2 ? { ...metadata2 } : undefined 
+        });
       }
     }
   }
@@ -830,5 +852,148 @@ public extractRelationships(
   console.log(`[ClusteredVectorDB] Extracted ${relationships.length} relationships.`);
   return relationships;
 }
+/**
+   * Extract communities of related vectors based on distance threshold.
+   * Uses cluster information to optimize the community detection process.
+   * 
+   * @param threshold - The maximum distance between vectors to consider them related
+   * @param metric - Distance metric to use (e.g., 'cosine', 'euclidean')
+   * @returns Array of communities, where each community is an array of related vector information
+   */
+  override extractCommunities(
+    threshold: number,
+    metric: DistanceMetric = this.distanceMetric
+  ): Array<Array<{
+    id: number | string;
+    metadata?: Record<string, any>;
+  }>> {
+    console.log(`[ClusteredVectorDB] Extracting vector communities with threshold ${threshold}...`);
+    
+    // We can optimize by first checking distances between cluster centroids
+    // Only compare vectors in clusters whose centroids are within (2 * threshold) distance
+    // This is an approximation that works because of the triangle inequality property
+    
+    const clusterAdjacency = new Map<number, Set<number>>();
+    
+    // Build cluster adjacency graph
+    for (const [keyA, centroidA] of this.clusterCentroids.entries()) {
+      clusterAdjacency.set(keyA, new Set());
+      
+      for (const [keyB, centroidB] of this.clusterCentroids.entries()) {
+        if (keyA === keyB) continue; // Skip self
+        
+        // Skip if dimension mismatch for cosine
+        if (metric === 'cosine' && centroidA.length !== centroidB.length) {
+          continue;
+        }
+        
+        // Calculate inter-cluster distance
+        const distance = this._calculateDistance(centroidA, centroidB, metric);
+        
+        // Use 2*threshold as a conservative bound due to triangle inequality
+        if (distance <= 2 * threshold) {
+          clusterAdjacency.get(keyA)?.add(keyB);
+        }
+      }
+    }
+    
+    // Build the vector graph, but only consider vectors in nearby clusters
+    const graph = new Map<number | string, Set<number | string>>();
+    
+    // Initialize graph with empty adjacency lists
+    for (const [id] of this.memoryStorage.entries()) {
+      graph.set(id, new Set());
+    }
+    
+    // For each cluster
+    for (const [clusterKey, members] of this.clusters.entries()) {
+      const relatedClusters = new Set([clusterKey, ...(clusterAdjacency.get(clusterKey) || [])]);
+      
+      // Get all vectors in this cluster
+      const clusterVectors = members.map(m => m.id);
+      
+      // For each vector in this cluster
+      for (const vectorId of clusterVectors) {
+        const vector = this.memoryStorage.get(vectorId);
+        if (!vector) continue;
+        
+        // Compare with vectors in related clusters
+        for (const relatedClusterKey of relatedClusters) {
+          const relatedMembers = this.clusters.get(relatedClusterKey) || [];
+          
+          for (const relatedMember of relatedMembers) {
+            const relatedId = relatedMember.id;
+            
+            // Skip self comparison
+            if (vectorId === relatedId) continue;
+            
+            // Skip if already checked (undirected graph)
+            if (graph.get(vectorId)?.has(relatedId)) continue;
+            
+            const relatedVector = this.memoryStorage.get(relatedId);
+            if (!relatedVector) continue;
+            
+            // Ensure dimension compatibility
+            if (vector.length !== relatedVector.length) {
+              continue;
+            }
+            
+            // Calculate distance
+            const distance = this._calculateDistance(vector, relatedVector, metric);
+            
+            // Add edge if distance is within threshold
+            if (distance <= threshold) {
+              graph.get(vectorId)?.add(relatedId);
+              graph.get(relatedId)?.add(vectorId);
+            }
+          }
+        }
+      }
+    }
+    
+    // Use depth-first search to find connected components (communities)
+    const visited = new Set<number | string>();
+    const communities: Array<Array<{
+      id: number | string;
+      metadata?: Record<string, any>;
+    }>> = [];
+    
+    for (const [id] of graph.entries()) {
+      if (!visited.has(id)) {
+        const community: Array<{
+          id: number | string;
+          metadata?: Record<string, any>;
+        }> = [];
+        
+        // DFS to find all connected vectors
+        const dfs = (nodeId: number | string) => {
+          visited.add(nodeId);
+          const metadata = this.metadata.get(nodeId);
+          community.push({
+            id: nodeId,
+            metadata: metadata ? { ...metadata } : undefined
+          });
+          
+          // Visit all neighbors
+          const neighbors = graph.get(nodeId) || new Set();
+          for (const neighbor of neighbors) {
+            if (!visited.has(neighbor)) {
+              dfs(neighbor);
+            }
+          }
+        };
+        
+        dfs(id);
+        
+        // Only include communities with at least 2 vectors
+        if (community.length > 1) {
+          communities.push(community);
+        }
+      }
+    }
+    
+    console.log(`[ClusteredVectorDB] Found ${communities.length} communities`);
+    return communities;
+  }
 }
 // --- END OF FILE clustered_vector_db.ts ---

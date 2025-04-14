@@ -80,6 +80,9 @@ const db = new Database(options);
 - `search(query, options)`: Alias for findNearest
 - `deleteVector(id)`: Delete a vector
 - `getVector(id)`: Retrieve a vector
+- `getMetadata(id)`: Retrieve metadata for a vector
+- `updateMetadata(id, data)`: Update metadata for a vector
+- `extractRelationships(threshold, options)`: Find relationships between vectors within partitions
 - `buildIndexes()`: Build search indexes
 - `save()`: Save the database to disk
 - `close()`: Close the database and release resources
@@ -128,6 +131,8 @@ server.start();
 - `POST /search`: Search for similar vectors
 - `GET /health`: Check server health
 - `POST /search/metadata`: Search with metadata filtering
+- `POST /search/relationships`: Extract relationships between vectors
+- `POST /search/communities`: Finds communities (clusters) of vectors based on a distance threshold across loaded partitions.
 
 ## Advanced Usage
 
