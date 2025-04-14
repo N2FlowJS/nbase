@@ -790,5 +790,45 @@ export class ClusteredVectorDB extends VectorDB {
     }
     return result;
   }
+  /**
+ * Extract relationships between vectors based on distance or custom criteria.
+ *
+ * @param threshold - The maximum distance between vectors to consider them related.
+ * @param metric - Distance metric to use (e.g., 'cosine', 'euclidean').
+ * @returns An array of relationships, where each relationship links two vector IDs and their distance.
+ */
+public extractRelationships(
+  threshold: number,
+  metric: DistanceMetric = this.distanceMetric
+): Array<{ vector1: number | string; vector2: number | string; distance: number }> {
+  const relationships: Array<{ vector1: number | string; vector2: number | string; distance: number }> = [];
+
+  // Iterate over all vectors
+  const vectorEntries = Array.from(this.memoryStorage.entries());
+  for (let i = 0; i < vectorEntries.length; i++) {
+    const [id1, vector1] = vectorEntries[i];
+
+    for (let j = i + 1; j < vectorEntries.length; j++) {
+      const [id2, vector2] = vectorEntries[j];
+
+      // Ensure dimension compatibility
+      if (vector1.length !== vector2.length) {
+        console.warn(`Dimension mismatch between vector ${id1} and ${id2}, skipping.`);
+        continue;
+      }
+
+      // Calculate distance
+      const distance = this._calculateDistance(vector1, vector2, metric);
+
+      // Check if the distance is within the threshold
+      if (distance <= threshold) {
+        relationships.push({ vector1: id1, vector2: id2, distance });
+      }
+    }
+  }
+
+  console.log(`[ClusteredVectorDB] Extracted ${relationships.length} relationships.`);
+  return relationships;
+}
 }
 // --- END OF FILE clustered_vector_db.ts ---
