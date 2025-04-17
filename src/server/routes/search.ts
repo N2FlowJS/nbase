@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { ApiContext, UnifiedSearchOptions } from '../../types';
+import { ApiContext, SearchResult, UnifiedSearchOptions } from '../../types';
 
 /**
  * Configures and returns the search-related routes for the API.
@@ -179,7 +179,7 @@ export function searchRoutes(context: ApiContext) {
         }
       });
 
-      const results = await database.findNearest(query, k, searchOptions);
+      const results: SearchResult[] = await database.findNearest(query, k, searchOptions);
 
       const duration = timer.stop('search').total;
 
