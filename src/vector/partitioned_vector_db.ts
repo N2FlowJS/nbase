@@ -6,6 +6,7 @@ import { existsSync, promises as fs, mkdirSync } from 'fs';
 import { LRUCache } from 'lru-cache'; // Using a robust LRU cache library
 import path from 'path';
 import HNSW from '../ann/hnsw'; // Assuming HNSW is a class for the clustering algorithm
+import { log } from '../utils/log';
 
 import defaultSystemConfiguration from '../config';
 import { BuildIndexHNSWOptions, ClusteredVectorDBOptions, DBStats, DistanceMetric, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData } from '../types'; // Adjust path as needed
@@ -151,7 +152,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
   constructor(options: PartitionedVectorDBOptions = {}) {
     super();
-    console.log('[PartitionedVectorDB] Initializing with options:', JSON.stringify(options, null, 2));
+    log('info', '[PartitionedVectorDB] Initializing with options:', JSON.stringify(options, null, 2));
 
     this.partitionsDir = options.partitionsDir || path.join(process.cwd(), 'database', 'partitions');
     this.partitionCapacity = options.partitionCapacity || DEFAULT_PARTITION_CAPACITY;
@@ -163,7 +164,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     this.autoLoadHNSW = options.autoLoadHNSW ?? true; // Default true
     this.runKMeansOnLoad = options.runKMeansOnLoad ?? defaultSystemConfiguration.indexing.runKMeansOnLoad; // Default false
 
-    console.log(`[PartitionedVectorDB] Configuration:
+    log('info', `[PartitionedVectorDB] Configuration:
       - partitionsDir: ${this.partitionsDir}
       - partitionCapacity: ${this.partitionCapacity}
       - maxActivePartitions: ${this.maxActivePartitions}
@@ -182,7 +183,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       max: this.maxActivePartitions,
       // Dispose function called when an item is removed (evicted)
       dispose: async (dbInstance, partitionId, reason) => {
-        console.log(`[PartitionedVectorDB] Disposing partition ${partitionId} from memory (Reason: ${reason}).`);
+        log('info', `[PartitionedVectorDB] Disposing partition ${partitionId} from memory (Reason: ${reason}).`);
         // Save is handled by the main save() method or explicitly before eviction if needed.
         // Close the DB instance to release resources.
         const hnswIndex = this.hnswIndices.get(partitionId);
@@ -190,7 +191,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           // Decide if HNSW index should be saved on eviction - maybe not, rely on explicit save?
           // await this._saveHNSWIndex(partitionId); // Optional: save index on eviction
           this.hnswIndices.delete(partitionId); // Remove from memory map
-          console.log(`[PartitionedVectorDB] Unloaded HNSW index for evicted partition ${partitionId}`);
+          log('info', `[PartitionedVectorDB] Unloaded HNSW index for evicted partition ${partitionId}`);
         }
         try {
           // Close partition DB (releases file handles, etc., but VectorDB.close might save if path set - review VectorDB.close)
@@ -198,7 +199,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           await dbInstance.close();
           this.emit('partition:unloaded', { id: partitionId });
         } catch (error: any) {
-          console.error(`[PartitionedVectorDB] Error closing partition ${partitionId} during dispose:`, error);
+          log('error', `[PartitionedVectorDB] Error closing partition ${partitionId} during dispose:`, error);
           this.emit('partition:error', {
             id: partitionId,
             error,
@@ -242,11 +243,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   private async _initialize(autoLoad: boolean): Promise<void> {
     if (this.isInitialized) return;
 
-    console.log(`[PartitionedVectorDB] Starting initialization (autoLoad: ${autoLoad})`);
+    log('info', `[PartitionedVectorDB] Starting initialization (autoLoad: ${autoLoad})`);
     try {
       // 1. Load all partition configurations first
       await this._loadPartitionConfigs();
-      console.log(`[PartitionedVectorDB] Loaded ${this.partitionConfigs.size} partition configurations.`);
+      log('info', `[PartitionedVectorDB] Loaded ${this.partitionConfigs.size} partition configurations.`);
 
       // 2. Determine which partitions to load initially (e.g., active one)
       const partitionsToLoad: string[] = [];
@@ -257,22 +258,22 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
       // 3. Load partitions and potentially their HNSW indices in parallel
       if (partitionsToLoad.length > 0) {
-        console.log(`[PartitionedVectorDB] Auto-loading initial partitions: [${partitionsToLoad.join(', ')}]`);
+        log('info', `[PartitionedVectorDB] Auto-loading initial partitions: [${partitionsToLoad.join(', ')}]`);
         await Promise.all(partitionsToLoad.map((id) => this._loadPartition(id, this.autoLoadHNSW)));
-        console.log(`[PartitionedVectorDB] Initial partitions loaded (${this.loadedPartitions.size} in memory, ${this.hnswIndices.size} HNSW indices loaded).`);
+        log('info', `[PartitionedVectorDB] Initial partitions loaded (${this.loadedPartitions.size} in memory, ${this.hnswIndices.size} HNSW indices loaded).`);
       } else {
-        console.log('[PartitionedVectorDB] No initial partitions specified for auto-loading.');
+        log('info', '[PartitionedVectorDB] No initial partitions specified for auto-loading.');
       }
 
       this.isInitialized = true;
-      console.log(`[PartitionedVectorDB] Initialization complete. Active: ${this.activePartitionId ?? 'None'}`);
+      log('info', `[PartitionedVectorDB] Initialization complete. Active: ${this.activePartitionId ?? 'None'}`);
       this.emit('db:initialized', {
         partitionCount: this.partitionConfigs.size,
         loadedCount: this.loadedPartitions.size,
         activeId: this.activePartitionId,
       });
     } catch (err: any) {
-      console.error(`[PartitionedVectorDB] FATAL: Error during initialization:`, err);
+      log('error', `[PartitionedVectorDB] FATAL: Error during initialization:`, err);
       this.emit('partition:error', { error: err, operation: 'initialize' });
       // Potentially set a flag indicating failed initialization?
       throw err; // Re-throw to signal failure
@@ -284,7 +285,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    * Finds the active partition or sets one if needed.
    */
   private async _loadPartitionConfigs(): Promise<void> {
-    console.log(`[PartitionedVectorDB] Loading partition configurations from ${this.partitionsDir}`);
+    log('info', `[PartitionedVectorDB] Loading partition configurations from ${this.partitionsDir}`);
     this.partitionConfigs.clear();
     let foundActiveId: string | null = null;
     const configsRead: PartitionConfig[] = [];
@@ -294,12 +295,12 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         withFileTypes: true,
       });
       const partitionDirs = entries.filter((e) => e.isDirectory());
-      console.log(`[PartitionedVectorDB] Found ${partitionDirs.length} potential partition directories.`);
+      log('info', `[PartitionedVectorDB] Found ${partitionDirs.length} potential partition directories.`);
 
       for (const dir of partitionDirs) {
         const configPath = path.join(this.partitionsDir, dir.name, `${dir.name}.config.json`);
         if (existsSync(configPath)) {
-          console.log(`[PartitionedVectorDB] Attempting to load config: ${configPath}`);
+          log('info', `[PartitionedVectorDB] Attempting to load config: ${configPath}`);
           try {
             const content = await fs.readFile(configPath, 'utf8');
             const config = JSON.parse(content) as PartitionConfig;
@@ -307,10 +308,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
             if (config.id && config.dbDirName === dir.name) {
               this.partitionConfigs.set(config.id, config);
               configsRead.push(config);
-              console.log(`[PartitionedVectorDB] Loaded config for partition: ${config.id} (Dir: ${dir.name}, Active: ${config.active}, Vectors: ${config.vectorCount})`);
+              log('info', `[PartitionedVectorDB] Loaded config for partition: ${config.id} (Dir: ${dir.name}, Active: ${config.active}, Vectors: ${config.vectorCount})`);
               if (config.active) {
                 if (foundActiveId && foundActiveId !== config.id) {
-                  console.warn(`[PartitionedVectorDB] Multiple active partitions defined! Found ${config.id} after ${foundActiveId}. Deactivating ${config.id}.`);
+                  log('warn', `[PartitionedVectorDB] Multiple active partitions defined! Found ${config.id} after ${foundActiveId}. Deactivating ${config.id}.`);
                   config.active = false;
                   // Schedule a save to fix the inconsistency?
                   this.scheduleSaveConfigs();
@@ -319,31 +320,31 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
                 }
               }
             } else {
-              console.warn(`[PartitionedVectorDB] Invalid partition config format or mismatched ID/DirName: ${configPath}`);
+              log('warn', `[PartitionedVectorDB] Invalid partition config format or mismatched ID/DirName: ${configPath}`);
             }
           } catch (e: any) {
-            console.warn(`[PartitionedVectorDB] Error reading/parsing partition config ${configPath}:`, e);
+            log('warn', `[PartitionedVectorDB] Error reading/parsing partition config ${configPath}:`, e);
           }
         } else {
-          console.log(`[PartitionedVectorDB] No config file found in directory: ${dir.name}`);
+          log('info', `[PartitionedVectorDB] No config file found in directory: ${dir.name}`);
         }
       }
 
       this.activePartitionId = foundActiveId;
-      console.log(`[PartitionedVectorDB] Active partition ID after scan: ${this.activePartitionId ?? 'None'}`);
+      log('info', `[PartitionedVectorDB] Active partition ID after scan: ${this.activePartitionId ?? 'None'}`);
 
       // If no active partition found, try to set one or create the first one
       if (!this.activePartitionId && this.partitionConfigs.size > 0) {
         // Find the first config (order might not be guaranteed, consider sorting by name/ID if needed)
         const firstConfig = this.partitionConfigs.values().next().value as PartitionConfig | undefined;
         if (firstConfig) {
-          console.log(`[PartitionedVectorDB] No active partition found, activating first available: ${firstConfig.id}`);
+          log('info', `[PartitionedVectorDB] No active partition found, activating first available: ${firstConfig.id}`);
           firstConfig.active = true;
           this.activePartitionId = firstConfig.id;
           this.scheduleSaveConfigs(); // Save the change
         }
       } else if (!this.activePartitionId && this.autoCreatePartitions) {
-        console.log('[PartitionedVectorDB] No partitions found, creating initial partition.');
+        log('info', '[PartitionedVectorDB] No partitions found, creating initial partition.');
         // Call createPartition but skip initialization check within it
         await this.createPartition(`p-${Date.now()}`, 'Initial Partition', {
           setActive: true,
@@ -359,10 +360,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       });
     } catch (error: any) {
       if (error.code === 'ENOENT' && !existsSync(this.partitionsDir)) {
-        console.warn(`[PartitionedVectorDB] Partitions directory ${this.partitionsDir} not found. It will be created when needed.`);
+        log('warn', `[PartitionedVectorDB] Partitions directory ${this.partitionsDir} not found. It will be created when needed.`);
         // If autoCreate is on, the first partition creation will handle it.
       } else {
-        console.error('[PartitionedVectorDB] Error listing or reading partition configs:', error);
+        log('error', '[PartitionedVectorDB] Error listing or reading partition configs:', error);
         throw error; // Propagate other errors
       }
     }
@@ -390,53 +391,53 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
     const config = this.partitionConfigs.get(partitionId);
     if (!config) {
-      console.warn(`[PartitionedVectorDB] Partition config not found for ID: ${partitionId}. Cannot load.`);
+      log('warn', `[PartitionedVectorDB] Partition config not found for ID: ${partitionId}. Cannot load.`);
       return null;
     }
 
     // Construct paths relative to the main partitions directory
     const partitionDirPath = path.join(this.partitionsDir, config.dbDirName);
     const dbBasePath = path.join(partitionDirPath, 'data');
-    console.log(`[PartitionedVectorDB] Loading partition ${partitionId} DB from base path: ${dbBasePath}`);
+    log('info', `[PartitionedVectorDB] Loading partition ${partitionId} DB from base path: ${dbBasePath}`);
 
     try {
       // Ensure the specific partition directory exists
       if (!existsSync(partitionDirPath)) {
         await fs.mkdir(partitionDirPath, { recursive: true });
-        console.log(`[PartitionedVectorDB] Created directory for partition ${partitionId}: ${partitionDirPath}`);
+        log('info', `[PartitionedVectorDB] Created directory for partition ${partitionId}: ${partitionDirPath}`);
       }
 
       // Also ensure the data directory exists for a new partition
       const dataDir = path.dirname(dbBasePath);
       if (!existsSync(dataDir)) {
         await fs.mkdir(dataDir, { recursive: true });
-        console.log(`[PartitionedVectorDB] Created data directory for partition ${partitionId}: ${dataDir}`);
+        log('info', `[PartitionedVectorDB] Created data directory for partition ${partitionId}: ${dataDir}`);
       }
 
       const metaFilePath = path.join(dbBasePath, 'meta.json');
       const vectorFilePath = path.join(dbBasePath, 'vec.bin');
       const clusterFilePath = path.join(dbBasePath, 'cluster.json');
       if (!existsSync(metaFilePath)) {
-        console.log('`[PartitionedVectorDB] Meta file not found, creating new one.`);');
+        log('info', '`[PartitionedVectorDB] Meta file not found, creating new one.`');
         await fs.writeFile(metaFilePath, JSON.stringify({}), 'utf8');
       }
       if (!existsSync(vectorFilePath)) {
-        console.log('`[PartitionedVectorDB] Vector file not found, creating new one.`);');
+        log('info', '`[PartitionedVectorDB] Vector file not found, creating new one.`');
         await fs.writeFile(vectorFilePath, Buffer.alloc(0));
       }
       if (!existsSync(clusterFilePath)) {
-        console.log('`[PartitionedVectorDB] Vector file not found, creating new one.`);');
+        log('info', '`[PartitionedVectorDB] Vector file not found, creating new one.`');
         await fs.writeFile(clusterFilePath, JSON.stringify({}), 'utf8');
       }
       const hnswIndexDir = path.join(partitionDirPath, HNSW_INDEX_DIR_NAME);
       const hnswIndexPath = path.join(hnswIndexDir, HNSW_INDEX_FILE_NAME);
       if (!existsSync(hnswIndexDir)) {
-        console.log(`[PartitionedVectorDB] HNSW index directory not found, creating new one.`);
+        log('info', `[PartitionedVectorDB] HNSW index directory not found, creating new one.`);
 
         await fs.mkdir(hnswIndexDir, { recursive: true });
       }
       if (!existsSync(hnswIndexPath)) {
-        console.log(`[PartitionedVectorDB] HNSW index file not found, creating new one.`);
+        log('info', `[PartitionedVectorDB] HNSW index file not found, creating new one.`);
 
         await fs.writeFile(hnswIndexPath, JSON.stringify(defaultSystemConfiguration.indexing.hnsw), 'utf8');
       }
@@ -457,15 +458,15 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       await vectorDB.load(); // Wait for initialization
       // Successfully loaded the DB, add to LRU cache
       this.loadedPartitions.set(partitionId, vectorDB);
-      console.log(`[PartitionedVectorDB] Partition DB ${partitionId} loaded. Vector count: ${vectorDB.getVectorCount()}`);
+      log('info', `[PartitionedVectorDB] Partition DB ${partitionId} loaded. Vector count: ${vectorDB.getVectorCount()}`);
 
       // --- Optionally Load HNSW Index ---
-      console.log(`[PartitionedVectorDB] Loading HNSW index for partition ${partitionId}`);
+      log('info', `[PartitionedVectorDB] Loading HNSW index for partition ${partitionId}`);
 
       if (loadHNSW) {
         await this._loadHNSWIndex(partitionId, vectorDB);
       }
-      console.log(`[PartitionedVectorDB] HNSW index loaded for partition ${partitionId}`);
+      log('info', `[PartitionedVectorDB] HNSW index loaded for partition ${partitionId}`);
 
       this.emit('partition:loaded', {
         id: partitionId,
@@ -475,19 +476,19 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       });
 
       // --- Sync vector count ---
-      console.log(`[PartitionedVectorDB] Syncing vector count for partition ${partitionId}`);
+      log('info', `[PartitionedVectorDB] Syncing vector count for partition ${partitionId}`);
       const loadedCount = vectorDB.getVectorCount();
-      console.log(`[PartitionedVectorDB] Loaded vector count: ${loadedCount}`);
+      log('info', `[PartitionedVectorDB] Loaded vector count: ${loadedCount}`);
 
       if (config.vectorCount !== loadedCount) {
-        console.warn(`[PartitionedVectorDB] Partition ${partitionId}: Config count (${config.vectorCount}) differs from loaded DB count (${loadedCount}). Updating config.`);
+        log('warn', `[PartitionedVectorDB] Partition ${partitionId}: Config count (${config.vectorCount}) differs from loaded DB count (${loadedCount}). Updating config.`);
         config.vectorCount = loadedCount;
         this.scheduleSaveConfigs(); // Save updated count later
       }
 
       return vectorDB;
     } catch (error: any) {
-      console.error(`[PartitionedVectorDB] Error loading partition DB ${partitionId} from ${dbBasePath}:`, error);
+      log('error', `[PartitionedVectorDB] Error loading partition DB ${partitionId} from ${dbBasePath}:`, error);
       // Clean up potentially partially loaded state? Remove from cache if added?
       this.loadedPartitions.delete(partitionId);
       this.hnswIndices.delete(partitionId); // Ensure HNSW is also removed if DB load failed
@@ -502,17 +503,17 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
   /** Loads the HNSW index for a given partition ID if it exists. */
   private async _loadHNSWIndex(partitionId: string, dbInstance: ClusteredVectorDB): Promise<boolean> {
-    console.log(`[PartitionedVectorDB] Loading HNSW index for partition ${partitionId}`);
+    log('info', `[PartitionedVectorDB] Loading HNSW index for partition ${partitionId}`);
 
     if (this.hnswIndices.has(partitionId)) {
-      console.log(`[PartitionedVectorDB] HNSW index for ${partitionId} already loaded.`);
+      log('info', `[PartitionedVectorDB] HNSW index for ${partitionId} already loaded.`);
       return true; // Already loaded
     }
     if (this.isClosing) return false;
 
     const config = this.partitionConfigs.get(partitionId);
     if (!config) {
-      console.warn(`[PartitionedVectorDB] Cannot load HNSW index: Config not found for ${partitionId}`);
+      log('warn', `[PartitionedVectorDB] Cannot load HNSW index: Config not found for ${partitionId}`);
       return false;
     }
 
@@ -520,11 +521,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     const indexPath = path.join(indexDir, HNSW_INDEX_FILE_NAME);
 
     if (existsSync(indexPath)) {
-      console.log(`[PartitionedVectorDB] Loading HNSW index for partition ${partitionId} from ${indexPath}`);
+      log('info', `[PartitionedVectorDB] Loading HNSW index for partition ${partitionId} from ${indexPath}`);
       try {
         const hnswIndex = await HNSW.loadIndex(indexPath, dbInstance);
         this.hnswIndices.set(partitionId, hnswIndex);
-        console.log(`[PartitionedVectorDB] Successfully loaded HNSW index for ${partitionId}. Nodes: ${hnswIndex.getNodeCount()}`);
+        log('info', `[PartitionedVectorDB] Successfully loaded HNSW index for ${partitionId}. Nodes: ${hnswIndex.getNodeCount()}`);
         this.emit('partition:indexLoaded', {
           id: partitionId,
           indexType: 'hnsw',
@@ -532,7 +533,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         });
         return true;
       } catch (error: any) {
-        console.error(`[PartitionedVectorDB] Error loading HNSW index for partition ${partitionId} from ${indexPath}:`, error.message || error);
+        log('error', `[PartitionedVectorDB] Error loading HNSW index for partition ${partitionId} from ${indexPath}:`, error.message || error);
         this.emit('partition:error', {
           id: partitionId,
           error,
@@ -541,35 +542,35 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         return false;
       }
     } else {
-      console.log(`[PartitionedVectorDB] HNSW index file not found for partition ${partitionId} at ${indexPath}. Index not loaded.`);
+      log('info', `[PartitionedVectorDB] HNSW index file not found for partition ${partitionId} at ${indexPath}. Index not loaded.`);
       return false; // Index file doesn't exist
     }
   }
 
   /** Saves the HNSW index for a given partition ID. */
   private async _saveHNSWIndex(partitionId: string): Promise<boolean> {
-    console.log(`[PartitionedVectorDB] Saving HNSW index for partition ${partitionId}`);
+    log('info', `[PartitionedVectorDB] Saving HNSW index for partition ${partitionId}`);
 
     const hnswIndex = this.hnswIndices.get(partitionId);
     const config = this.partitionConfigs.get(partitionId);
 
     if (!hnswIndex) {
-      console.log(`[PartitionedVectorDB] No HNSW index instance found in memory for partition ${partitionId}. Skipping save.`);
+      log('info', `[PartitionedVectorDB] No HNSW index instance found in memory for partition ${partitionId}. Skipping save.`);
       return false;
     }
     if (!config) {
-      console.warn(`[PartitionedVectorDB] Cannot save HNSW index: Config not found for ${partitionId}`);
+      log('warn', `[PartitionedVectorDB] Cannot save HNSW index: Config not found for ${partitionId}`);
       return false;
     }
     if (this.isClosing) {
-      console.warn(`[PartitionedVectorDB] Skipping HNSW index save for ${partitionId} during close operation (already handled or closing).`);
+      log('warn', `[PartitionedVectorDB] Skipping HNSW index save for ${partitionId} during close operation (already handled or closing).`);
       return false;
     }
 
     const indexDir = path.join(this.partitionsDir, config.dbDirName, HNSW_INDEX_DIR_NAME);
     const indexPath = path.join(indexDir, HNSW_INDEX_FILE_NAME);
 
-    console.log(`[PartitionedVectorDB] Saving HNSW index for partition ${partitionId} to ${indexPath}`);
+    log('info', `[PartitionedVectorDB] Saving HNSW index for partition ${partitionId} to ${indexPath}`);
     try {
       // Ensure directory exists
       if (!existsSync(indexDir)) {
@@ -577,7 +578,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       }
 
       await hnswIndex.saveIndex(indexPath); // HNSW handles the actual saving
-      console.log(`[PartitionedVectorDB] Successfully saved HNSW index for ${partitionId}.`);
+      log('info', `[PartitionedVectorDB] Successfully saved HNSW index for ${partitionId}.`);
       this.emit('partition:indexSaved', {
         id: partitionId,
         indexType: 'hnsw',
@@ -585,7 +586,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       });
       return true;
     } catch (error: any) {
-      console.error(`[PartitionedVectorDB] Error saving HNSW index for partition ${partitionId} to ${indexPath}:`, error);
+      log('error', `[PartitionedVectorDB] Error saving HNSW index for partition ${partitionId} to ${indexPath}:`, error);
       this.emit('partition:error', {
         id: partitionId,
         error,
@@ -600,7 +601,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    * Get a partition instance by ID. Loads it (and its index if configured) if necessary.
    */
   async getPartition(id: string): Promise<ClusteredVectorDB | null> {
-    console.log(`[PartitionedVectorDB] Getting partition ${id}...`);
+    log('info', `[PartitionedVectorDB] Getting partition ${id}...`);
 
     await this._ensureInitialized();
     // _loadPartition handles cache checking, loading DB, and potentially HNSW index
@@ -611,11 +612,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    * Get the currently active partition instance. Loads it if necessary.
    */
   async getActivePartition(): Promise<ClusteredVectorDB | null> {
-    console.log(`[PartitionedVectorDB] Getting active partition...`);
+    log('info', `[PartitionedVectorDB] Getting active partition...`);
 
     await this._ensureInitialized();
     if (!this.activePartitionId) {
-      console.warn('[PartitionedVectorDB] No active partition is set.');
+      log('warn', '[PartitionedVectorDB] No active partition is set.');
       return null;
     }
     return this._loadPartition(this.activePartitionId); // Loads DB and potentially HNSW
@@ -631,22 +632,22 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   async save(): Promise<void> {
     await this._ensureInitialized();
     if (this.isClosing) {
-      console.warn('[PartitionedVectorDB] Attempted to save while closing.');
+      log('warn', '[PartitionedVectorDB] Attempted to save while closing.');
       return;
     }
 
-    console.log('[PartitionedVectorDB] Starting comprehensive save...');
+    log('info', '[PartitionedVectorDB] Starting comprehensive save...');
 
     // 1. Save all configurations (ensures counts, active status, etc., are up-to-date)
     // Use await on the debounced save to ensure it finishes before proceeding
     await this.savePartitionConfigs();
-    console.log(`[PartitionedVectorDB] Partition configurations saved. Active partition: ${this.activePartitionId}`);
+    log('info', `[PartitionedVectorDB] Partition configurations saved. Active partition: ${this.activePartitionId}`);
     // Ensure the save promise is resolved before proceeding
     if (this.saveConfigPromise) await this.saveConfigPromise; // Ensure pending config save finishes
 
     // 2. Save data for all *loaded* partitions in parallel
     const loadedPartitionIds = Array.from(this.loadedPartitions.keys());
-    console.log(`[PartitionedVectorDB] Saving data for ${loadedPartitionIds.length} loaded partitions...`);
+    log('info', `[PartitionedVectorDB] Saving data for ${loadedPartitionIds.length} loaded partitions...`);
     const partitionSavePromises = loadedPartitionIds.map(async (id) => {
       const partition = this.loadedPartitions.peek(id); // Use peek to avoid altering LRU order
       if (partition) {
@@ -654,14 +655,14 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           // Check if the underlying DB instance exists and has a save method
           if (typeof partition.save === 'function') {
             await partition.save(); // Call the save method of ClusteredVectorDB/VectorDB
-            console.log(`[PartitionedVectorDB] Saved data for partition ${id}`);
+            log('info', `[PartitionedVectorDB] Saved data for partition ${id}`);
             return true;
           } else {
-            console.warn(`[PartitionedVectorDB] Partition ${id} instance cannot be saved (missing save method or wrong type).`);
+            log('warn', `[PartitionedVectorDB] Partition ${id} instance cannot be saved (missing save method or wrong type).`);
             return false;
           }
         } catch (error) {
-          console.error(`[PartitionedVectorDB] Error saving data for partition ${id}:`, error);
+          log('error', `[PartitionedVectorDB] Error saving data for partition ${id}:`, error);
           this.emit('partition:error', {
             id,
             error,
@@ -675,7 +676,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
     // 3. Save all *loaded* HNSW indices in parallel
     const loadedHnswIds = Array.from(this.hnswIndices.keys());
-    console.log(`[PartitionedVectorDB] Saving ${loadedHnswIds.length} loaded HNSW indices...`);
+    log('info', `[PartitionedVectorDB] Saving ${loadedHnswIds.length} loaded HNSW indices...`);
     const hnswSavePromises = loadedHnswIds.map((id) => this._saveHNSWIndex(id));
 
     // Wait for all saves to complete
@@ -684,7 +685,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     const successfulPartitions = partitionResults.filter((r) => r).length;
     const successfulHnsw = hnswResults.filter((r) => r).length;
 
-    console.log(`[PartitionedVectorDB] Comprehensive save complete. Partitions saved: ${successfulPartitions}/${loadedPartitionIds.length}. HNSW indices saved: ${successfulHnsw}/${loadedHnswIds.length}.`);
+    log('info', `[PartitionedVectorDB] Comprehensive save complete. Partitions saved: ${successfulPartitions}/${loadedPartitionIds.length}. HNSW indices saved: ${successfulHnsw}/${loadedHnswIds.length}.`);
     this.emit('db:saved', {
       partitionsSaved: successfulPartitions,
       indicesSaved: successfulHnsw,
@@ -697,7 +698,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    */
   async load(): Promise<void> {
     if (this.isInitialized && !this.isClosing) {
-      console.warn('[PartitionedVectorDB] Database already initialized. Call close() before loading again.');
+      log('warn', '[PartitionedVectorDB] Database already initialized. Call close() before loading again.');
       return;
     }
     this.isClosing = false; // Reset closing flag if re-loading
@@ -708,11 +709,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     this.partitionConfigs.clear();
     this.activePartitionId = null;
 
-    console.log('[PartitionedVectorDB] Starting manual load process...');
+    log('info', '[PartitionedVectorDB] Starting manual load process...');
     // Re-run the initialization logic, including loading configs and initial partitions/indices
     this.initializationPromise = this._initialize(this.autoLoadHNSW); // Use constructor options
     await this.initializationPromise;
-    console.log('[PartitionedVectorDB] Manual load process finished.');
+    log('info', '[PartitionedVectorDB] Manual load process finished.');
     this.emit('db:loaded', {
       partitionCount: this.partitionConfigs.size,
       loadedCount: this.loadedPartitions.size,
@@ -728,21 +729,21 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     await this._ensureInitialized(options?.force);
 
     const buildSingleIndex = async (id: string): Promise<void> => {
-      console.log(`[PartitionedVectorDB] Building HNSW index for partition ${id}...`);
+      log('info', `[PartitionedVectorDB] Building HNSW index for partition ${id}...`);
       const partition = await this.getPartition(id); // Ensures partition DB is loaded
       if (!partition) {
-        console.error(`[PartitionedVectorDB] Cannot build HNSW index: Partition ${id} not found or could not be loaded.`);
+        log('error', `[PartitionedVectorDB] Cannot build HNSW index: Partition ${id} not found or could not be loaded.`);
         return;
       }
 
       let hnswIndex = this.hnswIndices.get(id);
       if (!hnswIndex) {
-        console.log(`[PartitionedVectorDB] Creating new HNSW index instance for partition ${id} before building.`);
+        log('info', `[PartitionedVectorDB] Creating new HNSW index instance for partition ${id} before building.`);
         hnswIndex = new HNSW(partition); // Pass the loaded partition DB
         this.hnswIndices.set(id, hnswIndex);
       }
 
-      console.log(`[PartitionedVectorDB] Building HNSW index for partition ${id}...`);
+      log('info', `[PartitionedVectorDB] Building HNSW index for partition ${id}...`);
       try {
         await hnswIndex.buildIndex({
           ...options,
@@ -756,10 +757,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
             });
           },
         });
-        console.log(`[PartitionedVectorDB] HNSW index built successfully for partition ${id}.`);
+        log('info', `[PartitionedVectorDB] HNSW index built successfully for partition ${id}.`);
         this.emit('partition:indexed', { id, indexType: 'hnsw' });
       } catch (error: any) {
-        console.error(`[PartitionedVectorDB] Error building HNSW index for partition ${id}:`, error);
+        log('error', `[PartitionedVectorDB] Error building HNSW index for partition ${id}:`, error);
         this.emit('partition:error', {
           id,
           error,
@@ -773,9 +774,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     } else {
       // Build for all currently *loaded* partitions in parallel
       const partitionIds = Array.from(this.loadedPartitions.keys());
-      console.log(`[PartitionedVectorDB] Building HNSW indices for ${partitionIds.length} loaded partitions in parallel...`);
+      log('info', `[PartitionedVectorDB] Building HNSW indices for ${partitionIds.length} loaded partitions in parallel...`);
       await Promise.all(partitionIds.map((id) => buildSingleIndex(id)));
-      console.log(`[PartitionedVectorDB] Finished building HNSW indices for loaded partitions.`);
+      log('info', `[PartitionedVectorDB] Finished building HNSW indices for loaded partitions.`);
     }
   }
 
@@ -804,11 +805,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       : Array.from(this.loadedPartitions.keys()); // Default to currently loaded
 
     if (targetPartitionIds.length === 0) {
-      console.warn('[PartitionedVectorDB] No valid partitions specified or loaded to search with HNSW.');
+      log('warn', '[PartitionedVectorDB] No valid partitions specified or loaded to search with HNSW.');
       return [];
     }
 
-    console.log(`[PartitionedVectorDB] Performing HNSW search on partitions: [${targetPartitionIds.join(', ')}]`);
+    log('info', `[PartitionedVectorDB] Performing HNSW search on partitions: [${targetPartitionIds.join(', ')}]`);
 
     // Perform search in parallel
     const searchResultsNested = await Promise.all(
@@ -817,7 +818,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           // 1. Ensure Partition DB is loaded
           const partition = await this._loadPartition(partitionId, false); // Load DB only first
           if (!partition) {
-            console.warn(`[PartitionedVectorDB] Skipping HNSW search on partition ${partitionId}: Could not load DB.`);
+            log('warn', `[PartitionedVectorDB] Skipping HNSW search on partition ${partitionId}: Could not load DB.`);
             return [];
           }
 
@@ -829,11 +830,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
               hnswIndex = this.hnswIndices.get(partitionId);
             } else {
               // Optional: Build index on the fly if not found? Risky for performance.
-              // console.log(`[PartitionedVectorDB] HNSW index for ${partitionId} not found. Building on-the-fly for search.`);
+              // log('info', `[PartitionedVectorDB] HNSW index for ${partitionId} not found. Building on-the-fly for search.`);
               // hnswIndex = new HNSW(partition);
               // await hnswIndex.buildIndex(); // Consider build options
               // this.hnswIndices.set(partitionId, hnswIndex);
-              console.warn(`[PartitionedVectorDB] Skipping HNSW search on partition ${partitionId}: Index not loaded and not found.`);
+              log('warn', `[PartitionedVectorDB] Skipping HNSW search on partition ${partitionId}: Index not loaded and not found.`);
               return []; // Skip if index cannot be loaded/created
             }
           }
@@ -848,7 +849,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
             return []; // Should not happen if logic above is correct
           }
         } catch (error) {
-          console.error(`[PartitionedVectorDB] Error during HNSW search for partition ${partitionId}:`, error);
+          log('error', `[PartitionedVectorDB] Error during HNSW search for partition ${partitionId}:`, error);
           this.emit('partition:error', {
             id: partitionId,
             error,
@@ -874,13 +875,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     const idsToSave = partitionId ? [partitionId] : Array.from(this.hnswIndices.keys()); // Save only loaded indices
 
     if (idsToSave.length === 0) {
-      console.log('[PartitionedVectorDB] No HNSW indices loaded or specified to save.');
+      log('info', '[PartitionedVectorDB] No HNSW indices loaded or specified to save.');
       return;
     }
 
-    console.log(`[PartitionedVectorDB] Saving HNSW indices for partitions: [${idsToSave.join(', ')}]`);
+    log('info', `[PartitionedVectorDB] Saving HNSW indices for partitions: [${idsToSave.join(', ')}]`);
     await Promise.all(idsToSave.map((id) => this._saveHNSWIndex(id)));
-    console.log('[PartitionedVectorDB] Finished saving HNSW indices.');
+    log('info', '[PartitionedVectorDB] Finished saving HNSW indices.');
   }
 
   /**
@@ -893,12 +894,12 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     const loadIndexForPartition = async (id: string): Promise<void> => {
       const partition = this.loadedPartitions.peek(id); // Check if DB is loaded without changing LRU order
       if (!partition) {
-        console.warn(`[PartitionedVectorDB] Cannot load HNSW index for ${id}: Partition DB not loaded.`);
+        log('warn', `[PartitionedVectorDB] Cannot load HNSW index for ${id}: Partition DB not loaded.`);
         // Optionally load the DB first: await this._loadPartition(id, false);
         return;
       }
       if (this.hnswIndices.has(id)) {
-        console.log(`[PartitionedVectorDB] HNSW index for ${id} is already loaded.`);
+        log('info', `[PartitionedVectorDB] HNSW index for ${id} is already loaded.`);
         return;
       }
       await this._loadHNSWIndex(id, partition); // Attempt to load
@@ -907,13 +908,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     const idsToLoad = partitionId ? [partitionId] : Array.from(this.loadedPartitions.keys()); // Try loading for all loaded partitions
 
     if (idsToLoad.length === 0) {
-      console.log('[PartitionedVectorDB] No partitions loaded or specified to load HNSW indices for.');
+      log('info', '[PartitionedVectorDB] No partitions loaded or specified to load HNSW indices for.');
       return;
     }
 
-    console.log(`[PartitionedVectorDB] Loading HNSW indices for partitions: [${idsToLoad.join(', ')}]`);
+    log('info', `[PartitionedVectorDB] Loading HNSW indices for partitions: [${idsToLoad.join(', ')}]`);
     await Promise.all(idsToLoad.map((id) => loadIndexForPartition(id)));
-    console.log(`[PartitionedVectorDB] Finished loading HNSW indices. Indices in memory: ${this.hnswIndices.size}`);
+    log('info', `[PartitionedVectorDB] Finished loading HNSW indices. Indices in memory: ${this.hnswIndices.size}`);
   }
 
   /** Get HNSW stats */
@@ -928,14 +929,14 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    */
   async close(): Promise<void> {
     if (this.isInitialized) {
-      console.warn('[PartitionedVectorDB] Close operation called before initialization.');
+      log('warn', '[PartitionedVectorDB] Close operation called before initialization.');
       return;
     }
     if (this.isClosing) {
-      console.warn('[PartitionedVectorDB] Close operation already in progress.');
+      log('warn', '[PartitionedVectorDB] Close operation already in progress.');
       return;
     }
-    console.log('[PartitionedVectorDB] Closing database...');
+    log('info', '[PartitionedVectorDB] Closing database...');
     this.isClosing = true;
 
     // 1. Ensure initialization finished (to avoid race conditions)
@@ -943,14 +944,14 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     try {
       await this.initializationPromise;
     } catch (initError) {
-      console.warn('[PartitionedVectorDB] Initialization failed, proceeding with close anyway:', initError);
+      log('warn', '[PartitionedVectorDB] Initialization failed, proceeding with close anyway:', initError);
     }
 
     // 2. Perform final save of everything loaded
     try {
       await this.save(); // Comprehensive save of configs, partitions, indices
     } catch (saveError) {
-      console.error('[PartitionedVectorDB] Error during final save operation:', saveError);
+      log('error', '[PartitionedVectorDB] Error during final save operation:', saveError);
       // Continue closing even if save fails
     }
 
@@ -970,7 +971,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     // Keep isClosing = true
 
     this.emit('db:close', undefined);
-    console.log('[PartitionedVectorDB] Database closed.');
+    log('info', '[PartitionedVectorDB] Database closed.');
   }
 
   // --- Configuration Saving ---
@@ -982,15 +983,15 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     if (!this.saveConfigPromise) {
       this.saveConfigPromise = (async () => {
         // await new Promise((resolve) => setTimeout(resolve, 500)); // Simple debounce delay
-        console.log('[PartitionedVectorDB] Debounced saving of partition configurations...');
+        log('info', '[PartitionedVectorDB] Debounced saving of partition configurations...');
         const configsToSave = Array.from(this.partitionConfigs.values());
         try {
           const savePromises = configsToSave.map((config) => this._saveSinglePartitionConfig(config));
           await Promise.all(savePromises);
-          console.log(`[PartitionedVectorDB] Saved ${configsToSave.length} partition configurations.`);
+          log('info', `[PartitionedVectorDB] Saved ${configsToSave.length} partition configurations.`);
           this.emit('config:saved', undefined);
         } catch (error: any) {
-          console.error('[PartitionedVectorDB] Error saving one or more partition configs:', error);
+          log('error', '[PartitionedVectorDB] Error saving one or more partition configs:', error);
           // Emit specific error?
         } finally {
           this.saveConfigPromise = null; // Release lock
@@ -1021,7 +1022,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       }
       await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
     } catch (error: any) {
-      console.error(`[PartitionedVectorDB] Error saving config ${config.id} to ${configPath}:`, error);
+      log('error', `[PartitionedVectorDB] Error saving config ${config.id} to ${configPath}:`, error);
       this.emit('partition:error', {
         id: config.id,
         error,
@@ -1060,7 +1061,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     const partitionDataDir = path.join(this.partitionsDir, dirName);
     const partitionDataDirData = path.join(partitionDataDir, 'data');
 
-    console.log(`[PartitionedVectorDB] Creating new partition '${name}' (ID: ${id}) in directory: ${partitionDataDir}`);
+    log('info', `[PartitionedVectorDB] Creating new partition '${name}' (ID: ${id}) in directory: ${partitionDataDir}`);
 
     try {
       if (!existsSync(partitionDataDir)) {
@@ -1070,7 +1071,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         await fs.mkdir(partitionDataDirData, { recursive: true });
       }
     } catch (error: any) {
-      console.error(`[PartitionedVectorDB] Failed to create directory for new partition ${id}: ${partitionDataDir}`, error);
+      log('error', `[PartitionedVectorDB] Failed to create directory for new partition ${id}: ${partitionDataDir}`, error);
       this.emit('partition:error', {
         id,
         error,
@@ -1100,7 +1101,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     } catch (saveError) {
       // If saving config fails, rollback the creation?
       this.partitionConfigs.delete(id); // Remove from memory
-      console.error(`[PartitionedVectorDB] Failed to save config for new partition ${id}. Rolling back creation.`);
+      log('error', `[PartitionedVectorDB] Failed to save config for new partition ${id}. Rolling back creation.`);
       // Optionally try to delete the created directory?
       throw saveError;
     }
@@ -1130,40 +1131,40 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       }
       await fs.writeFile(hnswIndexPath, JSON.stringify(defaultSystemConfiguration.indexing.hnsw), 'utf8');
     } catch (error) {
-      console.error(`[PartitionedVectorDB] Failed to initialize files for new partition ${id}:`, error);
+      log('error', `[PartitionedVectorDB] Failed to initialize files for new partition ${id}:`, error);
       throw error;
     }
 
     // Load the new partition into memory (will trigger LRU if needed)
     // Don't load HNSW index yet, it doesn't exist
-    console.log(`[PartitionedVectorDB] Loading new partition ${id}...`);
+    log('info', `[PartitionedVectorDB] Loading new partition ${id}...`);
 
     const loadedDB = await this._loadPartition(id, false);
-    console.log(`[PartitionedVectorDB] Loaded partition ${id}`);
+    log('info', `[PartitionedVectorDB] Loaded partition ${id}`);
 
     if (!loadedDB) {
       // If loading fails immediately after creation, this is problematic
       this.partitionConfigs.delete(id); // Remove from memory
       // Config file might still exist, manual cleanup needed?
-      console.error(`[PartitionedVectorDB] Failed to load partition ${id} immediately after creation. Config saved but DB unusable.`);
+      log('error', `[PartitionedVectorDB] Failed to load partition ${id} immediately after creation. Config saved but DB unusable.`);
       throw new Error(`Failed to load newly created partition ${id}.`);
     }
 
     // Handle activation
     if (options.setActive === true || (!this.activePartitionId && this.partitionConfigs.size === 1)) {
-      console.log(`[PartitionedVectorDB] Activating new partition ${id}...`);
+      log('info', `[PartitionedVectorDB] Activating new partition ${id}...`);
 
       // Activate if requested OR if it's the very first partition
       await this.setActivePartition(id, true); // This saves config changes
     }
-    console.log(`[PartitionedVectorDB] Partition ${id} created and loaded.`);
+    log('info', `[PartitionedVectorDB] Partition ${id} created and loaded.`);
 
     this.emit('partition:created', {
       id,
       name,
       active: this.partitionConfigs.get(id)?.active ?? false, // Get current active state
     });
-    console.log(`[PartitionedVectorDB] Successfully created and loaded partition: ${id}`);
+    log('info', `[PartitionedVectorDB] Successfully created and loaded partition: ${id}`);
     return id;
   }
 
@@ -1207,22 +1208,22 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     }
 
     this.emit('partition:activated', { id });
-    console.log(`[PartitionedVectorDB] Activated partition: ${id}`);
+    log('info', `[PartitionedVectorDB] Activated partition: ${id}`);
   }
 
   /** Ensures active partition has capacity, creates/activates new one if needed. */
   private async _ensureActivePartitionHasCapacity(neededCapacity: number = 1): Promise<ClusteredVectorDB> {
     // Rely on getActivePartition to load the current active one if needed
-    console.log(`[PartitionedVectorDB] Ensuring active partition has capacity...`);
+    log('info', `[PartitionedVectorDB] Ensuring active partition has capacity...`);
     let activePartition = await this.getActivePartition(); // Loads/returns active partition
-    console.log(`[PartitionedVectorDB] Active partition: ${this.activePartitionId}`);
+    log('info', `[PartitionedVectorDB] Active partition: ${this.activePartitionId}`);
 
     let currentActiveId = this.activePartitionId; // Store current ID
 
     // Handle case where there is no active partition initially or after creation fails
     if (!activePartition || !currentActiveId) {
       if (this.autoCreatePartitions) {
-        console.warn('[PartitionedVectorDB] No usable active partition found. Attempting to create a new one.');
+        log('warn', '[PartitionedVectorDB] No usable active partition found. Attempting to create a new one.');
         // Ensure uniqueness and avoid collisions during rapid calls
         const newId = `p-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
         await this.createPartition(newId, `Auto Partition ${this.partitionConfigs.size + 1}`, { setActive: true });
@@ -1244,7 +1245,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     // Check capacity against the config's count
     if (activeConfig.vectorCount + neededCapacity > this.partitionCapacity) {
       if (this.autoCreatePartitions) {
-        console.log(`[PartitionedVectorDB] Active partition ${currentActiveId} nearing capacity (${activeConfig.vectorCount}/${this.partitionCapacity}). Creating and activating new partition.`);
+        log('info', `[PartitionedVectorDB] Active partition ${currentActiveId} nearing capacity (${activeConfig.vectorCount}/${this.partitionCapacity}). Creating and activating new partition.`);
         const newId = `p-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
         await this.createPartition(newId, `Auto Partition ${this.partitionConfigs.size + 1}`, { setActive: true });
         // Re-fetch the *new* active partition
@@ -1252,7 +1253,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         if (!activePartition) {
           throw new Error(`[PartitionedVectorDB] Failed to load the newly created active partition ${this.activePartitionId}.`);
         }
-        console.log(`[PartitionedVectorDB] Switched to new active partition: ${this.activePartitionId}`);
+        log('info', `[PartitionedVectorDB] Switched to new active partition: ${this.activePartitionId}`);
       } else {
         throw new Error(`[PartitionedVectorDB] Active partition ${currentActiveId} has insufficient capacity (${activeConfig.vectorCount}/${this.partitionCapacity}) and autoCreatePartitions is disabled.`);
       }
@@ -1282,9 +1283,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     if (hnswIndex && addedVector) {
       try {
         hnswIndex.addPoint(addedVector, vectorId); // Assumes HNSW has addPoint method
-        console.log(`[PartitionedVectorDB] Added point ${vectorId} to HNSW index for partition ${partitionId}`);
+        log('info', `[PartitionedVectorDB] Added point ${vectorId} to HNSW index for partition ${partitionId}`);
       } catch (error) {
-        console.error(`[PartitionedVectorDB] Error adding point ${vectorId} to HNSW index for ${partitionId}:`, error);
+        log('error', `[PartitionedVectorDB] Error adding point ${vectorId} to HNSW index for ${partitionId}:`, error);
         // Should we invalidate the index? Mark for rebuild?
         this.emit('partition:error', {
           id: partitionId,
@@ -1303,7 +1304,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     await this._ensureInitialized();
     if (vectors.length === 0) return { count: 0, partitionIds: [] };
 
-    console.log(`[PartitionedVectorDB] Starting bulk add of ${vectors.length} vectors...`);
+    log('info', `[PartitionedVectorDB] Starting bulk add of ${vectors.length} vectors...`);
 
     let totalAddedCount = 0;
     const partitionIdsUsed = new Set<string>();
@@ -1327,20 +1328,20 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         } else {
           // If autoCreate is ON, ensureCapacity should have switched partitions.
           // This case implies a potential logic error or race condition. Let's log and retry the loop.
-          console.warn(`[PartitionedVectorDB] Bulk add loop detected zero batch size for partition ${partitionId} despite capacity check. Retrying capacity check.`);
+          log('warn', `[PartitionedVectorDB] Bulk add loop detected zero batch size for partition ${partitionId} despite capacity check. Retrying capacity check.`);
           continue; // Retry the loop, hoping ensureCapacity fixes it
         }
       }
 
       const batchToAdd = remainingVectors.slice(0, batchSize);
-      console.log(`[PartitionedVectorDB] Adding batch of ${batchToAdd.length} vectors to partition ${partitionId} (Capacity: ${config.vectorCount}/${this.partitionCapacity})`);
+      log('info', `[PartitionedVectorDB] Adding batch of ${batchToAdd.length} vectors to partition ${partitionId} (Capacity: ${config.vectorCount}/${this.partitionCapacity})`);
 
       const countInBatch = partition.bulkAdd(batchToAdd); // Underlying bulkAdd
 
       // --- Update HNSW Index incrementally for the batch ---
       const hnswIndex = this.hnswIndices.get(partitionId);
       if (hnswIndex && countInBatch > 0) {
-        console.log(`[PartitionedVectorDB] Incrementally updating HNSW index for partition ${partitionId} with ${countInBatch} vectors...`);
+        log('info', `[PartitionedVectorDB] Incrementally updating HNSW index for partition ${partitionId} with ${countInBatch} vectors...`);
         const vectorsForIndex: { vector: Float32Array; id: number | string }[] = [];
         // We need the actual IDs assigned by bulkAdd if they weren't provided
         // This requires bulkAdd to return the added items or query them back - potentially inefficient.
@@ -1353,7 +1354,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           if (vectorData && actualId !== null) {
             vectorsForIndex.push({ vector: vectorData, id: actualId });
           } else if (!item.id) {
-            console.warn(`[PartitionedVectorDB] Cannot update HNSW incrementally for auto-generated ID during bulk add.`);
+            log('warn', `[PartitionedVectorDB] Cannot update HNSW incrementally for auto-generated ID during bulk add.`);
             // Mark index as potentially stale?
           }
         }
@@ -1365,9 +1366,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
             for (const { vector, id } of vectorsForIndex) {
               hnswIndex.addPoint(vector, id);
             }
-            console.log(`[PartitionedVectorDB] Finished updating HNSW index for partition ${partitionId} batch.`);
+            log('info', `[PartitionedVectorDB] Finished updating HNSW index for partition ${partitionId} batch.`);
           } catch (error) {
-            console.error(`[PartitionedVectorDB] Error bulk adding points to HNSW index for ${partitionId}:`, error);
+            log('error', `[PartitionedVectorDB] Error bulk adding points to HNSW index for ${partitionId}:`, error);
             this.emit('partition:error', {
               id: partitionId,
               error,
@@ -1384,7 +1385,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
       remainingVectors = remainingVectors.slice(batchSize);
 
-      console.log(`[PartitionedVectorDB] Added ${countInBatch} vectors to ${partitionId}. Total added: ${totalAddedCount}. Remaining: ${remainingVectors.length}. Partition size: ${config.vectorCount}`);
+      log('info', `[PartitionedVectorDB] Added ${countInBatch} vectors to ${partitionId}. Total added: ${totalAddedCount}. Remaining: ${remainingVectors.length}. Partition size: ${config.vectorCount}`);
 
       // No explicit check needed here for next loop, _ensureActivePartitionHasCapacity will handle it.
     }
@@ -1394,7 +1395,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       this.scheduleSaveConfigs();
     }
 
-    console.log(`[PartitionedVectorDB] Bulk add complete. Added ${totalAddedCount} vectors across partitions: [${Array.from(partitionIdsUsed).join(', ')}]`);
+    log('info', `[PartitionedVectorDB] Bulk add complete. Added ${totalAddedCount} vectors across partitions: [${Array.from(partitionIdsUsed).join(', ')}]`);
     this.emit('vectors:bulkAdd', {
       count: totalAddedCount,
       partitionIds: Array.from(partitionIdsUsed),
@@ -1460,10 +1461,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           if (hnswIndex) {
             try {
               hnswIndex.markDelete(id); // Assumes HNSW has markDelete or similar
-              console.log(`[PartitionedVectorDB] Marked point ${id} for deletion in HNSW index for partition ${partitionId}`);
+              log('info', `[PartitionedVectorDB] Marked point ${id} for deletion in HNSW index for partition ${partitionId}`);
               // Note: Actual removal might happen during maintenance/compaction in HNSW
             } catch (error) {
-              console.error(`[PartitionedVectorDB] Error marking point ${id} for deletion in HNSW index for ${partitionId}:`, error);
+              log('error', `[PartitionedVectorDB] Error marking point ${id} for deletion in HNSW index for ${partitionId}:`, error);
               this.emit('partition:error', {
                 id: partitionId,
                 error,
@@ -1489,7 +1490,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         partitionId: partitionIdFound,
         vectorId: id,
       });
-      console.log(`[PartitionedVectorDB] Deleted vector ${id} from partition ${partitionIdFound}. New count: ${config?.vectorCount}`);
+      log('info', `[PartitionedVectorDB] Deleted vector ${id} from partition ${partitionIdFound}. New count: ${config?.vectorCount}`);
     }
 
     return deleted;
@@ -1510,13 +1511,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
             partitionId,
             vectorId: id,
           });
-          console.log(`[PartitionedVectorDB] Updated metadata for vector ${id} in partition ${partitionId}`);
+          log('info', `[PartitionedVectorDB] Updated metadata for vector ${id} in partition ${partitionId}`);
         }
         return updated;
       }
     }
 
-    console.warn(`[PartitionedVectorDB] Could not update metadata: Vector ${id} not found in any loaded partition`);
+    log('warn', `[PartitionedVectorDB] Could not update metadata: Vector ${id} not found in any loaded partition`);
     return false; // Vector not found or update failed
   }
 
@@ -1530,13 +1531,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         const updated = partition.updateVector(id, vector);
         if (updated) {
           this.loadedPartitions.get(partitionId); // Mark as recently used
-          console.log(`[PartitionedVectorDB] Updated vector ${id} in partition ${partitionId}`);
+          log('info', `[PartitionedVectorDB] Updated vector ${id} in partition ${partitionId}`);
           return true;
         }
       }
     }
 
-    console.warn(`[PartitionedVectorDB] Could not update vector: Vector ${id} not found in any loaded partition`);
+    log('warn', `[PartitionedVectorDB] Could not update vector: Vector ${id} not found in any loaded partition`);
     return false; // Vector not found or update failed
   }
 
@@ -1556,10 +1557,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       : Array.from(this.loadedPartitions.keys()); // Default: search all *loaded* partitions
 
     if (partitionIdsToSearch.length === 0) {
-      console.warn('[PartitionedVectorDB] No valid partitions specified or loaded to search.');
+      log('warn', '[PartitionedVectorDB] No valid partitions specified or loaded to search.');
       return [];
     }
-    console.log(`[PartitionedVectorDB] Performing standard search on partitions: [${partitionIdsToSearch.join(', ')}]`);
+    log('info', `[PartitionedVectorDB] Performing standard search on partitions: [${partitionIdsToSearch.join(', ')}]`);
 
     // Perform search in parallel
     const searchPromises = partitionIdsToSearch.map(async (partitionId) => {
@@ -1572,7 +1573,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
             metric: options.distanceMetric,
           });
         } catch (err) {
-          console.error(`[PartitionedVectorDB] Error searching partition ${partitionId}:`, err);
+          log('error', `[PartitionedVectorDB] Error searching partition ${partitionId}:`, err);
           this.emit('partition:error', {
             id: partitionId,
             error: err,
@@ -1597,7 +1598,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   async getStats(): Promise<PartitionedDBStats> {
     // Ensure initialization is complete, but don't throw if called before fully ready
     if (!this.isInitialized) {
-      console.warn('[PartitionedVectorDB] getStats called before initialization complete. Stats might be incomplete.');
+      log('warn', '[PartitionedVectorDB] getStats called before initialization complete. Stats might be incomplete.');
       // Return partial stats if possible?
     }
     // Even if not fully initialized, partitionConfigs might be loaded
@@ -1618,7 +1619,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           totalVectorsLoaded += stats.vectorCount;
           totalMemoryLoaded += stats.memoryUsage ?? 0;
         } catch (e) {
-          console.warn(`[PartitionedVectorDB] Could not retrieve stats for loaded partition ${partitionId}:`, e);
+          log('warn', `[PartitionedVectorDB] Could not retrieve stats for loaded partition ${partitionId}:`, e);
         }
       }
     }
@@ -1767,11 +1768,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       : Array.from(this.loadedPartitions.keys()); // Default: process all loaded partitions
 
     if (partitionIds.length === 0) {
-      console.warn('[PartitionedVectorDB] No valid partitions to extract communities from');
+      log('warn', '[PartitionedVectorDB] No valid partitions to extract communities from');
       return [];
     }
 
-    console.log(`[PartitionedVectorDB] Extracting vector communities with threshold ${threshold} from ${partitionIds.length} partitions...`);
+    log('info', `[PartitionedVectorDB] Extracting vector communities with threshold ${threshold} from ${partitionIds.length} partitions...`);
 
     // Step 1: Extract communities from individual partitions
     const partitionCommunities: Map<
@@ -1787,16 +1788,16 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     for (const partitionId of partitionIds) {
       const partition = await this._loadPartition(partitionId);
       if (!partition) {
-        console.warn(`[PartitionedVectorDB] Skipping partition ${partitionId} - could not load`);
+        log('warn', `[PartitionedVectorDB] Skipping partition ${partitionId} - could not load`);
         continue;
       }
 
       try {
         const communities = partition.extractCommunities(threshold, options.metric || this.defaultClusterOptions.distanceMetric);
         partitionCommunities.set(partitionId, communities);
-        console.log(`[PartitionedVectorDB] Extracted ${communities.length} communities from partition ${partitionId}`);
+        log('info', `[PartitionedVectorDB] Extracted ${communities.length} communities from partition ${partitionId}`);
       } catch (error) {
-        console.error(`[PartitionedVectorDB] Error extracting communities from partition ${partitionId}:`, error);
+        log('error', `[PartitionedVectorDB] Error extracting communities from partition ${partitionId}:`, error);
         this.emit('partition:error', {
           id: partitionId,
           error,
@@ -1902,7 +1903,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       }
     }
 
-    console.log(`[PartitionedVectorDB] Final result: ${globalCommunities.length} communities identified across partitions`);
+    log('info', `[PartitionedVectorDB] Final result: ${globalCommunities.length} communities identified across partitions`);
     return globalCommunities;
   }
 
@@ -1933,11 +1934,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     const partitionIds = options.partitionIds ? options.partitionIds.filter((id) => this.loadedPartitions.has(id)) : Array.from(this.loadedPartitions.keys());
 
     if (partitionIds.length === 0) {
-      console.warn('[PartitionedVectorDB] No valid partitions to extract relationships from');
+      log('warn', '[PartitionedVectorDB] No valid partitions to extract relationships from');
       return [];
     }
 
-    console.log(`[PartitionedVectorDB] Extracting vector relationships with threshold ${threshold} from ${partitionIds.length} partitions...`);
+    log('info', `[PartitionedVectorDB] Extracting vector relationships with threshold ${threshold} from ${partitionIds.length} partitions...`);
 
     const relationships: Array<{
       vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
@@ -1949,7 +1950,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     for (const partitionId of partitionIds) {
       const partition = await this._loadPartition(partitionId);
       if (!partition) {
-        console.warn(`[PartitionedVectorDB] Skipping partition ${partitionId} - could not load`);
+        log('warn', `[PartitionedVectorDB] Skipping partition ${partitionId} - could not load`);
         continue;
       }
 
@@ -1990,9 +1991,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           relationships.push(relationship);
         }
 
-        console.log(`[PartitionedVectorDB] Extracted ${partitionRelationships.length} relationships from partition ${partitionId}`);
+        log('info', `[PartitionedVectorDB] Extracted ${partitionRelationships.length} relationships from partition ${partitionId}`);
       } catch (error) {
-        console.error(`[PartitionedVectorDB] Error extracting relationships from partition ${partitionId}:`, error);
+        log('error', `[PartitionedVectorDB] Error extracting relationships from partition ${partitionId}:`, error);
         this.emit('partition:error', {
           id: partitionId,
           error,
@@ -2001,7 +2002,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       }
     }
 
-    console.log(`[PartitionedVectorDB] Total: ${relationships.length} relationships extracted across partitions`);
+    log('info', `[PartitionedVectorDB] Total: ${relationships.length} relationships extracted across partitions`);
     return relationships;
   }
 }

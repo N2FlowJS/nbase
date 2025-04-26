@@ -5,6 +5,7 @@ import path from 'path';
 import { promises as fsPromises, existsSync } from 'fs';
 import zlib from 'zlib';
 import { promisify } from 'util';
+import { log } from '../utils/log';
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -92,15 +93,15 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     this.useCompression = options.useCompression ?? false; // Default to no compression
 
     if (dbPath) {
-      console.log(`[VectorDB] Constructor Loading database from ${dbPath}...`);
+      log('info', `[VectorDB] Constructor Loading database from ${dbPath}...`);
 
       this.load()
         .catch((err) => {
           // Only log error if file likely existed but failed to load
           if (err.code !== 'ENOENT') {
-            console.error(`Error loading database from ${dbPath}:`, err);
+            log('error', `Error loading database from ${dbPath}:`, err);
           } else {
-            console.log(`Database files not found at ${dbPath}, starting fresh.`);
+            log('info', `Database files not found at ${dbPath}, starting fresh.`);
           }
         })
         .finally(() => {
@@ -150,7 +151,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     // vectorId = String(vectorId);
 
     if (this.memoryStorage.has(vectorId)) {
-      console.warn(`Vector with ID ${vectorId} already exists. Overwriting.`);
+      log('warn', `Vector with ID ${vectorId} already exists. Overwriting.`);
       // Decide if overwrite is desired or should throw error
     }
 
@@ -178,7 +179,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
   }
 
   bulkAdd(vectors: VectorData[]): number {
-    console.log(`[VectorDB] Bulk adding ${vectors.length} vectors...`);
+    log('info', `[VectorDB] Bulk adding ${vectors.length} vectors...`);
 
     let addedCount = 0;
     const addedIds: (number | string)[] = [];
@@ -190,15 +191,15 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         addedCount++;
         addedIds.push(id);
       } catch (error) {
-        console.error(`Error adding vector ${item.id}:`, error);
+        log('error', `Error adding vector ${item.id}:`, error);
       }
     }
 
     // Verify vectors were actually added to memory storage
     if (addedCount > 0 && this.memoryStorage.size === 0) {
-      console.warn('[VectorDB] Warning: bulkAdd reported success but memoryStorage is empty');
+      log('warn', '[VectorDB] Warning: bulkAdd reported success but memoryStorage is empty');
     } else {
-      console.log(`[VectorDB] Successfully added ${addedCount} vectors to memory storage. Storage size: ${this.memoryStorage.size}`);
+      log('info', `[VectorDB] Successfully added ${addedCount} vectors to memory storage. Storage size: ${this.memoryStorage.size}`);
     }
 
     this.emit('vectors:bulkAdd', { count: addedCount, ids: addedIds });
@@ -229,7 +230,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
   updateVector(id: number | string, vector: Vector): boolean {
     if (!this.memoryStorage.has(id)) {
-      console.warn(`Attempted to update non-existent vector ID: ${id}`);
+      log('warn', `Attempted to update non-existent vector ID: ${id}`);
       return false;
     }
 
@@ -261,7 +262,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
   updateMetadata(id: number | string, data: Record<string, any> | ((current: Record<string, any> | null) => Record<string, any>)): boolean {
     // Keep existing logic
     if (!this.memoryStorage.has(id)) {
-      console.warn(`Attempted to update metadata for non-existent vector ID: ${id}`);
+      log('warn', `Attempted to update metadata for non-existent vector ID: ${id}`);
       return false; // Or throw error
     }
     const current = this.metadata.get(id) || null;
@@ -329,7 +330,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     if (a.length !== b.length) {
       // Or handle as per _euclideanDistance mismatch logic?
       // Returning max distance is safer if dimensions must match.
-      console.warn(`Cosine distance called on vectors with different dimensions (${a.length} vs ${b.length}). Returning max distance.`);
+      log('warn', `Cosine distance called on vectors with different dimensions (${a.length} vs ${b.length}). Returning max distance.`);
       return 1.0;
     }
     const dot = this._dotProduct(a, b);
@@ -406,36 +407,36 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
   }
 
   async save(): Promise<void> {
-    console.log('[VectorDB] Saving database...');
+    log('info', '[VectorDB] Saving database...');
 
     if (!this.dbPath) {
-      console.warn('[VectorDB] No dbPath specified, skipping save.');
+      log('warn', '[VectorDB] No dbPath specified, skipping save.');
       return;
     }
     if (this.isClosed) {
-      console.warn('[VectorDB] Attempted to save a closed database.');
+      log('warn', '[VectorDB] Attempted to save a closed database.');
       return;
     }
-    console.log(`[VectorDB] Saving to ${this.dbPath}`);
+    log('info', `[VectorDB] Saving to ${this.dbPath}`);
 
     // Only log and return existing promise if a save is already in progress
     if (this.savePromise) {
-      console.log(`[VectorDB] Save already in progress, waiting...`);
+      log('info', `[VectorDB] Save already in progress, waiting...`);
       return this.savePromise;
     }
 
     this.savePromise = (async () => {
       const metaFilePath = this._getMetaFilePath();
       const vectorFilePath = this._getVectorFilePath();
-      console.log('[VectorDB] Meta file path:', metaFilePath);
-      console.log('[VectorDB] Vector file path:', vectorFilePath);
+      log('info', '[VectorDB] Meta file path:', metaFilePath);
+      log('info', '[VectorDB] Vector file path:', vectorFilePath);
 
       try {
         // Ensure directory exists
         await fsPromises.mkdir(path.dirname(metaFilePath), { recursive: true });
 
-        console.log('[VectorDB] Meta file path:', metaFilePath);
-        console.log('[VectorDB] Vector file path:', vectorFilePath);
+        log('info', '[VectorDB] Meta file path:', metaFilePath);
+        log('info', '[VectorDB] Vector file path:', vectorFilePath);
 
         const metaData: Record<string, any> = {};
         this.metadata.forEach((value, key) => {
@@ -453,7 +454,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         let currentOffset = 0;
 
         // 1. Prepare vector data and metadata structure
-        console.log(`[VectorDB] Preparing vector data for saving with ${this.memoryStorage.size} vectors...`);
+        log('info', `[VectorDB] Preparing vector data for saving with ${this.memoryStorage.size} vectors...`);
 
         for (const [id, vector] of this.memoryStorage.entries()) {
           const vectorBuffer = serializeVector(vector);
@@ -474,41 +475,41 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
           vectors: vectorInfo,
           metadata: metaData,
         };
-        console.log(`[VectorDB] Vector data prepared for saving: ${vectorInfo.length} vectors`);
+        log('info', `[VectorDB] Vector data prepared for saving: ${vectorInfo.length} vectors`);
         // 2. Write metadata file
-        console.log(`[VectorDB] Writing metadata file to: ${metaFilePath} with ${vectorInfo.length} vectors`);
+        log('info', `[VectorDB] Writing metadata file to: ${metaFilePath} with ${vectorInfo.length} vectors`);
         // Ensure metadata is JSON-serializable
         let metaContent: string | Buffer = JSON.stringify(saveData);
         if (this.useCompression) {
           metaContent = await gzip(metaContent);
         }
-        console.log('[VectorDB] Writing meta file to:', metaFilePath);
+        log('info', '[VectorDB] Writing meta file to:', metaFilePath);
         await fsPromises.writeFile(metaFilePath, metaContent);
-        console.log('[VectorDB] Meta file written successfully.');
+        log('info', '[VectorDB] Meta file written successfully.');
         // 3. Write vector data file
         let vectorContent: Buffer | Buffer[] = Buffer.concat(vectorBuffers);
         if (this.useCompression) {
           vectorContent = await gzip(vectorContent);
         }
-        console.log(`[VectorDB] Writing vector file to: ${vectorFilePath} (${vectorBuffers.length} vectors, ${vectorContent.length} bytes)`);
+        log('info', `[VectorDB] Writing vector file to: ${vectorFilePath} (${vectorBuffers.length} vectors, ${vectorContent.length} bytes)`);
 
         await fsPromises.writeFile(vectorFilePath, vectorContent);
-        console.log('[VectorDB] Vector file written successfully.');
+        log('info', '[VectorDB] Vector file written successfully.');
         // 4. Emit save event
 
         this.emit('db:save', {
           path: this.dbPath || 'DB path not set',
           count: this.memoryStorage.size,
         });
-        console.log('[VectorDB] Save event emitted successfully.');
+        log('info', '[VectorDB] Save event emitted successfully.');
       } catch (error) {
-        console.error(`Error saving database to ${this.dbPath}:`, error);
+        log('error', `Error saving database to ${this.dbPath}:`, error);
         throw error; // Re-throw to indicate failure
       } finally {
         this.savePromise = null; // Release lock
       }
     })();
-    console.log('[VectorDB] Save promise created.');
+    log('info', '[VectorDB] Save promise created.');
     return this.savePromise;
   }
 
@@ -529,7 +530,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
     // If both files don't exist, this is likely a new database
     if (!metaExists && !vecExists) {
-      console.log(`[VectorDB] Database files not found at ${this.dbPath}. Starting new database.`);
+      log('info', `[VectorDB] Database files not found at ${this.dbPath}. Starting new database.`);
       return; // Exit early for a new database initialization
     }
 
@@ -563,7 +564,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
       for (const vecInfo of saveData.vectors) {
         const { id, offset, length, dim } = vecInfo;
         if (offset + length > vectorDataBuffer.length) {
-          console.error(`Invalid offset/length for vector ${id}. Offset: ${offset}, Length: ${length}, Buffer Size: ${vectorDataBuffer.length}`);
+          log('error', `Invalid offset/length for vector ${id}. Offset: ${offset}, Length: ${length}, Buffer Size: ${vectorDataBuffer.length}`);
           continue; // Skip corrupted entry
         }
         const vectorSlice = vectorDataBuffer.slice(offset, offset + length);
@@ -583,14 +584,14 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         path: this.dbPath,
         count: this.memoryStorage.size,
       });
-      console.log(`[VectorDB] Loaded ${this.memoryStorage.size} vectors from ${this.dbPath}`);
+      log('info', `[VectorDB] Loaded ${this.memoryStorage.size} vectors from ${this.dbPath}`);
     } catch (error: any) {
       if (error.code === 'ENOENT') {
         // Files not found is expected for a new DB, don't throw
-        console.log(`Database files not found at ${this.dbPath}. Starting new database.`);
+        log('info', `Database files not found at ${this.dbPath}. Starting new database.`);
         return; // Don't re-throw ENOENT
       }
-      console.error(`Error loading database from ${this.dbPath}:`, error);
+      log('error', `Error loading database from ${this.dbPath}:`, error);
       throw error; // Re-throw other errors
     }
   }
@@ -613,7 +614,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
       // Estimate metadata size (crude)
       this.metadata.forEach((meta) => (metadataMemory += JSON.stringify(meta).length * 2));
     } catch (e) {
-      console.warn('Could not estimate metadata size:', e);
+      log('warn', 'Could not estimate metadata size:', e);
     }
 
     const baseStats: DBStats = {
@@ -725,7 +726,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
     // If values are provided, ensure the length matches fields
     if (valueArray !== undefined && valueArray.length !== fieldArray.length) {
-      console.warn('Values array length does not match fields array length. Some value checks will be ignored.');
+      log('warn', 'Values array length does not match fields array length. Some value checks will be ignored.');
     }
 
     this.metadata.forEach((meta, id) => {
@@ -794,7 +795,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
         // Ensure dimension compatibility
         if (vector1.length !== vector2.length) {
-          console.warn(`Dimension mismatch between vector ${id1} and ${id2}, skipping.`);
+          log('warn', `Dimension mismatch between vector ${id1} and ${id2}, skipping.`);
           continue;
         }
 
@@ -818,7 +819,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
       }
     }
 
-    console.log(`[VectorDB] Extracted ${relationships.length} relationships.`);
+    log('info', `[VectorDB] Extracted ${relationships.length} relationships.`);
     return relationships;
   }
 
@@ -837,7 +838,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     id: number | string;
     metadata?: Record<string, any>;
   }>> {
-    console.log(`[VectorDB] Extracting vector communities with threshold ${threshold}...`);
+    log('info', `[VectorDB] Extracting vector communities with threshold ${threshold}...`);
     
     // First build a graph representation where each vector is a node
     // and edges exist between vectors with distance <= threshold
@@ -913,7 +914,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
       }
     }
     
-    console.log(`[VectorDB] Found ${communities.length} communities`);
+    log('info', `[VectorDB] Found ${communities.length} communities`);
     return communities;
   }
 
@@ -926,14 +927,14 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         await this.save(); // Attempt to save on close
       }
     } catch (error) {
-      console.error('Error saving database during close:', error);
+      log('error', 'Error saving database during close:', error);
     } finally {
       // Clear memory regardless of save success
       this.memoryStorage.clear();
       this.metadata.clear();
       this.vectorDimensions.clear();
       this.emit('db:close', {});
-      console.log('Database closed.');
+      log('info', 'Database closed.');
     }
   }
 }

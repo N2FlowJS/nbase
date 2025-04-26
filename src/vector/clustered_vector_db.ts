@@ -8,6 +8,7 @@ import path from 'path';
 import zlib from 'zlib'; // Import zlib for potential compression
 import { promisify } from 'util'; // Import promisify
 import {KMeans} from '../compression/kmeans'; // Import KMeans
+import { log } from '../utils/log'; // Thêm import log
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -101,7 +102,7 @@ export class ClusteredVectorDB extends VectorDB {
   protected _getClusterStateFilePath(): string {
     if (!this.dbPath) throw new Error('DB path not set for cluster state');
     // Store cluster state separately from base vector/meta data
-    console.log(`[ClusteredVectorDB] Cluster state file path: ${this.dbPath}`);
+    log('debug', `[ClusteredVectorDB] Cluster state file path: ${this.dbPath}`);
 
     return path.join(this.dbPath, 'cluster.json') + (this.useCompression ? '.gz' : '');
   }
@@ -109,19 +110,19 @@ export class ClusteredVectorDB extends VectorDB {
   // --- Overridden Save Method ---
   override async save(): Promise<void> {
     if (!this.dbPath) {
-      console.warn('[ClusteredVectorDB] No dbPath specified, skipping save.');
+      log('warn', '[ClusteredVectorDB] No dbPath specified, skipping save.');
       return;
     }
     if (this.isClosed) {
-      console.warn('[ClusteredVectorDB] Attempted to save a closed database.');
+      log('warn', '[ClusteredVectorDB] Attempted to save a closed database.');
       return;
     }
 
-    console.log(`[ClusteredVectorDB] Saving state to ${this.dbPath}`);
+    log('info', `[ClusteredVectorDB] Saving state to ${this.dbPath}`);
 
     // Use a single save promise to prevent race conditions if called multiple times
     if (this.savePromise) {
-      console.log(`[ClusteredVectorDB] Save already in progress, waiting...`);
+      log('info', `[ClusteredVectorDB] Save already in progress, waiting...`);
       return this.savePromise;
     }
 
@@ -129,7 +130,7 @@ export class ClusteredVectorDB extends VectorDB {
       try {
         // 1. Save base data (vectors, metadata) using parent method
         await super.save(); // This handles its own file paths and logic
-        console.log('[ClusteredVectorDB] Base VectorDB data saved.');
+        log('info', '[ClusteredVectorDB] Base VectorDB data saved.');
 
         // 2. Prepare cluster state for serialization
         const clusterState = {
@@ -144,18 +145,18 @@ export class ClusteredVectorDB extends VectorDB {
 
         // 3. Save cluster state to its own file
         const clusterFilePath = this._getClusterStateFilePath();
-        console.log(`[ClusteredVectorDB] Saving cluster state to: ${clusterFilePath}`);
+        log('info', `[ClusteredVectorDB] Saving cluster state to: ${clusterFilePath}`);
         let clusterContent: string | Buffer = JSON.stringify(clusterState);
         if (this.useCompression) {
           clusterContent = await gzip(clusterContent);
         }
         await fsPromises.writeFile(clusterFilePath, clusterContent);
-        console.log('[ClusteredVectorDB] Cluster state saved successfully.');
+        log('info', '[ClusteredVectorDB] Cluster state saved successfully.');
 
         // Emit the save event (perhaps redundant if parent emits, decide based on needs)
         // this.emit('db:save', { path: this.dbPath, count: this.memoryStorage.size });
       } catch (error) {
-        console.error(`[ClusteredVectorDB] Error saving database state to ${this.dbPath}:`, error);
+        log('error', `[ClusteredVectorDB] Error saving database state to ${this.dbPath}:`, error);
         throw error; // Re-throw to indicate failure
       } finally {
         this.savePromise = null; // Release lock
@@ -174,18 +175,18 @@ export class ClusteredVectorDB extends VectorDB {
       throw new Error('[ClusteredVectorDB] Cannot load into a closed database.');
     }
 
-    console.log(`[ClusteredVectorDB] Loading state from ${this.dbPath}`);
+    log('info', `[ClusteredVectorDB] Loading state from ${this.dbPath}`);
 
     // 1. Load base data (vectors, metadata) using parent method
     await super.load(); // This handles its own file paths and logic
-    console.log('[ClusteredVectorDB] Base VectorDB data loaded.');
+    log('info', '[ClusteredVectorDB] Base VectorDB data loaded.');
 
     // 2. Load cluster state if the file exists
     const clusterFilePath = this._getClusterStateFilePath();
     let clusterStateLoaded = false;
 
     if (existsSync(clusterFilePath)) {
-      console.log(`[ClusteredVectorDB] Loading cluster state from: ${clusterFilePath}`);
+      log('info', `[ClusteredVectorDB] Loading cluster state from: ${clusterFilePath}`);
       try {
         let clusterContentBuffer = await fsPromises.readFile(clusterFilePath);
         if (this.useCompression) {
@@ -204,10 +205,10 @@ export class ClusteredVectorDB extends VectorDB {
         this.clusterCentroids = new Map(clusterState.clusterCentroids.map(([key, centroidArray]: [number, number[]]) => [key, new Float32Array(centroidArray)]));
         this.clusterDimensions = new Map(clusterState.clusterDimensions);
 
-        console.log(`[ClusteredVectorDB] Cluster state loaded successfully (${this.clusterCentroids.size} clusters).`);
+        log('info', `[ClusteredVectorDB] Cluster state loaded successfully (${this.clusterCentroids.size} clusters).`);
         clusterStateLoaded = true;
       } catch (error) {
-        console.error(`[ClusteredVectorDB] Error loading cluster state from ${clusterFilePath}, will rebuild clusters:`, error);
+        log('error', `[ClusteredVectorDB] Error loading cluster state from ${clusterFilePath}, will rebuild clusters:`, error);
         // Reset cluster structures before rebuilding
         this.clusters.clear();
         this.clusterCentroids.clear();
@@ -215,18 +216,18 @@ export class ClusteredVectorDB extends VectorDB {
         this.clusterIdCounter = 0;
       }
     } else {
-      console.log('[ClusteredVectorDB] Cluster state file not found. Will rebuild clusters if vectors were loaded.');
+      log('info', '[ClusteredVectorDB] Cluster state file not found. Will rebuild clusters if vectors were loaded.');
     }
 
     // 4. Rebuild clusters or run K-Means if needed
     if (!clusterStateLoaded && this.memoryStorage.size > 0) {
       if (this.runKMeansOnLoad) {
-        console.log('[ClusteredVectorDB] Running K-Means after load (cluster state missing/invalid)...');
+        log('info', '[ClusteredVectorDB] Running K-Means after load (cluster state missing/invalid)...');
         await this.runKMeans(); // Run K-Means with default settings
       } else {
-        console.log('[ClusteredVectorDB] Rebuilding clusters incrementally after load (cluster state missing/invalid)...');
+        log('info', '[ClusteredVectorDB] Rebuilding clusters incrementally after load (cluster state missing/invalid)...');
         this._rebuildAllClusters(); // Fallback to incremental rebuild
-        console.log(`[ClusteredVectorDB] Rebuilt ${this.clusterCentroids.size} clusters incrementally.`);
+        log('info', `[ClusteredVectorDB] Rebuilt ${this.clusterCentroids.size} clusters incrementally.`);
       }
     }
   }
@@ -261,13 +262,13 @@ export class ClusteredVectorDB extends VectorDB {
   override updateVector(id: number | string, vector: Vector): boolean {
     const oldVector = this.memoryStorage.get(id);
     if (!oldVector) {
-      console.warn(`Attempted to update non-existent vector ID: ${id}`);
+      log('warn', `Attempted to update non-existent vector ID: ${id}`);
       return false;
     }
 
     const deleted = super.deleteVector(id);
     if (!deleted) {
-      console.warn(`Attempted to update non-existent vector ID: ${id}`);
+      log('warn', `Attempted to update non-existent vector ID: ${id}`);
       return false;
     }
 
@@ -289,7 +290,7 @@ export class ClusteredVectorDB extends VectorDB {
       metric?: DistanceMetric;
     } = {}
   ): SearchResult[] {
-    console.log(`[ClusteredVectorDB] [findNearest] Searching for nearest vectors... with k=${k}}`);
+    log('info', `[ClusteredVectorDB] [findNearest] Searching for nearest vectors... with k=${k}}`);
 
     const typedQuery = query instanceof Float32Array ? query : new Float32Array(query);
     const metric = options.metric ?? this.distanceMetric; // Use instance default or override
@@ -297,7 +298,7 @@ export class ClusteredVectorDB extends VectorDB {
 
     // Fallback to linear search if no clusters exist
     if (this.clusterCentroids.size === 0) {
-      console.warn('No clusters found, falling back to linear search.');
+      log('warn', 'No clusters found, falling back to linear search.');
       return this._linearSearch(typedQuery, k, metric, filter);
     }
 
@@ -323,7 +324,7 @@ export class ClusteredVectorDB extends VectorDB {
     }
 
     const clustersToSearch = clusterDistances.sort((a, b) => a.dist - b.dist);
-    console.log(`[ClusteredVectorDB] [findNearest] Found ${clustersToSearch.length} candidate clusters.`);
+    log('info', `[ClusteredVectorDB] [findNearest] Found ${clustersToSearch.length} candidate clusters.`);
     
     // 2. Collect candidate vectors from selected clusters
     const candidateIds = new Set<number | string>();
@@ -356,7 +357,7 @@ export class ClusteredVectorDB extends VectorDB {
       const dist = this._calculateDistance(typedQuery, vector, metric);
       results.push({ id, dist });
     }
-    console.log(`[ClusteredVectorDB] [findNearest] Found ${results.length} candidates.`);
+    log('info', `[ClusteredVectorDB] [findNearest] Found ${results.length} candidates.`);
 
     // 4. Sort final results and return top k
     return results.sort((a, b) => a.dist - b.dist).slice(0, k);
@@ -427,7 +428,7 @@ export class ClusteredVectorDB extends VectorDB {
       this._updateCentroidIncrementally(assignedKey, vector, 'add');
     } else {
       // This case should ideally not be reached if logic above is correct
-      console.error(`Cluster ${assignedKey} not found when trying to add vector ${vectorId}`);
+      log('error', `Cluster ${assignedKey} not found when trying to add vector ${vectorId}`);
       // Fallback: create cluster anyway?
       assignedKey = this._createNewCluster(vectorId, vector);
     }
@@ -479,7 +480,7 @@ export class ClusteredVectorDB extends VectorDB {
         this.emit('cluster:delete', { clusterId: foundClusterKey });
       }
     } else {
-      console.warn(`Vector ${vectorId} not found in any cluster during deletion.`);
+      log('warn', `Vector ${vectorId} not found in any cluster during deletion.`);
     }
   }
 
@@ -489,11 +490,11 @@ export class ClusteredVectorDB extends VectorDB {
     const members = this.clusters.get(clusterKey);
 
     if (!centroid || !members) {
-      console.error(`Cannot update centroid for non-existent cluster ${clusterKey}`);
+      log('error', `Cannot update centroid for non-existent cluster ${clusterKey}`);
       return;
     }
     if (centroid.length !== vector.length) {
-      console.error(`Dimension mismatch during incremental centroid update for cluster ${clusterKey}`);
+      log('error', `Dimension mismatch during incremental centroid update for cluster ${clusterKey}`);
       // Maybe trigger full rebuild for this cluster?
       this._recalculateCentroid(clusterKey); // Fallback to full recalc
       return;
@@ -550,7 +551,7 @@ export class ClusteredVectorDB extends VectorDB {
         if (!firstVector) firstVector = vec;
         memberVectors.push(vec);
       } else {
-        console.warn(`Vector ${member.id} not found in memoryStorage during centroid recalc for cluster ${clusterKey}.`);
+        log('warn', `Vector ${member.id} not found in memoryStorage during centroid recalc for cluster ${clusterKey}.`);
       }
     }
 
@@ -568,7 +569,7 @@ export class ClusteredVectorDB extends VectorDB {
     // Calculate sum
     for (const vector of memberVectors) {
       if (vector.length !== dimensions) {
-        console.error(`Inconsistent dimensions within cluster ${clusterKey} during recalc. Expected ${dimensions}, got ${vector.length}`);
+        log('error', `Inconsistent dimensions within cluster ${clusterKey} during recalc. Expected ${dimensions}, got ${vector.length}`);
         // How to handle? Skip vector? Abort?
         continue;
       }
@@ -616,14 +617,14 @@ export class ClusteredVectorDB extends VectorDB {
    */
   async runKMeans(k?: number, maxIterations?: number): Promise<void> {
     if (this.memoryStorage.size === 0) {
-      console.log('[ClusteredVectorDB] Skipping K-Means: No vectors in the database.');
+      log('info', '[ClusteredVectorDB] Skipping K-Means: No vectors in the database.');
       return;
     }
 
     const targetK = k ?? Math.max(1, this.clusterCentroids.size); // Default to current cluster count or 1
     const iterations = maxIterations ?? this.kmeansMaxIterations;
 
-    console.log(`[ClusteredVectorDB] Starting K-Means with k=${targetK}, maxIterations=${iterations}...`);
+    log('info', `[ClusteredVectorDB] Starting K-Means with k=${targetK}, maxIterations=${iterations}...`);
     this.emit('kmeans:start', { k: targetK, iterations }); // Emit start event
     const startTime = Date.now();
 
@@ -633,10 +634,10 @@ export class ClusteredVectorDB extends VectorDB {
       const centroids = await this.kmeans.cluster(vectors);
       this._updateClustersFromKMeans(Array.from(this.memoryStorage.entries()), new Map<number | string, number>(), centroids);
       const duration = Date.now() - startTime;
-      console.log(`[ClusteredVectorDB] K-Means finished in ${duration}ms. New cluster count: ${this.clusterCentroids.size}`);
+      log('info', `[ClusteredVectorDB] K-Means finished in ${duration}ms. New cluster count: ${this.clusterCentroids.size}`);
       this.emit('kmeans:complete', { k: this.clusterCentroids.size, iterations });
     } catch (error) {
-      console.error('[ClusteredVectorDB] Error during K-Means execution:', error);
+      log('error', '[ClusteredVectorDB] Error during K-Means execution:', error);
       this.emit('kmeans:error', { error });
       // Optionally re-throw or handle the error
     }
@@ -691,11 +692,11 @@ export class ClusteredVectorDB extends VectorDB {
           members?.push({ id: vectorId }); // Add vector ID object
         } else {
           // Should not happen if mapping is correct
-          console.warn(`[ClusteredVectorDB] K-Means Update: Could not find cluster key for centroid index ${centroidIndex}`);
+          log('warn', `[ClusteredVectorDB] K-Means Update: Could not find cluster key for centroid index ${centroidIndex}`);
         }
       } else {
         // Vector wasn't assigned (e.g., dimension mismatch)
-        console.warn(`[ClusteredVectorDB] K-Means Update: Vector ${vectorId} has no assignment.`);
+        log('warn', `[ClusteredVectorDB] K-Means Update: Vector ${vectorId} has no assignment.`);
         // Decide how to handle unassigned vectors: create separate cluster? Ignore?
       }
     }
@@ -711,7 +712,7 @@ export class ClusteredVectorDB extends VectorDB {
       this.clusters.delete(key);
       this.clusterCentroids.delete(key);
       this.clusterDimensions.delete(key);
-      console.log(`[ClusteredVectorDB] K-Means Update: Removed empty cluster ${key}.`);
+      log('info', `[ClusteredVectorDB] K-Means Update: Removed empty cluster ${key}.`);
     }
   }
 
@@ -825,7 +826,7 @@ public extractRelationships(
 
       // Ensure dimension compatibility
       if (vector1.length !== vector2.length) {
-        console.warn(`Dimension mismatch between vector ${id1} and ${id2}, skipping.`);
+        log('warn', `Dimension mismatch between vector ${id1} and ${id2}, skipping.`);
         continue;
       }
 
@@ -849,7 +850,7 @@ public extractRelationships(
     }
   }
 
-  console.log(`[ClusteredVectorDB] Extracted ${relationships.length} relationships.`);
+  log('info', `[ClusteredVectorDB] Extracted ${relationships.length} relationships.`);
   return relationships;
 }
 /**
@@ -867,7 +868,7 @@ public extractRelationships(
     id: number | string;
     metadata?: Record<string, any>;
   }>> {
-    console.log(`[ClusteredVectorDB] Extracting vector communities with threshold ${threshold}...`);
+    log('info', `[ClusteredVectorDB] Extracting vector communities with threshold ${threshold}...`);
     
     // We can optimize by first checking distances between cluster centroids
     // Only compare vectors in clusters whose centroids are within (2 * threshold) distance
@@ -992,7 +993,7 @@ public extractRelationships(
       }
     }
     
-    console.log(`[ClusteredVectorDB] Found ${communities.length} communities`);
+    log('info', `[ClusteredVectorDB] Found ${communities.length} communities`);
     return communities;
   }
 }
