@@ -5,7 +5,8 @@ import * as path from 'path';
  * General purpose logger
  */
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-const isDev = 1 != 1 || !!process.env.NBASE_DB_PATH;
+const NBASE_DB_PATH: string = `${process.env.NBASE_DB_PATH}`
+const isDev = 1 == 1 || NBASE_DB_PATH.length > 0;
 // Color codes for console output
 const colors = {
     debug: '#6c757d',  // gray

@@ -1,5 +1,12 @@
 # NBase - Neural Vector Database
+```bash
+ _   _       ____                 
+| \ | |     | __ )  __ _ ___  ___ 
+|  \| |_____|  _ \ / _` / __|/ _ \
+| |\  |_____| |_) | (_| \__ \  __/
+|_| \_|     |____/ \__,_|___/\___|
 
+```
 NBase is a high-performance vector database for efficient similarity search, designed for machine learning embeddings and neural search applications.
 
 ## Features

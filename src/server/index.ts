@@ -1,4 +1,3 @@
-import { exec } from 'child_process';
 import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -50,61 +49,6 @@ async function isPortInUse(port: number): Promise<boolean> {
   });
 }
 
-/**
- * Find and kill processes using a specific port
- * @param port Port to check
- * @returns Promise resolving to true if process was killed, false if no process found
- */
-async function killProcessOnPort(port: number): Promise<boolean> {
-  const execAsync = promisify(exec);
-  try {
-    let cmd: string;
-    let pidCommand: string;
-
-    if (process.platform === 'win32') {
-      // Windows command to find PID
-      pidCommand = `netstat -ano | findstr :${port} | findstr LISTENING`;
-    } else {
-      // Unix/Linux/Mac command to find PID
-      pidCommand = `lsof -i :${port} -t`;
-    }
-
-    const { stdout } = await execAsync(pidCommand);
-
-    if (!stdout || stdout.trim() === '') {
-      console.log(`No process found using port ${port}`);
-      return false;
-    }
-
-    let pid: string;
-
-    if (process.platform === 'win32') {
-      // Extract PID from Windows netstat output (last column)
-      const matches = stdout.trim().match(/\s+(\d+)$/m);
-      if (!matches || !matches[1]) {
-        console.log(`Could not extract PID from netstat output for port ${port}`);
-        return false;
-      }
-      pid = matches[1];
-    } else {
-      // Unix/Linux/Mac - output is already the PID
-      pid = stdout.trim().split('\n')[0];
-    }
-
-    // Kill process
-    if (process.platform === 'win32') {
-      await execAsync(`taskkill /F /PID ${pid}`);
-    } else {
-      await execAsync(`kill -9 ${pid}`);
-    }
-
-    console.log(`Terminated process ${pid} that was using port ${port}`);
-    return true;
-  } catch (error) {
-    console.error(`Error killing process on port ${port}:`, error);
-    return false;
-  }
-}
 
 /**
  * Creates and configures an Express server instance with the provided options.
@@ -284,14 +228,10 @@ if (require.main === module) {
     // Check if port is in use and kill process if necessary
     const portInUse = await isPortInUse(Number(PORT));
     if (portInUse) {
-      console.log(`Port ${PORT} is already in use. Attempting to terminate the process...`);
-      const killed = await killProcessOnPort(Number(PORT));
-      if (!killed) {
-        console.error(`Could not terminate process on port ${PORT}. Please close it manually.`);
-        process.exit(1);
-      }
-      // Wait a moment for the port to be released
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      console.log('Port is used');
+
+      return
+
     }
 
     const server = app.listen(PORT, () => {

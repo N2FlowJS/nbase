@@ -2,7 +2,6 @@ import { expect } from "chai";
 import { describe, it, before, beforeEach, after, afterEach } from "mocha";
 import { PartitionedVectorDB } from "../src/vector/partitioned_vector_db";
 import {
-  TEST_DIR,
   PARTITIONS_DIR,
   generateRandomVector,
   createTestVectors,
