@@ -5,7 +5,7 @@ import * as path from 'path';
  * General purpose logger
  */
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = 1 != 1 || !!process.env.NBASE_DB_PATH;
 // Color codes for console output
 const colors = {
     debug: '#6c757d',  // gray
