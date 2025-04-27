@@ -11,7 +11,7 @@ export const defaultSystemConfiguration: SystemConfiguration = {
   version: '0.1.0',
 
   persistence: {
-    dbPath: './database/vectors',
+    dbPath: `${process.env.NBASE_DB_PATH}` || 'database',
     autoSave: true,
     saveIntervalMs: 1 * 60 * 1000, // 1 minutes
     useCompression: true,

@@ -1,29 +1,29 @@
 import { EventEmitter } from 'events';
-import configDefaults from '../config'; // Import the default config object
-import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
-import {
-  Vector,
-  SearchResult,
-  UnifiedSearchOptions,
-  PartitionedDBEventData,
-  TypedEventEmitter,
-  PerformanceMetrics,
-  DatabaseOptions,
-  DatabaseEvents,
-  PartitionedVectorDBInterface,
-  PartitionedDBStats,
-  DatabaseStats,
-  BuildIndexHNSWOptions,
-  UnifiedSearchPartitionedStats,
-  VectorData,
-  DistanceMetric,
-} from '../types';
+import { existsSync, mkdirSync } from 'fs';
 import { LRUCache } from 'lru-cache';
+import path from 'path'; // Import path for directory handling
+import configDefaults from '../config'; // Import the default config object
+import { UnifiedSearch } from '../search/unified_search';
+import {
+  BuildIndexHNSWOptions,
+  DatabaseEvents,
+  DatabaseOptions,
+  DatabaseStats,
+  DistanceMetric,
+  PartitionedDBEventData,
+  PartitionedDBStats,
+  PartitionedVectorDBInterface,
+  PerformanceMetrics,
+  SearchResult,
+  TypedEventEmitter,
+  UnifiedSearchOptions,
+  UnifiedSearchPartitionedStats,
+  Vector,
+  VectorData,
+} from '../types';
 import { createTimer, Timer } from '../utils/profiling';
 import { VectorDBMonitor } from '../utils/vector_monitoring';
-import { UnifiedSearch } from '../search/unified_search';
-import { existsSync, mkdirSync } from 'fs';
-import path from 'path'; // Import path for directory handling
+import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
 
 /**
  * High-level Database class using PartitionedVectorDB for scalable vector storage and search.
@@ -148,13 +148,13 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
 
     this.monitor = this.options.monitoring.enable
       ? new VectorDBMonitor({
-          // Pass relevant monitor options from this.options.monitoring
-          interval: this.options.monitoring.intervalMs,
-          logToConsole: this.options.monitoring.logToConsole,
-          enableDatabaseMetrics: this.options.monitoring.enableDatabaseMetrics,
-          enableSystemMetrics: this.options.monitoring.enableSystemMetrics,
-          // Add other specific monitor options if needed
-        })
+        // Pass relevant monitor options from this.options.monitoring
+        interval: this.options.monitoring.intervalMs,
+        logToConsole: this.options.monitoring.logToConsole,
+        enableDatabaseMetrics: this.options.monitoring.enableDatabaseMetrics,
+        enableSystemMetrics: this.options.monitoring.enableSystemMetrics,
+        // Add other specific monitor options if needed
+      })
       : null;
 
     // --- Start Asynchronous Initialization ---
@@ -170,14 +170,14 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       this.emit('initializing', undefined);
 
       // 1. Ensure Base Directory Exists
-      const baseDir = this.options.partitioning.partitionsDir || path.join(process.cwd(), 'partitions'); // Default path
-      this._ensureDirectoryExists(baseDir, 'Partitions');
+      const baseDir = path.join(process.cwd(), this.options.persistence.dbPath || 'database'); // Default path
+      this._ensureDirectoryExists(baseDir, 'partitions');
 
       // 2. Initialize PartitionedVectorDB
       console.log('[Database] Initializing PartitionedVectorDB...');
       this.vectorDB = new PartitionedVectorDB({
         // Pass necessary options from this.options
-        partitionsDir: baseDir,
+        partitionsDir: path.join(baseDir, "partitions"),
         partitionCapacity: this.options.partitioning.partitionCapacity,
         maxActivePartitions: this.options.partitioning.maxActivePartitions,
         autoCreatePartitions: this.options.partitioning.autoCreatePartitions,

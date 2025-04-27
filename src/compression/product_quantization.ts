@@ -1,7 +1,7 @@
-import { KMeans } from './kmeans';
+import { promises as fs } from 'fs';
 import config from '../config';
 import { LoadModelOptions, PQOptions, TrainingOptions, Vector } from '../types';
-import { promises as fs } from 'fs';
+import { KMeans } from './kmeans';
 
 /**
  * Product Quantization implementation for vector compression

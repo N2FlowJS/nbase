@@ -94,6 +94,7 @@ function createServer(options: IServerOptions = {}): IServerInstance {
   const serverOptions: Required<IServerOptions> = {
     port: options.port || configDefaults.server.port,
     host: options.host || configDefaults.server.host,
+    
     database: {
       ...{
         clustering: configDefaults.clustering,

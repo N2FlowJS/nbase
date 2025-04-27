@@ -1,13 +1,14 @@
+import { promises as fs } from "fs";
 import config from "../config";
-import { ClusteredVectorDB } from "../vector/clustered_vector_db";
 import {
-  Vector,
-  SearchResult,
-  LSHOptions,
   BuildIndexOptions,
   LoadIndexOptions,
+  LSHOptions,
+  SearchResult,
+  Vector,
 } from "../types";
-import { promises as fs } from "fs";
+import { ClusteredVectorDB } from "../vector/clustered_vector_db";
+import { log } from "../utils/log";
 
 /**
  * Locality-Sensitive Hashing (LSH) implementation
@@ -292,6 +293,7 @@ class LSH {
     if (useDimensionGroups) {
       for (const [dimension, idSet] of this.dimensionGroups.entries()) {
         const idsInDimension = Array.from(idSet);
+        log('info' , `dimension: ${dimension} in ids`)
 
         for (let i = 0; i < idsInDimension.length; i++) {
           const id = idsInDimension[i];

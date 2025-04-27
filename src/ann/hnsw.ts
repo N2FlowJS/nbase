@@ -1,8 +1,8 @@
-import { ClusteredVectorDB } from '../vector/clustered_vector_db';
-import { Vector, SearchResult, SearchOptions, HNSWNode, HNSWOptions, BuildIndexHNSWOptions, HNSWStats, LoadIndexHNSWOptions } from '../types';
-import { createTimer } from '../utils/profiling';
 import { promises as fs } from 'fs';
-import { log } from 'console';
+import { BuildIndexHNSWOptions, HNSWNode, HNSWOptions, HNSWStats, LoadIndexHNSWOptions, SearchOptions, SearchResult, Vector } from '../types';
+import { createTimer } from '../utils/profiling';
+import { ClusteredVectorDB } from '../vector/clustered_vector_db';
+import { log } from '../utils/log';
 
 /**
  * Hierarchical Navigable Small World (HNSW) graph for approximate nearest neighbor search
@@ -115,7 +115,7 @@ class HNSW {
     // Verify the vector exists in the database (optimized get)
     const dbVector = this.db.getVector(id); // No need for || vector, assume vector is in DB
     if (!dbVector) {
-      throw new Error(`Vector with id ${id} not found in database`);
+      throw new Error(`Vector with id ${id} not found in database. Length vector input ${vector.length}`);
     }
 
     // Store vector dimension
@@ -718,6 +718,7 @@ class HNSW {
     // If dimension-aware, process each dimension group separately to avoid cross-dimension connections
     if (dimensionAware) {
       for (const [dimension, ids] of this.dimensionGroups.entries()) {
+        log('info', `${dimension} in ids`)
         // Optimized Map iteration
         const dimensionIds = Array.from(ids);
 

@@ -93,7 +93,6 @@ export class KMeans {
   private _initializeCentroids(vectors: Vector[]): Float32Array[] {
     const centroids: Float32Array[] = [];
     const n = vectors.length;
-    const dimensions = vectors[0].length;
 
     // Choose first centroid randomly
     const firstIdx = Math.floor(Math.random() * n);
