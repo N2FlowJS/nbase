@@ -1,5 +1,5 @@
 ﻿node_modules
-database
+/database
 test-data
 /test/benchmarks/benchmark_db_data
 /docs

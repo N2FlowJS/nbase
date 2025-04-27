@@ -1,7 +1,7 @@
 {
   "name": "@n2flowjs/nbase",
   "package-name": "n2flowjs/nbase",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Neural Vector Database for efficient similarity search",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
