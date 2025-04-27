@@ -1,4 +1,7 @@
 # NBase - Neural Vector Database
+
+[![GitHub Repo](https://img.shields.io/badge/GitHub-nbase-blue?logo=github)](https://github.com/N2FlowJS/nbase)
+
 ```bash
  _   _       ____                 
 | \ | |     | __ )  __ _ ___  ___ 
@@ -11,22 +14,65 @@ NBase is a high-performance vector database for efficient similarity search, des
 
 ## Features
 
-- **Scalable Vector Storage**: Store and manage millions of high-dimensional vectors
-- **Optimized Search Algorithms**: Fast approximate nearest neighbor search
-  - HNSW (Hierarchical Navigable Small World) graphs for logarithmic search time
-  - LSH (Locality-Sensitive Hashing) for fast similarity search
-  - Partitioned search for large-scale databases
-- **Multi-dimensional Support**: Handles vectors of different dimensions
-- **Vector Compression**: Reduces memory usage while maintaining search quality
-- **Rich Query Options**: Filter, rerank, and customize search parameters
-- **Persistence**: Save and load your vector database to/from disk
-- **REST API**: Simple HTTP interface for adding vectors and searching
+- 🗃️ **Scalable Vector Storage**: Store and manage millions of high-dimensional vectors
+- ⚡ **Optimized Search Algorithms**: Fast approximate nearest neighbor search  
+  - 🕸️ HNSW (Hierarchical Navigable Small World) graphs for logarithmic search time  
+  - 🧲 LSH (Locality-Sensitive Hashing) for fast similarity search  
+  - 🗂️ Partitioned search for large-scale databases
+- 📏 **Multi-dimensional Support**: Handles vectors of different dimensions
+- 🗜️ **Vector Compression**: Reduces memory usage while maintaining search quality
+- 🔎 **Rich Query Options**: Filter, rerank, and customize search parameters
+- 💾 **Persistence**: Save and load your vector database to/from disk
+- 🌐 **REST API**: Simple HTTP interface for adding vectors and searching
 
 ## Installation
+
+[View on GitHub](https://github.com/N2FlowJS/nbase)
 
 ```bash
 npm i @n2flowjs/nbase
 ```
+
+## Build & Test
+
+Clone the repository and install dependencies:
+
+```bash
+git clone https://github.com/N2FlowJS/nbase.git
+cd nbase
+npm install
+```
+
+Build the project:
+
+```bash
+npm run build
+```
+
+Run tests:
+
+```bash
+npm test
+```
+
+## Documentation
+
+- [API Reference](https://github.com/N2FlowJS/nbase/blob/main/docs/api.md)
+- [Benchmarks Guide](https://github.com/N2FlowJS/nbase/blob/main/docs/benchmarks.md)
+- [Examples](https://github.com/N2FlowJS/nbase/tree/main/examples)
+- [Changelog](https://github.com/N2FlowJS/nbase/blob/main/CHANGELOG.md)
+- [Contributing Guide](https://github.com/N2FlowJS/nbase/blob/main/CONTRIBUTING.md)
+
+## Community & Support
+
+- [Discussions](https://github.com/N2FlowJS/nbase/discussions)
+- [Issues](https://github.com/N2FlowJS/nbase/issues)
+- [Pull Requests](https://github.com/N2FlowJS/nbase/pulls)
+
+## Links
+
+- [GitHub Repository](https://github.com/N2FlowJS/nbase)
+- [NPM Package](https://www.npmjs.com/package/@n2flowjs/nbase)
 
 ## Quick Start
 
@@ -143,10 +189,10 @@ server.start();
 
 ## Advanced Usage
 
-For more advanced usage examples, check the examples directory in the repository.
+For more advanced usage examples, check the [examples directory](https://github.com/N2FlowJS/nbase/tree/main/examples) in the repository.
 
 ## Performance Benchmarks
-Comprehensive benchmark results and analysis can be found in the [Benchmarks Guide](docs/benchmarks.md).
+Comprehensive benchmark results and analysis can be found in the [Benchmarks Guide](https://github.com/N2FlowJS/nbase/blob/main/docs/benchmarks.md).
 
 Key performance highlights:
 - HNSW Search: Up to 5.86x faster than standard search
@@ -162,7 +208,7 @@ Benchmark scenarios:
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please feel free to submit a [Pull Request](https://github.com/N2FlowJS/nbase/pulls) or open an [issue](https://github.com/N2FlowJS/nbase/issues).
 
 ## License
 
