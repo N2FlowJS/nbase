@@ -13,8 +13,7 @@
     "benchmark": "ts-node test/run-benchmarks.ts",
     "test": "mocha -r ts-node/register 'test/**/*.test.ts'",
     "test:file": "mocha -r ts-node/register 'test/**/search-metadata.test.ts'",
-    "docs:generate": "typedoc",
-    "docs:serve": "http-server docs -o",
+    "run:docs": "docsify serve docs",
     "npm:publish": "npm publish --access public"
   },
   "keywords": [

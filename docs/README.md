@@ -146,19 +146,14 @@ server.start();
 For more advanced usage examples, check the examples directory in the repository.
 
 ## Performance Benchmarks
-Comprehensive benchmark results and analysis can be found in the [Benchmarks Guide](docs/benchmarks.md).
-
-Key performance highlights:
-- HNSW Search: Up to 5.86x faster than standard search
-- Bulk Operations: 320x more efficient than single operations
-- Scale tested: 50,000+ vectors across multiple partitions
-
-Benchmark scenarios:
-| Operation Type              | Time (ms) | Speedup Factor |
-|----------------------------|----------:|---------------:|
-| Standard Search            |     37.01 |          1.00x |
-| HNSW Search               |     39.12 |          0.95x |
-| HNSW Search (After Reload)|      4.24 |          8.73x |
+Benchmarks comparing NBase with other vector databases can be found in the `test/benchmarks` directory.
+---
+| v0.1.3                      | Time (ms) | Speedup Factor  |
+|-----------------------------|----------:|----------------:|
+| Standard Search             | 37.01     | 1.00x           |
+| HNSW Search                 | 39.12     | 0.95x           |
+| HNSW Search (After Reload)  | 4.24      | 8.73x           | 
+---
 
 ## Contributing
 
