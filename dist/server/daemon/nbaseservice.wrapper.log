@@ -1,0 +1,2 @@
+2025-06-14 00:35:34 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-14 00:35:34 - Started 11364

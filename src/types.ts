@@ -1205,6 +1205,11 @@ export interface SystemConfiguration {
     };
   };
   backup: DatabaseBackUp; // Optional backup settings
+  windowsService: {
+    name: string;
+    description: string;
+    script: string;
+  };
 }
 export type PartitionedDBStats = {
   status: string;

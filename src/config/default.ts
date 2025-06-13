@@ -11,7 +11,7 @@ export const defaultSystemConfiguration: SystemConfiguration = {
   version: '0.1.0',
 
   persistence: {
-    dbPath: `${process.env.NBASE_DB_PATH}` || 'database',
+    dbPath: process.env.NBASE_DB_PATH || 'database',
     autoSave: true,
     saveIntervalMs: 1 * 60 * 1000, // 1 minutes
     useCompression: true,
@@ -102,5 +102,11 @@ export const defaultSystemConfiguration: SystemConfiguration = {
       enable: true,
       maxRequestsPerMinute: 500,
     },
+  },
+
+  windowsService: {
+    name: 'NBaseService',
+    description: 'NBase Vector Database Service',
+    script: 'dist/server/index.js', // Path to your main server script
   },
 };
