@@ -1,2 +1,284 @@
 2025-06-14 00:35:34 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
 2025-06-14 00:35:34 - Started 11364
+2025-06-15 22:47:36 - Stopping nbaseservice.exe
+2025-06-15 22:47:36 - ProcessKill 11364
+2025-06-15 22:47:36 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-15 22:48:10 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-15 22:48:10 - Started 4528
+2025-06-17 23:19:31 - Stopping nbaseservice.exe
+2025-06-17 23:19:31 - ProcessKill 4528
+2025-06-17 23:19:31 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-17 23:20:02 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-17 23:20:02 - Started 4416
+2025-06-20 18:17:05 - Stopping nbaseservice.exe
+2025-06-20 18:17:05 - ProcessKill 4416
+2025-06-20 18:17:05 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-20 18:17:37 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-20 18:17:37 - Started 4860
+2025-06-20 18:30:59 - Stopping nbaseservice.exe
+2025-06-20 18:30:59 - ProcessKill 4860
+2025-06-20 18:30:59 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-20 18:31:30 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-20 18:31:30 - Started 4656
+2025-06-20 18:38:12 - Stopping nbaseservice.exe
+2025-06-20 18:38:12 - ProcessKill 4656
+2025-06-20 18:38:13 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-20 18:38:41 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-20 18:38:41 - Started 4404
+2025-06-20 18:49:05 - Stopping nbaseservice.exe
+2025-06-20 18:49:05 - ProcessKill 4404
+2025-06-20 18:49:05 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-20 18:49:33 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-20 18:49:33 - Started 4140
+2025-06-20 18:58:58 - Stopping nbaseservice.exe
+2025-06-20 18:58:58 - ProcessKill 4140
+2025-06-20 18:58:58 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-20 18:59:24 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-20 18:59:24 - Started 4880
+2025-06-21 14:28:20 - Stopping nbaseservice.exe
+2025-06-21 14:28:20 - ProcessKill 4880
+2025-06-21 14:28:20 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-06-21 22:39:49 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-21 22:39:49 - Started 4884
+2025-06-22 07:09:34 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-06-22 07:09:34 - Started 4968
+2025-07-02 18:29:28 - Stopping nbaseservice.exe
+2025-07-02 18:29:28 - ProcessKill 4968
+2025-07-02 18:29:28 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-07-02 18:30:03 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-07-02 18:30:03 - Started 4596
+2025-07-13 22:34:02 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-07-13 22:34:02 - Started 4608
+2025-07-13 22:34:35 - Stopping nbaseservice.exe
+2025-07-13 22:34:35 - ProcessKill 4608
+2025-07-13 22:34:35 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-07-19 13:11:18 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-07-19 13:11:18 - Started 4512
+2025-07-21 23:46:59 - Stopping nbaseservice.exe
+2025-07-21 23:46:59 - ProcessKill 4512
+2025-07-21 23:46:59 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-07-21 23:47:32 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-07-21 23:47:32 - Started 4452
+2025-07-26 15:14:05 - Stopping nbaseservice.exe
+2025-07-26 15:14:05 - ProcessKill 4452
+2025-07-26 15:14:05 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-07-26 15:14:38 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-07-26 15:14:38 - Started 4748
+2025-07-26 15:15:20 - Stopping nbaseservice.exe
+2025-07-26 15:15:20 - ProcessKill 4748
+2025-07-26 15:15:21 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-07-26 17:14:02 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-07-26 17:14:02 - Started 1532
+2025-08-06 22:20:01 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-08-06 22:20:01 - Started 5028
+2025-08-07 22:01:19 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-08-07 22:01:19 - Started 4936
+2025-08-12 22:49:57 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-08-12 22:49:57 - Started 5008
+2025-08-13 20:28:30 - Stopping nbaseservice.exe
+2025-08-13 20:28:30 - ProcessKill 5008
+2025-08-13 20:28:30 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-08-13 20:29:00 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-08-13 20:29:00 - Started 5084
+2025-08-14 00:39:38 - Stopping nbaseservice.exe
+2025-08-14 00:39:38 - ProcessKill 5084
+2025-08-14 00:39:38 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-08-14 00:40:15 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-08-14 00:40:15 - Started 4668
+2025-08-21 01:09:31 - Stopping nbaseservice.exe
+2025-08-21 01:09:31 - ProcessKill 4668
+2025-08-21 01:09:31 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-08-21 01:10:04 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-08-21 01:10:04 - Started 4732
+2025-08-28 00:58:28 - Stopping nbaseservice.exe
+2025-08-28 00:58:28 - ProcessKill 4732
+2025-08-28 00:58:28 - Shutdown exception
+Message:A system shutdown is in progress.
+
+Stacktrace:   at System.Runtime.InteropServices.Marshal.ThrowExceptionForHRInternal(Int32 errorCode, IntPtr errorInfo)
+   at System.Management.ManagementScope.InitializeGuts(Object o)
+   at System.Management.ManagementScope.Initialize()
+   at System.Management.ManagementObjectSearcher.Initialize()
+   at System.Management.ManagementObjectSearcher.Get()
+   at winsw.WrapperService.GetChildPids(Int32 pid)
+   at winsw.WrapperService.StopProcessAndChildren(Int32 pid)
+   at winsw.WrapperService.StopIt()
+   at winsw.WrapperService.OnShutdown()
+2025-08-28 00:58:58 - Starting C:\Program Files\nodejs\node.exe  --harmony --max_old_space_size=4096 D:\git\nbase\node_modules\node-windows\lib\wrapper.js --file D:\git\nbase\dist\server\index.js --scriptoptions= --log "NBaseService wrapper" --grow 0.25 --wait 1 --maxrestarts 3 --abortonerror n --stopparentfirst undefined
+2025-08-28 00:58:58 - Started 4652

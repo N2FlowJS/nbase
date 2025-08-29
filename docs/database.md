@@ -1,263 +1,387 @@
-# Database Reference
+# Database Architecture
 
 ## Overview
 
-The `Database` class is the main interface for NBase, providing high-level access to vector storage, search, and management capabilities. It wraps the underlying `PartitionedVectorDB` and provides additional features like caching, monitoring, and automatic resource management.
+NBase implements a sophisticated multi-layered database architecture designed for high-performance vector similarity search at scale. The architecture combines partitioning, clustering, indexing, and compression techniques to handle millions of high-dimensional vectors efficiently.
 
-## Constructor
+## Architecture Layers
 
-```typescript
-const db = new Database(options: DatabaseOptions);
-```
+### 1. Database Layer (High-Level Interface)
 
-### Options
+The `Database` class provides the primary user interface, offering:
 
-```typescript
-interface DatabaseOptions {
-  // Vector configuration
-  vectorSize?: number;              // Default: 1536
-  
-  // Caching and performance
-  cacheSize?: number;              // Default: 1000
-  maxConcurrentSearches?: number;  // Default: CPU cores - 1
-  
-  // Clustering configuration
-  clustering?: {
-    clusterSize: number;           // Default: 100
-    newClusterThresholdFactor: number;  // Default: 1.5
-    useCompression: boolean;       // Default: true
-  };
-  
-  // Partitioning configuration
-  partitioning?: {
-    partitionsDir: string;         // Default: './database/partitions'
-    partitionCapacity: number;     // Default: 100000
-    autoLoadPartitions: boolean;   // Default: true
-    maxActivePartitions: number;   // Default: 3
-  };
-  
-  // Indexing configuration  
-  indexing?: {
-    buildOnStart: boolean;         // Default: true
-    autoRebuildThreshold: number;  // Default: 500
-    hnsw: {
-      M: number;                   // Default: 16
-      efConstruction: number;      // Default: 200 
-      efSearch: number;           // Default: 100
-    }
-  };
-  
-  // Persistence options
-  persistence?: {
-    dbPath?: string;              // Default: './database'
-    saveIntervalMs?: number;      // Default: 300000 (5 minutes)
-  };
-  
-  // Monitoring options
-  monitoring?: {
-    enable: boolean;              // Default: false
-    intervalMs: number;           // Default: 60000
-    logToConsole: boolean;        // Default: false
-  };
-}
-```
-
-## Core Methods
-
-### Vector Operations
-
-#### Adding Vectors
+- **Unified API**: Single entry point for all operations
+- **Resource Management**: Automatic lifecycle management
+- **Caching**: LRU cache for search results
+- **Monitoring**: Performance metrics and system monitoring
+- **Concurrency Control**: Managed concurrent operations
+- **Event System**: Comprehensive event-driven architecture
 
 ```typescript
-// Add single vector
-const result = await db.addVector(
-  id: string | number | undefined,  // Optional ID
-  vector: number[] | Float32Array,  // Vector data
-  metadata?: Record<string, any>    // Optional metadata
-): Promise<{
-  partitionId: string;
-  vectorId: string | number;
-}>;
-
-// Bulk add vectors
-const result = await db.bulkAdd(
-  vectors: Array<{
-    id?: string | number;
-    vector: number[] | Float32Array;
-    metadata?: Record<string, any>;
-  }>
-): Promise<{
-  count: number;
-  partitionIds: string[];
-}>;
+const db = new Database({
+  vectorSize: 1536,
+  cacheSize: 1000,
+  maxConcurrentSearches: 4,
+  // ... other options
+});
 ```
 
-#### Searching
+### 2. Partitioning Layer (Horizontal Scaling)
+
+The `PartitionedVectorDB` manages data distribution across multiple partitions:
+
+- **Automatic Partitioning**: Creates new partitions when capacity is reached
+- **LRU Cache**: Manages memory usage by unloading inactive partitions
+- **Parallel Processing**: Distributes search queries across partitions
+- **Load Balancing**: Evenly distributes vectors across partitions
+- **Persistence**: Saves partition metadata and configurations
 
 ```typescript
-const results = await db.search(
-  query: number[] | Float32Array,
-  options?: {
-    k?: number;                    // Number of results (default: 10)
-    filter?: (id: string | number, metadata?: Record<string, any>) => boolean;
-    includeMetadata?: boolean;     // Include metadata in results
-    useHNSW?: boolean;            // Use HNSW index
-    efSearch?: number;            // HNSW search parameter
-    distanceMetric?: 'cosine' | 'euclidean';
-    partitionIds?: string[];      // Specific partitions to search
-    skipCache?: boolean;          // Bypass result caching
-  }
-): Promise<Array<{
-  id: string | number;
-  score: number;
-  distance: number;
-  metadata?: Record<string, any>;
-}>>;
+// Partitioning automatically handles data distribution
+await db.bulkAdd(vectors); // Vectors distributed across partitions
+const results = await db.search(query); // Search across all partitions
 ```
 
-### Metadata Management
+### 3. Clustering Layer (Data Organization)
 
-```typescript
-// Add/update metadata
-await db.addMetadata(id, metadata);
-await db.updateMetadata(id, metadata);
+The `ClusteredVectorDB` organizes vectors within each partition:
 
-// Get metadata
-const metadata = await db.getMetadata(id);
+- **K-means Clustering**: Groups similar vectors for faster search
+- **Dynamic Clusters**: Creates new clusters as data grows
+- **Memory Efficiency**: Reduces search space through clustering
+- **Adaptive Thresholds**: Automatically adjusts clustering parameters
 
-// Search by metadata
-const results = await db.getMetadataWithField(
-  criteria: string | string[] | Record<string, any>,
-  values?: any | any[],
-  options?: { limit: number }
-);
+### 4. Storage Layer (Core Operations)
+
+The `VectorDB` handles fundamental vector operations:
+
+- **Vector Storage**: Efficient storage of high-dimensional vectors
+- **Metadata Management**: Key-value metadata storage
+- **Basic Search**: Exact nearest neighbor search
+- **Memory Management**: Optimized memory usage
+
+## Data Flow Architecture
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   REST API      │────│   Database       │────│ PartitionedDB   │
+│   (Express)     │    │   (High-level)   │    │ (Scaling)       │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         │                       │                       │
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   UnifiedSearch │────│  ClusteredDB     │────│   VectorDB      │
+│   (Algorithms)  │    │   (Clustering)   │    │   (Storage)     │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
 ```
 
-## Advanced Features
+### Search Data Flow
 
-```typescript
-// Extract relationships between vectors
-const relationships = await db.extractRelationships(
-  threshold: number,
-  options?: {
-    metric?: 'cosine' | 'euclidean';
-    partitionIds?: string[];
-    includeMetadata?: boolean;
-  }
-);
+1. **Query Reception**: Query enters through Database or REST API
+2. **Cache Check**: Check LRU cache for recent identical queries
+3. **Partition Distribution**: Query distributed to relevant partitions
+4. **Index Search**: Each partition uses appropriate index (HNSW/LSH)
+5. **Cluster Filtering**: Clusters filter irrelevant vectors
+6. **Result Aggregation**: Combine and rank results from all partitions
+7. **Reranking**: Apply diversity or quality reranking if requested
+8. **Response**: Return final results to client
 
-// Find vector communities
-const communities = await db.extractCommunities(
-  threshold: number,
-  options?: {
-    metric?: 'cosine' | 'euclidean';
-    partitionIds?: string[];
-    includeMetadata?: boolean;
-  }
-);
+## Storage Organization
+
+### Directory Structure
+
+```
+database/
+├── partitions/
+│   ├── p-1749282892289/
+│   │   ├── p-1749282892289.config.json
+│   │   ├── data/
+│   │   │   ├── cluster.json
+│   │   │   ├── meta.json
+│   │   │   └── vec.bin
+│   │   └── hnsw/
+│   │       └── hnsw_index.json
+│   └── p-1749282892290/
+│       └── ...
+├── config.json
+└── metadata.json
 ```
 
-## Database Management
+### File Formats
 
-### Initialization and Status
+- **config.json**: Partition configuration and metadata
+- **cluster.json**: K-means clustering data and centroids
+- **meta.json**: Vector metadata storage
+- **vec.bin**: Binary vector data storage
+- **hnsw_index.json**: HNSW graph structure and parameters
 
-```typescript
-// Check if database is ready
-const isReady = db.IsReady();
+## Indexing System
 
-// Wait for initialization
-await db.initializationPromise;
-```
+### Available Indexes
+
+#### HNSW (Hierarchical Navigable Small World)
+- **Use Case**: High-accuracy similarity search
+- **Complexity**: O(log n) search time
+- **Parameters**:
+  - `M`: Maximum connections per node (default: 16)
+  - `efConstruction`: Index build quality (default: 200)
+  - `efSearch`: Search accuracy vs speed (default: 100)
+
+#### LSH (Locality-Sensitive Hashing)
+- **Use Case**: Ultra-fast approximate search
+- **Complexity**: O(1) average case
+- **Parameters**:
+  - `numberOfHashes`: Hash functions (default: 10)
+  - `numberOfBuckets`: Hash buckets (default: 100)
+
+#### Flat Index
+- **Use Case**: Exact search for small datasets
+- **Complexity**: O(n) search time
+- **Parameters**: None required
 
 ### Index Management
 
 ```typescript
-// Build indices
-await db.buildIndexes(
-  partitionId?: string,
-  options?: {
-    force?: boolean;
-    dimensionAware?: boolean;
-    progressCallback?: (progress: number) => void;
-  }
-);
+// Build indexes
+await db.buildIndexes({
+  progressCallback: (progress) => console.log(`${progress}% complete`)
+});
+
+// Save/load indexes
+await db.saveHNSWIndices();
+await db.loadHNSWIndices();
 ```
 
-### State Management
+## Clustering Strategy
+
+### K-means Clustering
+
+- **Purpose**: Group similar vectors to reduce search space
+- **Algorithm**: Lloyd's algorithm with optimizations
+- **Parameters**:
+  - `clusterSize`: Target vectors per cluster (default: 1000)
+  - `maxIterations`: Maximum K-means iterations (default: 50)
+  - `distanceMetric`: Clustering distance function
+
+### Dynamic Clustering
+
+- **Auto-creation**: New clusters created when thresholds exceeded
+- **Load balancing**: Evenly distribute vectors across clusters
+- **Adaptive sizing**: Adjust cluster sizes based on data distribution
+
+## Compression Techniques
+
+### Product Quantization (PQ)
+
+- **Purpose**: Reduce memory usage and improve search speed
+- **Method**: Split vectors into subvectors, quantize each
+- **Parameters**:
+  - `subvectorSize`: Dimension of each subvector
+  - `numClusters`: Number of centroids per subquantizer
+
+### Usage
 
 ```typescript
-// Save current state
+const db = new Database({
+  clustering: {
+    useCompression: true,
+    compression: {
+      algorithm: 'pq',
+      subvectorSize: 8,
+      numClusters: 256
+    }
+  }
+});
+```
+
+## Memory Management
+
+### LRU Caching Strategy
+
+#### Search Result Cache
+- **Purpose**: Cache frequent search results
+- **Implementation**: LRU cache with configurable size
+- **Eviction**: Least recently used results evicted first
+
+#### Partition Cache
+- **Purpose**: Manage memory usage for large datasets
+- **Implementation**: LRU cache for active partitions
+- **Policy**: Unload least recently used partitions
+
+### Memory Configuration
+
+```typescript
+const db = new Database({
+  cacheSize: 1000,              // Search result cache
+  partitioning: {
+    maxActivePartitions: 3,     // Memory limit for partitions
+    partitionCapacity: 50000    // Vectors per partition
+  }
+});
+```
+
+## Persistence and Recovery
+
+### Automatic Persistence
+
+- **Configuration Saving**: Partition configs saved automatically
+- **Index Persistence**: Search indexes saved to disk
+- **Metadata Storage**: Vector metadata persisted
+- **Recovery**: Automatic recovery on restart
+
+### Backup Strategy
+
+```typescript
+// Manual backup
 await db.save();
 
-// Close database
-await db.close();
-
-// Get statistics
-const stats = await db.getStats();
+// Automatic backup configuration
+const db = new Database({
+  persistence: {
+    autoSave: true,
+    saveIntervalMs: 300000  // 5 minutes
+  }
+});
 ```
 
-## Events
+## Performance Characteristics
 
-The Database class emits various events that can be listened to:
+### Scalability Metrics
+
+| Dataset Size | Partitions | Memory Usage | Search Time |
+|-------------|------------|--------------|-------------|
+| < 10K | 1 | Low | < 10ms |
+| 10K - 100K | 2-5 | Medium | 10-50ms |
+| 100K - 1M | 5-20 | High | 50-200ms |
+| > 1M | 20+ | Very High | 200ms+ |
+
+### Optimization Strategies
+
+#### For Speed
+- Use LSH indexing
+- Enable result caching
+- Reduce `efSearch` parameter
+- Use compression
+
+#### For Accuracy
+- Use HNSW indexing
+- Increase `efSearch` parameter
+- Disable compression
+- Apply reranking
+
+#### For Memory Efficiency
+- Reduce partition capacity
+- Enable compression
+- Limit active partitions
+- Use smaller cache sizes
+
+## Monitoring and Observability
+
+### Metrics Collection
 
 ```typescript
-// Lifecycle events
-db.on('initializing', () => {});
-db.on('ready', () => {});
-db.on('close', () => {});
+const db = new Database({
+  monitoring: {
+    enable: true,
+    intervalMs: 5000,
+    enableSystemMetrics: true,
+    enableSearchMetrics: true,
+    enableDatabaseMetrics: true
+  }
+});
 
-// Operation events
-db.on('vector:add', (data) => {});
-db.on('vectors:bulkAdd', (data) => {});
-db.on('search:complete', (data) => {});
-db.on('search:error', (data) => {});
-
-// Background task events
-db.on('save:complete', (data) => {});
-db.on('index:progress', (data) => {});
-
-// Error events
-db.on('error', (data) => {});
-db.on('warn', (data) => {});
+// Get metrics
+const stats = await db.getStats();
+console.log('Performance metrics:', stats.performance);
 ```
 
-## Performance Monitoring
+### Available Metrics
+
+- **System Metrics**: CPU, memory, disk usage
+- **Search Metrics**: Query count, response times, cache hit rates
+- **Database Metrics**: Vector count, partition status, index status
+- **Performance Metrics**: Throughput, latency percentiles
+
+## Configuration Best Practices
+
+### Development Configuration
 
 ```typescript
-const stats = await db.getStats();
-console.log(stats);
-/*
-{
-  state: { isReady, isClosed, status },
-  database: { vectors, partitions, indices },
-  search: { calls, avgTime, methodCounts },
-  searchCache: { size, hits, misses, hitRate },
-  performance: { queries, avgSearchTimeMs },
-  system: { cpuUsage, memoryUsage },
-  options: { current configuration }
-}
-*/
+const devConfig = {
+  vectorSize: 1536,
+  partitioning: {
+    partitionCapacity: 10000,
+    maxActivePartitions: 2
+  },
+  indexing: {
+    buildOnStart: true,
+    hnswOptions: { M: 8, efConstruction: 100 }
+  },
+  monitoring: { enable: true }
+};
 ```
 
-## Best Practices
+### Production Configuration
 
-1. **Initialization**
-   - Always wait for database initialization before performing operations
-   - Use `await db.initializationPromise` or listen for 'ready' event
+```typescript
+const prodConfig = {
+  vectorSize: 1536,
+  partitioning: {
+    partitionCapacity: 100000,
+    maxActivePartitions: 5,
+    autoCreatePartitions: true
+  },
+  indexing: {
+    buildOnStart: true,
+    autoSave: true,
+    hnswOptions: { M: 16, efConstruction: 200, efSearch: 150 }
+  },
+  clustering: {
+    clusterSize: 2000,
+    useCompression: true
+  },
+  cacheSize: 5000,
+  persistence: {
+    autoSave: true,
+    saveIntervalMs: 300000
+  },
+  monitoring: {
+    enable: true,
+    enableSystemMetrics: true,
+    enableSearchMetrics: true
+  }
+};
+```
 
-2. **Vector Management**
-   - Use bulkAdd for adding multiple vectors
-   - Keep vector dimensions consistent within partitions
-   - Include relevant metadata for better filtering
+## Troubleshooting
 
-3. **Search Optimization**
-   - Enable HNSW indexing for large datasets
-   - Use specific partitionIds when possible
-   - Implement efficient filter functions
-   - Utilize metadata search for non-vector queries
+### Common Issues
 
-4. **Resource Management**
-   - Monitor memory usage via getStats()
-   - Close database properly when done
-   - Configure appropriate partition sizes
-   - Adjust maxActivePartitions based on memory
+#### High Memory Usage
+- Reduce `maxActivePartitions`
+- Enable compression
+- Decrease cache size
+- Monitor partition sizes
+
+#### Slow Search Performance
+- Check index status
+- Adjust `efSearch` parameter
+- Enable result caching
+- Consider LSH for speed-critical applications
+
+#### Index Building Issues
+- Ensure sufficient memory
+- Check disk space
+- Monitor build progress
+- Consider building indexes incrementally
+
+### Performance Tuning
+
+1. **Monitor System Resources**: Use built-in monitoring
+2. **Profile Search Queries**: Identify slow queries
+3. **Adjust Index Parameters**: Balance accuracy vs speed
+4. **Optimize Configuration**: Tune based on workload
+5. **Scale Horizontally**: Add more partitions as needed
+
+This architecture provides a solid foundation for high-performance vector similarity search while maintaining flexibility and ease of use.
+ 
