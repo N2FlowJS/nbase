@@ -3,3 +3,5 @@
 test-data
 /test/benchmarks/benchmark_db_data
 logs
+dist
+dist

@@ -117,16 +117,33 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     totalAddTime: 0, // Currently not tracked here
   };
 
+  // Constants
+  private static readonly DEFAULT_DB_PATH = 'database';
+  private static readonly PARTITIONS_DIR_NAME = 'partitions';
+  private static readonly CACHE_EVENTS = ['vector:add', 'vector:delete', 'vectors:bulkAdd', 'partition:created', 'partition:unloaded'];
+  private static readonly METRICS_EVENTS = ['vector:add', 'vector:delete', 'vectors:bulkAdd', 'partition:loaded', 'partition:unloaded'];
+
   /**
    * Creates a new Database instance. Initialization is asynchronous.
    * Listen for the 'ready' event or await the ready() promise before use.
-   * @param options Configuration options.
+   *
+   * @param options Configuration options for the database
    */
   constructor(options: DatabaseOptions) {
     super();
 
-    // --- Merge Options with Defaults ---
-    this.options = {
+    this.options = this.mergeOptionsWithDefaults(options);
+    this.searchCache = this.createSearchCache();
+    this.monitor = this.createMonitor();
+
+    this.initializationPromise = this.initialize();
+  }
+
+  /**
+   * Merges user options with default configuration
+   */
+  private mergeOptionsWithDefaults(options: DatabaseOptions): Required<DatabaseOptions> {
+    return {
       vectorSize: options.vectorSize ?? configDefaults.defaults.vectorSize,
       clustering: { ...configDefaults.clustering, ...options.clustering },
       partitioning: {
@@ -137,122 +154,196 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       cacheSize: options.cacheSize ?? configDefaults.defaults.cacheSize,
       maxConcurrentSearches: options.maxConcurrentSearches ?? configDefaults.defaults.maxConcurrentSearches,
       persistence: { ...configDefaults.persistence, ...options.persistence },
-      backup: { ...configDefaults.backup, ...options.backup }, // Keep for config, but logic removed
+      backup: { ...configDefaults.backup, ...options.backup },
       monitoring: { ...configDefaults.monitoring, ...options.monitoring },
     };
-
-    // --- Initialize Caching and Monitoring ---
-    this.searchCache = new LRUCache<string, SearchResult[]>({
-      max: this.options.cacheSize,
-    });
-
-    this.monitor = this.options.monitoring.enable
-      ? new VectorDBMonitor({
-        // Pass relevant monitor options from this.options.monitoring
-        interval: this.options.monitoring.intervalMs,
-        logToConsole: this.options.monitoring.logToConsole,
-        enableDatabaseMetrics: this.options.monitoring.enableDatabaseMetrics,
-        enableSystemMetrics: this.options.monitoring.enableSystemMetrics,
-        // Add other specific monitor options if needed
-      })
-      : null;
-
-    // --- Start Asynchronous Initialization ---
-    this.initializationPromise = this._initialize();
   }
 
   /**
-   * Performs the main asynchronous initialization sequence.
+   * Creates and configures the search cache
    */
-  private async _initialize(): Promise<void> {
+  private createSearchCache(): LRUCache<string, SearchResult[]> {
+    return new LRUCache<string, SearchResult[]>({
+      max: this.options.cacheSize,
+    });
+  }
+
+  /**
+   * Creates monitor instance if monitoring is enabled
+   */
+  private createMonitor(): VectorDBMonitor | null {
+    if (!this.options.monitoring.enable) {
+      return null;
+    }
+
+    return new VectorDBMonitor({
+      interval: this.options.monitoring.intervalMs,
+      logToConsole: this.options.monitoring.logToConsole,
+      enableDatabaseMetrics: this.options.monitoring.enableDatabaseMetrics,
+      enableSystemMetrics: this.options.monitoring.enableSystemMetrics,
+    });
+  }
+
+  /**
+   * Main asynchronous initialization sequence
+   */
+  private async initialize(): Promise<void> {
     try {
-      console.log('[Database] initialization started...');
+      console.log('[Database] Starting initialization...');
       this.emit('initializing', undefined);
 
-      // 1. Ensure Base Directory Exists
-      const baseDir = path.join(process.cwd(), this.options.persistence.dbPath || 'database'); // Default path
-      this._ensureDirectoryExists(baseDir, 'partitions');
+      await this.initializeStorage();
+      await this.initializeVectorDB();
+      await this.initializeUnifiedSearch();
+      await this.handleInitialIndexing();
+      this.startBackgroundTasks();
 
-      // 2. Initialize PartitionedVectorDB
-      console.log('[Database] Initializing PartitionedVectorDB...');
-      this.vectorDB = new PartitionedVectorDB({
-        // Pass necessary options from this.options
-        partitionsDir: path.join(baseDir, "partitions"),
-        partitionCapacity: this.options.partitioning.partitionCapacity,
-        maxActivePartitions: this.options.partitioning.maxActivePartitions,
-        autoCreatePartitions: this.options.partitioning.autoCreatePartitions,
-        autoLoadPartitions: this.options.partitioning.autoLoadPartitions,
-        autoLoadHNSW: this.options.indexing.autoLoad, // Link autoLoadHNSW
-        vectorSize: this.options.vectorSize,
-        useCompression: this.options.clustering.useCompression,
-        clusterOptions: this.options.clustering,
-      });
-
-      // 3. Setup Event Listeners (Crucial to do this before waiting/loading)
-      this._setupEventListeners();
-
-      // 4. Wait for PartitionedVectorDB to be ready
-      console.log('[Database] Waiting for PartitionedVectorDB to become ready...');
-      // Check if IsReady method is available
-      if (this.vectorDB.IsReady()) {
-        // Proceed if the database is ready
-        console.log('[Database] PartitionedVectorDB is ready.');
-      } else {
-        // Fallback: Wait on its internal initialization promise if accessible (less ideal)
-        await this.vectorDB.initializationPromise; // Adjust if name differs
-      }
-      console.log('[Database] PartitionedVectorDB is ready.');
-
-      // 5. Initialize UnifiedSearch (after vectorDB is ready)
-      console.log('[Database] Initializing UnifiedSearch...');
-      this.unifiedSearch = new UnifiedSearch(this.vectorDB, {
-        // Pass any UnifiedSearch specific config if needed
-        debug: this.options.monitoring.logToConsole,
-      });
-      this._setupUnifiedSearchListeners(); // Setup listeners specific to unified search
-
-      // 6. Optional: Load/Build Indices on Start
-      if (this.options.indexing.buildOnStart) {
-        console.log('[Database] Loading/Building indices based on buildOnStart option...');
-        await this._handleInitialIndexing();
-      }
-
-      // 7. Start Monitoring
-      this.monitor?.start();
-
-      // 8. Setup Auto-Save (using vectorDB's save method)
-      if (!this.isClosed && this.options.persistence.saveIntervalMs && this.options.persistence.saveIntervalMs > 0) {
-        this._setupAutoSave();
-      }
-
-      // --- Initialization Complete ---
-      this.isReady = true;
-      console.log('[Database] initialization successful. Ready for operations.');
-      try {
-        const initialStats = await this.getStats(); // Get initial stats
-        console.log(`[Database] Initial State: Partitions Configured: ${initialStats.database?.partitions?.totalConfigured}, Loaded: ${initialStats.database?.partitions?.loadedCount}`);
-      } catch (statsError) {
-        console.warn('[Database] Could not retrieve initial stats after ready:', statsError);
-      }
-      this.emit('ready', undefined);
+      this.markAsReady();
     } catch (error: any) {
-      console.error('[Database] FATAL: Database initialization failed:', error);
-      this.isClosed = true; // Mark as closed on fatal error
-      this.monitor?.stop();
-      this.emit('error', {
-        message: `[Database] Database initialization failed: ${error.message}`,
-        error: error,
-        context: 'initialize',
-      });
-      // Propagate the error to reject the initializationPromise
+      await this.handleInitializationError(error);
       throw error;
     }
   }
 
-  // --- Private Helper Methods ---
+  /**
+   * Ensures base directory exists for storage
+   */
+  private async initializeStorage(): Promise<void> {
+    const baseDir = path.join(
+      process.cwd(),
+      this.options.persistence.dbPath || Database.DEFAULT_DB_PATH
+    );
 
-  /** Ensures a directory exists. */
-  private _ensureDirectoryExists(dirPath: string, purpose: string): void {
+    this.ensureDirectoryExists(baseDir, Database.PARTITIONS_DIR_NAME);
+  }
+
+  /**
+   * Initializes the PartitionedVectorDB instance
+   */
+  private async initializeVectorDB(): Promise<void> {
+    console.log('[Database] Initializing PartitionedVectorDB...');
+
+    const baseDir = path.join(
+      process.cwd(),
+      this.options.persistence.dbPath || Database.DEFAULT_DB_PATH
+    );
+
+    this.vectorDB = new PartitionedVectorDB({
+      partitionsDir: path.join(baseDir, Database.PARTITIONS_DIR_NAME),
+      partitionCapacity: this.options.partitioning.partitionCapacity,
+      maxActivePartitions: this.options.partitioning.maxActivePartitions,
+      autoCreatePartitions: this.options.partitioning.autoCreatePartitions,
+      autoLoadPartitions: this.options.partitioning.autoLoadPartitions,
+      autoLoadHNSW: this.options.indexing.autoLoad,
+      vectorSize: this.options.vectorSize,
+      useCompression: this.options.clustering.useCompression,
+      clusterOptions: this.options.clustering,
+    });
+
+    this.setupEventListeners();
+
+    if (this.vectorDB.IsReady()) {
+      console.log('[Database] PartitionedVectorDB is ready.');
+    } else {
+      await this.vectorDB.initializationPromise;
+    }
+  }
+
+  /**
+   * Initializes the UnifiedSearch instance
+   */
+  private async initializeUnifiedSearch(): Promise<void> {
+    console.log('[Database] Initializing UnifiedSearch...');
+
+    this.unifiedSearch = new UnifiedSearch(this.vectorDB, {
+      debug: this.options.monitoring.logToConsole,
+    });
+
+    this.setupUnifiedSearchListeners();
+  }
+
+  /**
+   * Handles initial indexing based on configuration
+   */
+  private async handleInitialIndexing(): Promise<void> {
+    if (!this.options.indexing.buildOnStart) {
+      return;
+    }
+
+    try {
+      if (this.options.indexing.autoLoad) {
+        console.log('[Database] Loading existing HNSW indices...');
+        await this.vectorDB.loadHNSWIndices();
+      }
+
+      console.log('[Database] Building initial indices...');
+      const progressCallback = (progress: number) => {
+        console.log(`[Database] Index build progress: ${progress}%`);
+        this.emit('index:progress', {
+          message: 'Building initial indices...',
+          progress,
+        });
+      };
+
+      await this.buildIndexes(undefined, {
+        force: true,
+        dimensionAware: true,
+        progressCallback,
+      });
+    } catch (error: any) {
+      console.warn(`[Database] Initial indexing issue: ${error.message}`);
+      this.emit('warn', {
+        message: `Initial index handling issue: ${error.message}`,
+        context: 'handleInitialIndexing',
+        error,
+      });
+    }
+  }
+
+  /**
+   * Starts background tasks like monitoring and auto-save
+   */
+  private startBackgroundTasks(): void {
+    this.monitor?.start();
+    this._setupAutoSave();
+  }
+
+  /**
+   * Marks database as ready and emits ready event
+   */
+  private async markAsReady(): Promise<void> {
+    this.isReady = true;
+    console.log('[Database] Initialization successful. Ready for operations.');
+
+    try {
+      const initialStats = await this.getStats();
+      console.log(`[Database] Initial State: ${initialStats.database?.partitions?.totalConfigured} partitions configured, ${initialStats.database?.partitions?.loadedCount} loaded`);
+    } catch (error: any) {
+      console.warn('[Database] Could not retrieve initial stats:', error.message);
+    }
+
+    this.emit('ready', undefined);
+  }
+
+  /**
+   * Handles initialization errors
+   */
+  private async handleInitializationError(error: any): Promise<void> {
+    console.error('[Database] FATAL: Database initialization failed:', error);
+    this.isClosed = true;
+    this.monitor?.stop();
+
+    this.emit('error', {
+      message: `[Database] Database initialization failed: ${error.message}`,
+      error,
+      context: 'initialize',
+    });
+  }
+
+  /**
+   * Ensures a directory exists, creating it if necessary
+   */
+  private ensureDirectoryExists(dirPath: string, purpose: string): void {
     try {
       if (!existsSync(dirPath)) {
         mkdirSync(dirPath, { recursive: true });
@@ -263,107 +354,102 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     }
   }
 
-  /** Handles loading and/or building indices during startup based on options. */
-  private async _handleInitialIndexing(): Promise<void> {
-    try {
-      if (this.options.indexing.autoLoad) {
-        console.log('[Database] Attempting to load existing HNSW indices...');
-        await this.vectorDB.loadHNSWIndices(); // Load all available
-        console.log('Finished loading existing HNSW indices.');
-      }
-
-      // Decide if building is needed (e.g., if autoLoad failed or forced build)
-      // This logic might need refinement based on specific needs.
-      // For now, buildOnStart implies potentially building *after* loading.
-      console.log('[Database] Checking if initial index build is required...');
-      // Simple approach: just build if buildOnStart is true.
-      // More complex: Check if loaded indices cover all partitions, etc.
-      const progressCallback = (progress: number) => {
-        console.log(`[Database] Progress: ${progress}%`);
-
-        this.emit('index:progress', {
-          message: 'Building initial indices...',
-          progress: progress, // Placeholder for actual progress
-        });
-      };
-
-      await this.buildIndexes(undefined, {
-        force: true, // Skip initial check
-        dimensionAware: true,
-        progressCallback,
-      }); // Build for all loaded partitions if needed
-      console.log('[Database] Initial index build process completed (if applicable).');
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Unknown indexing error';
-      console.warn(`[Database] Warning during initial index handling: ${message}`);
-      this.emit('warn', {
-        message: `Initial index handling issue: ${message}`,
-        context: 'handleInitialIndexing',
-        error: err,
-      });
-      // Decide if this should be a fatal error
-    }
-  }
-
   /** Sets up internal event listeners for PartitionedVectorDB events. */
-  private _setupEventListeners(): void {
+  private setupEventListeners(): void {
     if (!this.vectorDB || typeof (this.vectorDB as any).on !== 'function') return;
 
     const dbEmitter = this.vectorDB as any as TypedEventEmitter<PartitionedDBEventData>;
 
     // Generic handler to forward events, clear cache, and update monitor
-    const handleDbEvent = <E extends keyof PartitionedDBEventData>(eventName: E, data: PartitionedDBEventData[E]) => {
+    const handleDbEvent = <E extends keyof PartitionedDBEventData>(
+      eventName: E,
+      data: PartitionedDBEventData[E]
+    ) => {
       if (this.isClosed) return;
 
-      // Clear search cache on any data modification or structural change
-      const shouldClearCache = [
-        'vector:add',
-        'vector:delete',
-        'vectors:bulkAdd', // Assuming bulkAdd event exists
-        'partition:created',
-        'partition:loaded', // Maybe not necessary, but safer
-        'partition:unloaded', // Definitely clear if partition goes away
-      ].includes(eventName as string);
-
-      if (shouldClearCache) {
-        this.searchCache.clear();
-      }
-
-      // Forward the event
-      this.emit(eventName as keyof DatabaseEvents, data as any);
-
-      // Update monitor DB metrics on relevant changes
-      const shouldUpdateMetrics = ['vector:add', 'vector:delete', 'vectors:bulkAdd', 'partition:loaded', 'partition:unloaded'].includes(eventName as string);
-
-      if (shouldUpdateMetrics) {
-        this._updateMonitorDbMetrics(); // Async update
-      }
-
-      // Record specific events/errors in monitor
-      if (this.monitor) {
-        if (['vector:add', 'vector:delete', 'partition:created'].includes(eventName as string)) {
-          this.monitor.recordEvent(eventName, data);
-        }
-        if (eventName === 'partition:error') {
-          this.monitor.recordError('partition_error', data);
-        }
-      }
+      this.handleCacheInvalidation(eventName);
+      this.forwardEvent(eventName, data);
+      this.updateMetrics(eventName, data);
+      this.recordEventInMonitor(eventName, data);
     };
 
-    // Register listeners
-    dbEmitter.on('vector:add', (data) => handleDbEvent('vector:add', data));
-    dbEmitter.on('vector:delete', (data) => handleDbEvent('vector:delete', data));
-    // Assuming PartitionedVectorDB might emit bulk add completion:
-    dbEmitter.on('vectors:bulkAdd', (data) => handleDbEvent('vectors:bulkAdd', data));
-    dbEmitter.on('partition:created', (data) => handleDbEvent('partition:created', data));
-    dbEmitter.on('partition:loaded', (data) => handleDbEvent('partition:loaded', data));
-    dbEmitter.on('partition:unloaded', (data) => handleDbEvent('partition:unloaded', data));
-    dbEmitter.on('partition:activated', (data) => handleDbEvent('partition:activated', data));
-    dbEmitter.on('partition:error', (data) => handleDbEvent('partition:error', data));
-    dbEmitter.on('config:saved', (data) => handleDbEvent('config:saved', data)); // Forward config save events
-    dbEmitter.on('db:saved', (data) => handleDbEvent('db:saved', data)); // Forward full save events
-    dbEmitter.on('db:loaded', (data) => handleDbEvent('db:loaded', data)); // Forward load events
+    // Register listeners for all relevant events
+    this.registerDatabaseEventListeners(dbEmitter, handleDbEvent);
+    this.registerIndexingEventListeners(dbEmitter);
+  }
 
+  /**
+   * Handles cache invalidation based on event type
+   */
+  private handleCacheInvalidation(eventName: string): void {
+    if (Database.CACHE_EVENTS.includes(eventName as any)) {
+      this.searchCache.clear();
+    }
+  }
+
+  /**
+   * Forwards events to external listeners
+   */
+  private forwardEvent(eventName: string, data: any): void {
+    this.emit(eventName as keyof DatabaseEvents, data as any);
+  }
+
+  /**
+   * Updates performance metrics based on event type
+   */
+  private updateMetrics(eventName: string, data: any): void {
+    if (Database.METRICS_EVENTS.includes(eventName as any)) {
+      this._updateMonitorDbMetrics();
+    }
+  }
+
+  /**
+   * Records events in the monitor if available
+   */
+  private recordEventInMonitor(eventName: string, data: any): void {
+    if (!this.monitor) return;
+
+    if (['vector:add', 'vector:delete', 'partition:created'].includes(eventName)) {
+      this.monitor.recordEvent(eventName, data);
+    }
+    if (eventName === 'partition:error') {
+      this.monitor.recordError('partition_error', data);
+    }
+  }
+
+  /**
+   * Registers database operation event listeners
+   */
+  private registerDatabaseEventListeners(
+    dbEmitter: TypedEventEmitter<PartitionedDBEventData>,
+    handler: <E extends keyof PartitionedDBEventData>(
+      eventName: E,
+      data: PartitionedDBEventData[E]
+    ) => void
+  ): void {
+    const events: (keyof PartitionedDBEventData)[] = [
+      'vector:add',
+      'vector:delete',
+      'vectors:bulkAdd',
+      'partition:created',
+      'partition:loaded',
+      'partition:unloaded',
+      'partition:activated',
+      'partition:error',
+      'config:saved',
+      'db:saved',
+      'db:loaded',
+    ];
+
+    events.forEach(event => {
+      dbEmitter.on(event, (data) => handler(event, data));
+    });
+  }
+
+  /**
+   * Registers indexing-related event listeners
+   */
+  private registerIndexingEventListeners(dbEmitter: TypedEventEmitter<PartitionedDBEventData>): void {
     // Forward indexing events
     dbEmitter.on('partition:indexProgress', (data) => this.emit('index:progress', data));
     dbEmitter.on('partition:indexed', (data) => this.emit('partition:indexed', data));
@@ -378,38 +464,44 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /** Sets up listeners for UnifiedSearch events. */
-  private _setupUnifiedSearchListeners(): void {
+  private setupUnifiedSearchListeners(): void {
     if (!this.unifiedSearch) return;
 
+    // Forward search start events
     this.unifiedSearch.on('search:start', (data) => {
-      // Potentially useful for detailed logging or request tracking
       this.emit('search:start', data);
     });
 
+    // Handle search completion events
     this.unifiedSearch.on('search:complete', (data) => {
-      if (this.monitor) {
-        this.monitor.recordSearch({
-          duration: data.totalTime,
-          method: data.dbMethodUsed,
-          results: data.resultCount,
-          cacheUsed: data.cacheUsed, // Pass cache info if available
-        });
-        // Update aggregate metrics
-        this.metrics.totalSearchTime += data.totalTime;
-        this.metrics.queries++;
-        this.metrics.avgSearchTime = this.metrics.totalSearchTime / this.metrics.queries;
-        this.metrics.queryTimes.push(data.totalTime);
-        if (this.metrics.queryTimes.length > 100) this.metrics.queryTimes.shift(); // Keep last 100 times
-      }
-      this.emit('search:complete', data); // Forward event
+      this.updateSearchMetrics(data);
+      this.emit('search:complete', data);
     });
+  }
 
-    this.unifiedSearch.on('search:error', (data) => {
-      if (this.monitor) {
-        this.monitor.recordError('search_error', data);
-      }
-      this.emit('search:error', data); // Forward error
-    });
+  /**
+   * Updates search performance metrics
+   */
+  private updateSearchMetrics(data: any): void {
+    if (this.monitor) {
+      this.monitor.recordSearch({
+        duration: data.totalTime,
+        method: data.dbMethodUsed,
+        results: data.resultCount,
+        cacheUsed: data.cacheUsed,
+      });
+    }
+
+    // Update aggregate metrics
+    this.metrics.totalSearchTime += data.totalTime;
+    this.metrics.queries++;
+    this.metrics.avgSearchTime = this.metrics.totalSearchTime / this.metrics.queries;
+
+    // Track query times for analysis (keep last 100)
+    this.metrics.queryTimes.push(data.totalTime);
+    if (this.metrics.queryTimes.length > 100) {
+      this.metrics.queryTimes.shift();
+    }
   }
 
   /** Pushes current DB stats to the monitor asynchronously. */
