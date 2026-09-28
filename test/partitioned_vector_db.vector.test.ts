@@ -2,7 +2,6 @@ import { expect } from "chai";
 import { describe, it, before, beforeEach, after, afterEach } from "mocha";
 import { PartitionedVectorDB } from "../src/vector/partitioned_vector_db";
 import {
-  TEST_DIR,
   PARTITIONS_DIR,
   generateRandomVector,
   createTestVectors,
@@ -64,7 +63,7 @@ describe("PartitionedVectorDB - Vector Operations", () => {
     const result = await db.bulkAdd(vectors);
     expect(result.count).to.equal(50);
 
-    const stats = await db.getStats();
+    await db.getStats();
     const partitionConfig = db.getPartitionConfigs();
     let vectorCount = 0;
     partitionConfig.forEach((partition) => {

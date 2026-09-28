@@ -71,7 +71,9 @@ export function createTimer() {
     },
 
     isRunning(name: string): boolean {
-      return timers.hasOwnProperty(name);
+      // Object.prototype.hasOwnProperty.call: a timer named 'hasOwnProperty'
+      // (or an object with a null prototype) would otherwise misbehave.
+      return Object.prototype.hasOwnProperty.call(timers, name);
     },
 
     getActiveTimers(): string[] {

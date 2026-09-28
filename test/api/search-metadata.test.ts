@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { Request, Response } from 'express';
+import { Request } from 'express';
 import { beforeEach, describe, it } from 'mocha';
 import * as sinon from 'sinon';
 import express from 'express';
@@ -58,11 +58,15 @@ describe('Search Metadata Endpoint', () => {
     // Create mock filter function
     mockCreateFilterFunction = sinon.stub().returns(() => true);
 
-    // Setup the API context with mocks
+    // Setup the API context with mocks.
+    // The context exposes `createTimer` so each request gets its own Timer;
+    // handing out one shared instance made concurrent requests overwrite each
+    // other's start timestamps.
     mockContext = {
       database: mockDatabase as any,
-      timer: mockTimer as any,
+      createTimer: sinon.stub().returns(mockTimer),
       createFilterFunction: mockCreateFilterFunction,
+      maxGraphExtractionVectors: 10000,
     };
 
     // Create the router with mocks

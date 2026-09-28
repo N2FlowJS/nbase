@@ -1,9 +1,31 @@
 // --- START OF FILE unified_search.ts ---
 
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
 import { Vector, SearchResult, PartitionedVectorDBInterface, UnifiedSearchOptions, BaseSearchOptions, SearchExecutionOptions, RerankingOptions, UnifiedSearchPartitionedStats, PartitionedDBStats } from '../types';
 import { SearchReranker } from './reranking';
 import { createTimer } from '../utils/profiling';
+
+/**
+ * Rejects with `label timed out after Nms` if `promise` has not settled in time.
+ * The underlying promise is left running (it cannot be cancelled), but the timer
+ * handle is always cleared so a short search does not pin a live timer for the
+ * whole timeout window.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let handle: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        handle = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        // Do not hold the event loop open just for the timeout.
+        handle.unref?.();
+      }),
+    ]);
+  } finally {
+    if (handle) clearTimeout(handle);
+  }
+}
 
 /**
  * UnifiedSearch provides a consistent search interface, now leveraging PartitionedVectorDB
@@ -49,7 +71,6 @@ export class UnifiedSearch extends EventEmitter {
   public reranker: SearchReranker | null = null;
   private debug: boolean = false;
   private searchStats: UnifiedSearchPartitionedStats['search'];
-  private timer: ReturnType<typeof createTimer>;
 
   constructor(
     db: PartitionedVectorDBInterface, // Nhận instance DB đã được cấu hình
@@ -58,7 +79,6 @@ export class UnifiedSearch extends EventEmitter {
     super();
     this.db = db;
     this.debug = options.debug || false;
-    this.timer = createTimer();
 
     // Initialize reranker
     this.reranker = new SearchReranker();
@@ -115,7 +135,10 @@ export class UnifiedSearch extends EventEmitter {
     // Sử dụng UnifiedSearchOptions đã được tối ưu
     options: UnifiedSearchOptions = {}
   ): Promise<SearchResult[]> {
-    const operationTimer = this.timer; // Use the class-level timer
+    // A fresh timer per invocation. The class-level (and previously
+    // module-level) timer was shared, so two concurrent searches overwrote each
+    // other's start timestamps and every reported duration was wrong.
+    const operationTimer = createTimer();
     operationTimer.start('unified_search_total');
 
     // Destructure options with defaults, separating base, execution, and unified options
@@ -182,13 +205,14 @@ export class UnifiedSearch extends EventEmitter {
         throw new Error('No suitable search method (findNearestHNSW or findNearest) available in the database.');
       }
 
-      // TODO: Implement timeout if searchTimeoutMs is provided
-      // searchPromise = await Promise.race([
-      //   searchPromise,
-      //   new Promise((_, reject) => setTimeout(() => reject(new Error('Search timed out')), searchTimeoutMs))
-      // ]);
-
-      results = await searchPromise;
+      // Honour the documented `searchTimeoutMs` option. It used to be
+      // destructured and then ignored (a TODO), so callers who set it got an
+      // unbounded search.
+      if (searchTimeoutMs && searchTimeoutMs > 0) {
+        results = await withTimeout(searchPromise, searchTimeoutMs, 'Search');
+      } else {
+        results = await searchPromise;
+      }
       const dbSearchTime = operationTimer.stop('db_search').total ?? 0; // Get duration
       if (this.debug) console.log(`${methodUsed} search completed in ${dbSearchTime}ms, found ${results.length} raw results.`);
 
@@ -212,7 +236,7 @@ export class UnifiedSearch extends EventEmitter {
         operationTimer.start('rerank');
         if (needMetadataForRerankOrOutput) {
           if (this.debug) console.log('Fetching metadata for reranking/output...');
-          metadataMap = await this._getMetadataForResults(results.map((r) => r.id));
+          metadataMap = await this._getMetadataForResults(results.map((r) => r.id), operationTimer);
           if (this.debug) console.log(`Fetched metadata for ${metadataMap.size} IDs.`);
         }
 
@@ -241,7 +265,7 @@ export class UnifiedSearch extends EventEmitter {
           operationTimer.start('fetch_metadata');
           if (this.debug) console.log('Fetching metadata for final output...');
           // Fetch metadata only if it wasn't already fetched for reranking
-          const finalMetadataMap = metadataMap ?? (await this._getMetadataForResults(finalResults.map((r) => r.id)));
+          const finalMetadataMap = metadataMap ?? (await this._getMetadataForResults(finalResults.map((r) => r.id), operationTimer));
           if (this.debug) console.log(`Fetched metadata for ${finalMetadataMap.size} IDs.`);
 
           for (const result of finalResults) {
@@ -306,7 +330,7 @@ export class UnifiedSearch extends EventEmitter {
    * Assumes `this.db` has a `getMetadata(id)` method adhering to the interface.
    * @private
    */
-  private async _getMetadataForResults(ids: (number | string)[]): Promise<Map<number | string, any>> {
+  private async _getMetadataForResults(ids: (number | string)[], operationTimer: ReturnType<typeof createTimer>): Promise<Map<number | string, any>> {
     const metadataMap = new Map<number | string, any>();
     if (ids.length === 0 || typeof this.db.getMetadata !== 'function') {
       return metadataMap;
@@ -384,8 +408,5 @@ export class UnifiedSearch extends EventEmitter {
   }
 }
 
-// Add a global timer instance for helper functions like _getMetadataForResults
-// This is a simple approach; a more robust solution might inject the timer or use a separate instance.
-const operationTimer = createTimer();
 
 // --- END OF FILE unified_search.ts ---

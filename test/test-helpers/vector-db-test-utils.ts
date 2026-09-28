@@ -1,9 +1,17 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { rimraf } from 'rimraf';
-import { Vector } from '../../src/types';
 
-export const TEST_DIR = path.join(process.cwd(), 'test-data', 'partitioned-db');
+/**
+ * Per-run temp directory for DB fixtures.
+ *
+ * This used to be `path.join(process.cwd(), 'test-data', ...)`, which meant
+ * every suite shared one fixed directory inside the repository. That made the
+ * location depend on the current working directory and hard-blocked
+ * `mocha --parallel` (one suite's `before` would rimraf another's fixtures).
+ */
+export const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'nbase-test-'));
 export const PARTITIONS_DIR = path.join(TEST_DIR, 'partitions');
 
 // Test vectors

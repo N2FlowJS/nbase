@@ -3,9 +3,9 @@ import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import net from 'net';
-import { promisify } from 'util';
 import { default as config, default as configDefaults } from '../config';
 import { createTimer } from '../utils/profiling';
+import { log } from '../utils/log';
 
 // Import Database class
 import { Database } from '../database/database';
@@ -32,18 +32,22 @@ export type { AddVectorRequest, BatchSearchRequest, BulkAddRequest, DatabaseOpti
  */
 async function isPortInUse(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const server = net
-      .createServer()
+    const server = net.createServer();
+    // The probe socket must be closed on every path, otherwise it stays bound
+    // and leaks a file descriptor for the life of the process.
+    const settle = (inUse: boolean): void => {
+      server.close(() => resolve(inUse));
+    };
+    server
       .once('error', (err: any) => {
         if (err.code === 'EADDRINUSE') {
-          resolve(true);
+          settle(true);
         } else {
-          resolve(false);
+          settle(false);
         }
       })
       .once('listening', () => {
-        server.close();
-        resolve(false);
+        settle(false);
       })
       .listen(port);
   });
@@ -106,21 +110,21 @@ function createServer(options: IServerOptions = {}): IServerInstance {
       ...options.database,
     },
     rateLimit: { ...configDefaults.server.rateLimit, ...options.rateLimit },
+    // 10k vectors is ~50M pair comparisons; beyond that the O(n^2) graph
+    // endpoints are refused rather than allowed to stall the event loop.
+    maxGraphExtractionVectors: options.maxGraphExtractionVectors ?? 10000,
     middleware: options.middleware || [],
     debug: options.debug || false,
     errorHandler:
       options.errorHandler ||
-      ((err: Error, req: Request, res: Response, next: NextFunction) => {
-        console.error('API Error:', err);
+      ((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+        log('error', 'API Error:', err);
         res.status(500).json({
           error: err.message,
           stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
         });
       }),
   };
-
-  // Request timer for performance monitoring
-  const timer = createTimer();
 
   // Configure middleware
   app.use(helmet()); // Security headers
@@ -148,8 +152,8 @@ function createServer(options: IServerOptions = {}): IServerInstance {
   // Debug logging
   if (serverOptions.debug) {
     // Add debug logging for request URLs
-    app.use((req: Request, res: Response, next: NextFunction) => {
-      console.log(`DEBUG: Incoming request: ${req.method} ${req.originalUrl}`);
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      log('info', `DEBUG: Incoming request: ${req.method} ${req.originalUrl}`);
       next();
     });
   }
@@ -157,11 +161,14 @@ function createServer(options: IServerOptions = {}): IServerInstance {
   // Initialize database instance with options
   const database = new Database(serverOptions.database);
 
-  // Create context object with shared resources
+  // Create context object with shared resources.
+  // `createTimer` hands each request its own Timer; a single shared instance
+  // meant concurrent requests overwrote each other's start timestamps.
   const apiContext: ApiContext = {
-    timer,
+    createTimer,
     createFilterFunction,
     database,
+    maxGraphExtractionVectors: serverOptions.maxGraphExtractionVectors,
   };
 
   /**
@@ -229,10 +236,12 @@ if (require.main === module) {
     // Check if port is in use and kill process if necessary
     const portInUse = await isPortInUse(Number(PORT));
     if (portInUse) {
-      console.log('Port is used');
-
-      return
-
+      log('error', `Port ${PORT} is already in use.`);
+      // `createServer()` already built the Database (auto-save interval,
+      // monitor interval, open partition data). Returning here without closing
+      // it left all of that running and unflushed.
+      await gracefulShutdown().catch((err) => log('error', 'Error during cleanup:', err));
+      process.exit(1);
     }
 
     const server = app.listen(PORT, () => {

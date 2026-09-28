@@ -9,7 +9,7 @@ import HNSW from '../ann/hnsw'; // Assuming HNSW is a class for the clustering a
 import { log } from '../utils/log';
 
 import defaultSystemConfiguration from '../config';
-import { BuildIndexHNSWOptions, ClusteredVectorDBOptions, DBStats, DistanceMetric, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData } from '../types'; // Adjust path as needed
+import { BuildIndexHNSWOptions, CloseOptions, ClusteredVectorDBOptions, DBStats, DistanceMetric, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SaveOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData } from '../types'; // Adjust path as needed
 import { ClusteredVectorDB } from './clustered_vector_db';
 
 // --- Types ---
@@ -148,6 +148,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   private isInitialized: boolean = false;
   public initializationPromise: Promise<void>;
   private saveConfigPromise: Promise<void> | null = null;
+  /** In-flight partition loads, keyed by partition id, to de-duplicate concurrent loads. */
+  private partitionLoads: Map<string, Promise<ClusteredVectorDB | null>> = new Map();
   private isClosing: boolean = false; // Flag to prevent operations during close
 
   constructor(options: PartitionedVectorDBOptions = {}) {
@@ -194,9 +196,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           log('info', `[PartitionedVectorDB] Unloaded HNSW index for evicted partition ${partitionId}`);
         }
         try {
-          // Close partition DB (releases file handles, etc., but VectorDB.close might save if path set - review VectorDB.close)
-          // Ideally, saving is orchestrated explicitly via PartitionedVectorDB.save()
-          await dbInstance.close();
+          // `save: false` — persistence is orchestrated by `save()`, and
+          // `close()` already flushed everything before clearing this cache.
+          // Letting `close()` save here would re-write every evicted partition
+          // on the eviction path.
+          await dbInstance.close({ save: false });
           this.emit('partition:unloaded', { id: partitionId });
         } catch (error: any) {
           log('error', `[PartitionedVectorDB] Error closing partition ${partitionId} during dispose:`, error);
@@ -229,9 +233,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
   /**
    * Ensure initialization is complete before performing operations.
+   *
+   * @param allowDuringClose Skips the `isClosing` rejection. Needed by the
+   *   forced final save inside `close()`, which runs after `isClosing` is set
+   *   and would otherwise be rejected before writing anything.
    */
-  private async _ensureInitialized(force: boolean = false): Promise<void> {
-    if (this.isClosing) throw new Error('Database is closing or closed.');
+  private async _ensureInitialized(force: boolean = false, allowDuringClose: boolean = false): Promise<void> {
+    if (this.isClosing && !allowDuringClose) throw new Error('Database is closing or closed.');
     if (!this.isInitialized && !force) {
       await this.initializationPromise;
     }
@@ -373,6 +381,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    * Loads a specific partition's DB instance into the LRU cache if not already present.
    * Optionally loads the HNSW index as well.
    * Returns the loaded DB instance or null on failure.
+   *
+   * Concurrent calls for the same partition share one load. Without this, two
+   * callers could each construct a `ClusteredVectorDB`, read the same files and
+   * both write into the cache — the loser's instance was silently dropped,
+   * leaving two live objects for one partition.
    */
   private async _loadPartition(
     partitionId: string,
@@ -388,6 +401,26 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       }
       return cachedDb;
     }
+
+    // De-duplicate: a second caller arriving mid-load must join the first.
+    const inFlight = this.partitionLoads.get(partitionId);
+    if (inFlight) {
+      log('info', `[PartitionedVectorDB] Partition ${partitionId} is already loading; awaiting in-flight load.`);
+      return inFlight;
+    }
+
+    const loadPromise = this._loadPartitionInternal(partitionId, loadHNSW).finally(() => {
+      this.partitionLoads.delete(partitionId);
+    });
+    this.partitionLoads.set(partitionId, loadPromise);
+    return loadPromise;
+  }
+
+  private async _loadPartitionInternal(
+    partitionId: string,
+    loadHNSW: boolean = this.autoLoadHNSW
+  ): Promise<ClusteredVectorDB | null> {
+    if (this.isClosing) return null;
 
     const config = this.partitionConfigs.get(partitionId);
     if (!config) {
@@ -455,7 +488,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         dbBasePath, // Pass the base path for data files
         clusterDbOptions
       );
-      await vectorDB.load(); // Wait for initialization
+      // The constructor already kicked off a load; await that one rather than
+      // starting a second full read of the same files.
+      if (vectorDB.readyPromise) {
+        await vectorDB.readyPromise;
+      } else {
+        await vectorDB.load();
+      }
       // Successfully loaded the DB, add to LRU cache
       this.loadedPartitions.set(partitionId, vectorDB);
       log('info', `[PartitionedVectorDB] Partition DB ${partitionId} loaded. Vector count: ${vectorDB.getVectorCount()}`);
@@ -628,10 +667,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
   /**
    * Explicitly save the entire state: configs, loaded partition data, and loaded HNSW indices.
+   *
+   * @param options.force Bypasses the `isClosing` guard so `close()` can perform
+   *   its final flush. Without it, `close()` was guaranteed to save nothing.
    */
-  async save(): Promise<void> {
-    await this._ensureInitialized();
-    if (this.isClosing) {
+  async save(options: SaveOptions = {}): Promise<void> {
+    await this._ensureInitialized(false, options.force === true);
+    if (this.isClosing && !options.force) {
       log('warn', '[PartitionedVectorDB] Attempted to save while closing.');
       return;
     }
@@ -640,7 +682,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
     // 1. Save all configurations (ensures counts, active status, etc., are up-to-date)
     // Use await on the debounced save to ensure it finishes before proceeding
-    await this.savePartitionConfigs();
+    await this.savePartitionConfigs(options);
     log('info', `[PartitionedVectorDB] Partition configurations saved. Active partition: ${this.activePartitionId}`);
     // Ensure the save promise is resolved before proceeding
     if (this.saveConfigPromise) await this.saveConfigPromise; // Ensure pending config save finishes
@@ -927,8 +969,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   /**
    * Close the partitioned database, saving state and releasing resources.
    */
-  async close(): Promise<void> {
-    if (this.isInitialized) {
+  async close(options: CloseOptions = {}): Promise<void> {
+    // NOTE: the condition used to be `if (this.isInitialized) return;`, which
+    // made closing a healthy, ready database a silent no-op.
+    if (!this.isInitialized && !this.isClosing) {
       log('warn', '[PartitionedVectorDB] Close operation called before initialization.');
       return;
     }
@@ -947,16 +991,20 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       log('warn', '[PartitionedVectorDB] Initialization failed, proceeding with close anyway:', initError);
     }
 
-    // 2. Perform final save of everything loaded
-    try {
-      await this.save(); // Comprehensive save of configs, partitions, indices
-    } catch (saveError) {
-      log('error', '[PartitionedVectorDB] Error during final save operation:', saveError);
-      // Continue closing even if save fails
+    // 2. Perform final save of everything loaded.
+    // `force` is required: `isClosing` is already true, and `save()` refuses
+    // to run while closing unless explicitly forced.
+    if (options.save !== false) {
+      try {
+        await this.save({ force: true }); // Comprehensive save of configs, partitions, indices
+      } catch (saveError) {
+        log('error', '[PartitionedVectorDB] Error during final save operation:', saveError);
+        // Continue closing even if save fails
+      }
     }
 
     // 3. Clear the LRU cache - this triggers dispose which calls close() on individual DBs
-    // Dispose should NOT save again, just release resources.
+    // State was already flushed in step 2, so dispose must not re-save.
     this.loadedPartitions.clear();
 
     // 4. Clear HNSW index map (dispose might have already removed some)
@@ -977,8 +1025,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   // --- Configuration Saving ---
 
   /** Saves all partition configurations (debounced). */
-  async savePartitionConfigs(): Promise<void> {
-    if (this.isClosing) return; // Don't save during close triggered by 'save' itself
+  async savePartitionConfigs(options: SaveOptions = {}): Promise<void> {
+    if (this.isClosing && !options.force) return; // Don't save during close triggered by 'save' itself
 
     if (!this.saveConfigPromise) {
       this.saveConfigPromise = (async () => {
@@ -992,7 +1040,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           this.emit('config:saved', undefined);
         } catch (error: any) {
           log('error', '[PartitionedVectorDB] Error saving one or more partition configs:', error);
-          // Emit specific error?
+          // Surface the failure instead of reporting a successful save.
+          this.emit('partition:error', { error, operation: 'savePartitionConfigs' });
+          throw error;
         } finally {
           this.saveConfigPromise = null; // Release lock
         }
@@ -1311,8 +1361,6 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     let remainingVectors = vectors;
 
     while (remainingVectors.length > 0) {
-      // Determine needed capacity for the next chunk (could be all remaining)
-      const needed = remainingVectors.length;
       const partition = await this._ensureActivePartitionHasCapacity(1); // Check for at least 1 slot
       const partitionId = this.activePartitionId!;
       const config = this.partitionConfigs.get(partitionId)!;
@@ -1325,12 +1373,14 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         // Or the partition is genuinely full and autoCreate is off.
         if (!this.autoCreatePartitions) {
           throw new Error(`Partition ${partitionId} is full (${config.vectorCount}/${this.partitionCapacity}), cannot add remaining ${remainingVectors.length} vectors (autoCreatePartitions is off).`);
-        } else {
-          // If autoCreate is ON, ensureCapacity should have switched partitions.
-          // This case implies a potential logic error or race condition. Let's log and retry the loop.
-          log('warn', `[PartitionedVectorDB] Bulk add loop detected zero batch size for partition ${partitionId} despite capacity check. Retrying capacity check.`);
-          continue; // Retry the loop, hoping ensureCapacity fixes it
         }
+        // autoCreate is on, so `_ensureActivePartitionHasCapacity` failed to
+        // rotate. Retrying here spun forever with neither `remainingVectors`
+        // nor the active partition changing, so the loop never terminated.
+        // Surface it as an error instead.
+        throw new Error(
+          `Partition ${partitionId} reported no available capacity (${config.vectorCount}/${this.partitionCapacity}) and did not rotate to a new partition, with ${remainingVectors.length} vectors still pending.`
+        );
       }
 
       const batchToAdd = remainingVectors.slice(0, batchSize);
@@ -1810,14 +1860,23 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     // This could be expensive for large datasets, but provides more accurate communities
     const crossPartitionGraph = new Map<string, Set<string>>();
 
-    // Function to create a globally unique ID
+    // Function to create a globally unique ID.
+    // Partition ids are constrained to `[a-zA-Z0-9._-]+` (never contain ':'),
+    // so splitting on the first ':' recovers the partition unambiguously.
     const getGlobalId = (partitionId: string, localId: number | string) => `${partitionId}:${localId}`;
+
+    // The original code re-derived `{partitionId, localId}` by splitting the
+    // composite string, which stringified every numeric id and made metadata
+    // lookups miss (the underlying Maps are keyed by the original id type). A
+    // registry keeps the original id value instead of re-parsing it.
+    const idRegistry = new Map<string, { partitionId: string; id: number | string }>();
 
     // Initialize graph with all vectors from communities
     for (const [partitionId, communities] of partitionCommunities.entries()) {
       for (const community of communities) {
         for (const node of community) {
           const globalId = getGlobalId(partitionId, node.id);
+          idRegistry.set(globalId, { partitionId, id: node.id });
           if (!crossPartitionGraph.has(globalId)) {
             crossPartitionGraph.set(globalId, new Set());
           }
@@ -1862,14 +1921,19 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           metadata?: Record<string, any>;
         }> = [];
 
-        // DFS to find connected components
-        const dfs = (nodeGlobalId: string) => {
-          if (visited.has(nodeGlobalId)) return;
-
+        // Iterative DFS to find connected components. The recursive version
+        // overflowed the call stack on large cross-partition graphs.
+        const stack: string[] = [globalId];
+        while (stack.length > 0) {
+          const nodeGlobalId = stack.pop()!;
+          if (visited.has(nodeGlobalId)) continue;
           visited.add(nodeGlobalId);
 
-          // Parse the global ID
-          const [partId, localId] = nodeGlobalId.split(':');
+          // Recover the original (partitionId, id) pair — never re-parse the
+          // composite string, which would coerce numeric ids to strings.
+          const entry = idRegistry.get(nodeGlobalId);
+          const partId = entry ? entry.partitionId : nodeGlobalId.split(':')[0];
+          const localId = entry ? entry.id : nodeGlobalId.split(':').slice(1).join(':');
 
           // Find metadata if requested
           let metadata: Record<string, any> | null = null;
@@ -1888,13 +1952,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           });
 
           // Visit neighbors
-          const neighbors = crossPartitionGraph.get(nodeGlobalId) || new Set();
-          for (const neighbor of neighbors) {
-            dfs(neighbor);
+          const neighbors = crossPartitionGraph.get(nodeGlobalId);
+          if (neighbors) {
+            for (const neighbor of neighbors) {
+              if (!visited.has(neighbor)) stack.push(neighbor);
+            }
           }
-        };
-
-        dfs(globalId);
+        }
 
         // Add community if it contains at least 2 members
         if (community.length > 1) {

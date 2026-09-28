@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { promises as fs } from "fs";
 import * as path from "path";
 import { ClusteredVectorDB } from "../src/vector/clustered_vector_db";
-import { SearchResult, Vector } from "../src/types"; // Corrected import path
+import { Vector } from "../src/types"; // Corrected import path
 import * as os from "os";
 
 describe("ClusteredVectorDB", () => {
@@ -51,9 +51,9 @@ describe("ClusteredVectorDB", () => {
       const db = new ClusteredVectorDB(vectorDimension);
 
       // Add multiple vectors
-      const id1 = db.addVector(1, createTestVector([1, 2, 3, 4]));
-      const id2 = db.addVector(2, createTestVector([1.1, 2.1, 3.1, 4.1]));
-      const id3 = db.addVector(3, createTestVector([5, 6, 7, 8]));
+      db.addVector(1, createTestVector([1, 2, 3, 4]));
+      db.addVector(2, createTestVector([1.1, 2.1, 3.1, 4.1]));
+      db.addVector(3, createTestVector([5, 6, 7, 8]));
 
       // Get cluster info to check assignments
       const clusters = db.getClusterInfo();
@@ -74,7 +74,7 @@ describe("ClusteredVectorDB", () => {
 
       // Add vectors
       const id1 = db.addVector(1, createTestVector([1, 2, 3, 4]));
-      const id2 = db.addVector(2, createTestVector([1.1, 2.1, 3.1, 4.1]));
+      db.addVector(2, createTestVector([1.1, 2.1, 3.1, 4.1]));
 
       // Get initial stats
       const initialClusters = db.getClusterInfo();
@@ -305,7 +305,7 @@ describe("ClusteredVectorDB", () => {
       db.addVector(3, createTestVector([10, 20, 30, 40]));
       db.addVector(4, createTestVector([10.1, 20.1, 30.1, 40.1]));
 
-      const initialClusters = db.getClusterInfo();
+      db.getClusterInfo();
       await db.runKMeans(); // Run with default k (current cluster count)
       const finalClusters = db.getClusterInfo();
 
@@ -327,7 +327,7 @@ describe("ClusteredVectorDB", () => {
 
       await db.runKMeans(2); // Request exactly 2 clusters
       const finalClusters = db.getClusterInfo();
-      const finalStats = db.getStats(); // Get stats after K-Means
+      const finalStats = db.getStats({ includeClusterMembers: true }); // Get stats after K-Means
 
       // Depending on random initialization, it might not always achieve exactly k,
       // but it should attempt to create k clusters. Check if it's close or equal.

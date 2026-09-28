@@ -1,14 +1,13 @@
 {
+  "plugin": ["typedoc-plugin-markdown"],
   "entryPoints": ["src/index.ts"],
-  "out": "docs",
+  "out": "docs-api",
   "name": "N-Base",
   "includeVersion": true,
   "excludePrivate": true,
   "hideGenerator": true,
   "readme": "README.md",
-  "theme": "default",
-  "navigationLinks": {
-    "GitHub": "https://github.com/n2flowjs/nbase"
-  },
-  "entryPointStrategy": "expand"
+  "entryPointStrategy": "expand",
+  "excludeInternal": true,
+  "exclude": ["src/server/**"]
 }

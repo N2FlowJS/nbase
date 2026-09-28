@@ -6,7 +6,7 @@ export function indexRoutes(context: ApiContext) {
   const router = Router();
   const { database } = context;
   // API Health Check
-  router.get("/health", (req: Request, res: Response) => {
+  router.get("/health", (_req: Request, res: Response) => {
     res.json({
       status: "ok",
       version: config.version || "1.0.0",
@@ -14,7 +14,7 @@ export function indexRoutes(context: ApiContext) {
     });
   });
   // Statistics endpoint
-  router.get("/stats", async (req: Request, res: Response) => {
+  router.get("/stats", async (_req: Request, res: Response) => {
     try {
       const stats = await database.getStats();
 

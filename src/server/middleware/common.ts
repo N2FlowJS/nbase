@@ -1,5 +1,6 @@
 import { Database } from '../../database/database';
 import { Request, Response, NextFunction } from 'express';
+import { log } from '../../utils/log';
 
 /**
  * Add a request ID to each incoming request
@@ -17,11 +18,11 @@ export const addRequestId = (req: Request, res: Response, next: NextFunction) =>
 export const loggingMiddleware = (req: Request, res: Response, next: NextFunction) => {
   const start = Date.now();
   const requestId = req.headers['x-request-id'] || 'no-ip';
-  console.log(`[${requestId}] ${req.method} ${req.url} started`);
+  log('info', `[${requestId}] ${req.method} ${req.url} started`);
 
   res.on('finish', () => {
     const duration = Date.now() - start;
-    console.log(`[${requestId}] ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`);
+    log('info', `[${requestId}] ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`);
   });
 
   next();
@@ -32,7 +33,7 @@ export const loggingMiddleware = (req: Request, res: Response, next: NextFunctio
  * Returns 503 Service Unavailable if database is not ready
  */
 export function ensureDatabaseReady(database: Database) {
-  return (req: Request, res: Response, next: NextFunction) => {
+  return (_req: Request, res: Response, next: NextFunction) => {
     if (!database.IsReady()) {
       res.status(503).json({ success: false, error: 'Database is not ready.' });
       return;

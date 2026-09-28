@@ -156,7 +156,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
     }
 
     // --- Search Metrics ---
-    let calculatedSearchMetrics = this._calculateSearchMetrics(); // Calculate QPM, P95 etc. based on current state
+    const calculatedSearchMetrics = this._calculateSearchMetrics(); // Calculate QPM, P95 etc. based on current state
 
     // --- Database Metrics ---
     // databaseState is updated externally via updateDatabaseMetrics
@@ -278,7 +278,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
    */
   private _calculateSearchMetrics(): Omit<SearchMetricsState, 'queryCount' | 'methodUsage' | 'recentResponseTimes'> {
     let calculatedP95 = 0;
-    let calculatedAvg = this.searchState.averageResponseTime; // Use the rolling average calculated in recordSearch
+    const calculatedAvg = this.searchState.averageResponseTime; // Use the rolling average calculated in recordSearch
 
     // Calculate P95 from recentResponseTimes buffer
     if (this.searchState.recentResponseTimes.length > 0) {

@@ -1,7 +1,8 @@
 import { promises as fs } from 'fs';
-import { BuildIndexHNSWOptions, HNSWNode, HNSWOptions, HNSWStats, LoadIndexHNSWOptions, SearchOptions, SearchResult, Vector } from '../types';
+import { Worker } from 'worker_threads';
+import path from 'path';
+import { BuildIndexHNSWOptions, HNSWNode, HNSWOptions, HNSWStats, LoadIndexHNSWOptions, SearchOptions, SearchResult, Vector, VectorProvider } from '../types';
 import { createTimer } from '../utils/profiling';
-import { ClusteredVectorDB } from '../vector/clustered_vector_db';
 import { log } from '../utils/log';
 
 /**
@@ -45,7 +46,7 @@ import { log } from '../utils/log';
  * ```
  */
 class HNSW {
-  private db: ClusteredVectorDB;
+  private db: VectorProvider;
   private M: number;
   private efConstruction: number;
   private efSearch: number;
@@ -63,7 +64,7 @@ class HNSW {
   private dimensionAware: boolean;
   private deletedNodes: Set<number | string>; // Track deleted nodes
 
-  constructor(db: ClusteredVectorDB, options: HNSWOptions = {}) {
+  constructor(db: VectorProvider, options: HNSWOptions = {}) {
     this.db = db;
 
     // Set HNSW parameters
@@ -79,11 +80,26 @@ class HNSW {
     this.distanceFunc = (a: Vector, b: Vector) => {
       let sum = 0;
       const len = Math.min(a.length, b.length);
-      // Inlined loop for performance
-      for (let i = 0; i < len; i++) {
+      let i = 0;
+      
+      // Unroll by 8
+      for (; i <= len - 8; i += 8) {
+        const d0 = a[i] - b[i];
+        const d1 = a[i + 1] - b[i + 1];
+        const d2 = a[i + 2] - b[i + 2];
+        const d3 = a[i + 3] - b[i + 3];
+        const d4 = a[i + 4] - b[i + 4];
+        const d5 = a[i + 5] - b[i + 5];
+        const d6 = a[i + 6] - b[i + 6];
+        const d7 = a[i + 7] - b[i + 7];
+        sum += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4 + d5 * d5 + d6 * d6 + d7 * d7;
+      }
+      
+      for (; i < len; i++) {
         const diff = a[i] - b[i];
         sum += diff * diff;
       }
+      
       // Dimension penalty - only if dimensionAware
       if (this.dimensionAware) {
         const dimDiff = Math.abs(a.length - b.length);
@@ -150,7 +166,7 @@ class HNSW {
 
     // Connect the new node into the graph
     // For dimension-aware mode, use entry point from the same dimension group if available
-    let entryPointId = this.dimensionAware ? this.dimensionEntryPoints.get(dimension) || this.entryPointId : this.entryPointId;
+    const entryPointId = this.dimensionAware ? this.dimensionEntryPoints.get(dimension) || this.entryPointId : this.entryPointId;
 
     // Only proceed with graph building if we have an entry point with the same dimension
     // or if we're not in dimension-aware mode
@@ -319,11 +335,22 @@ class HNSW {
     const exactDimensions = options.exactDimensions || false;
     const filter = options.filter || (() => true);
 
+    /**
+     * Whether `id` is allowed to appear in the result set. A node excluded by
+     * the filter may still be *traversed* (its edges are needed to reach the
+     * filtered subset), but it must never be returned.
+     */
+    const isEligible = (id: number | string): boolean => {
+      if (this.deletedNodes.has(id)) return false;
+      if (exactDimensions && this.nodeDimensions.get(id) !== queryDimension) return false;
+      return filter(id);
+    };
+
     // Get entry level (optimized level retrieval)
     const entryLevel = this.nodeToLevel.get(entryPoint) || 0;
 
     let currObj = entryPoint;
-    let currDist = this._distanceToQuery(query, entryPoint);
+    let currDist = this._safeDistanceToQuery(query, entryPoint) ?? Infinity;
 
     // Search from top level down
     for (let i = entryLevel; i > 0; i--) {
@@ -349,7 +376,8 @@ class HNSW {
           // Skip if filter excludes this ID
           if (!filter(neighborId)) continue;
 
-          const dist = this._distanceToQuery(query, neighborId);
+          const dist = this._safeDistanceToQuery(query, neighborId);
+          if (dist === null) continue;
 
           if (dist < currDist) {
             currDist = dist;
@@ -366,10 +394,16 @@ class HNSW {
     const candidates = new Map<number | string, number>(); // id -> distance
     const results = new Map<number | string, number>(); // id -> distance
 
-    // Initialize with entry point
+    // Seed the beam with the node the greedy descent converged on (not the raw
+    // entry point). It is always traversed, but only seeded into `results` when
+    // it is actually eligible — previously the node was unconditionally
+    // returned as a top-k hit even when it had been soft-deleted, excluded by
+    // the filter, or had a mismatched dimension.
     candidates.set(currObj, currDist);
-    results.set(currObj, currDist);
     visited.add(currObj);
+    if (isEligible(currObj)) {
+      results.set(currObj, currDist);
+    }
 
     // Main loop
     while (candidates.size > 0) {
@@ -404,48 +438,40 @@ class HNSW {
       const connections = this._getConnections(closest, 0);
 
       for (const neighborId of connections) {
-        // Skip deleted nodes
-        if (this.deletedNodes.has(neighborId)) continue;
+        if (visited.has(neighborId)) continue;
 
-        // Skip neighbors with different dimensions if exactDimensions is true
-        if (exactDimensions) {
-          const neighborDim = this.nodeDimensions.get(neighborId);
-          if (neighborDim !== queryDimension) continue;
-        }
+        // Skip deleted nodes, dimension mismatches and filter exclusions.
+        if (!isEligible(neighborId)) continue;
 
-        // Skip if filter excludes this ID
-        if (!filter(neighborId)) continue;
+        visited.add(neighborId);
+        const dist = this._safeDistanceToQuery(query, neighborId);
+        if (dist === null) continue;
 
-        if (!visited.has(neighborId)) {
-          visited.add(neighborId);
-          const dist = this._distanceToQuery(query, neighborId);
+        // Add to results if results is not full or if it's closer than furthest result
+        let furthestResultDist = -Infinity;
+        let furthestId: number | string | null = null;
 
-          // Add to results if results is not full or if it's closer than furthest result
-          let furthestResultDist = -Infinity;
-          let furthestId: number | string | null = null;
-
-          if (results.size >= ef) {
-            // Find furthest result
-            for (const [resultId, resultDist] of results.entries()) {
-              if (resultDist > furthestResultDist) {
-                furthestResultDist = resultDist;
-                furthestId = resultId;
-              }
+        if (results.size >= ef) {
+          // Find furthest result
+          for (const [resultId, resultDist] of results.entries()) {
+            if (resultDist > furthestResultDist) {
+              furthestResultDist = resultDist;
+              furthestId = resultId;
             }
+          }
 
-            if (dist < furthestResultDist) {
-              // Replace furthest result
-              if (furthestId !== null) {
-                results.delete(furthestId);
-              }
-              results.set(neighborId, dist);
-              candidates.set(neighborId, dist);
+          if (dist < furthestResultDist) {
+            // Replace furthest result
+            if (furthestId !== null) {
+              results.delete(furthestId);
             }
-          } else {
-            // Results not full yet
             results.set(neighborId, dist);
             candidates.set(neighborId, dist);
           }
+        } else {
+          // Results not full yet
+          results.set(neighborId, dist);
+          candidates.set(neighborId, dist);
         }
       }
     }
@@ -514,7 +540,7 @@ class HNSW {
 
     // Connect the new node into the graph
     // For dimension-aware mode, use entry point from the same dimension group if available
-    let entryPointId = this.dimensionAware ? this.dimensionEntryPoints.get(dimension) || this.entryPointId : this.entryPointId;
+    const entryPointId = this.dimensionAware ? this.dimensionEntryPoints.get(dimension) || this.entryPointId : this.entryPointId;
 
     // Only proceed with graph building if we have an entry point with the same dimension
     // or if we're not in dimension-aware mode
@@ -593,11 +619,11 @@ class HNSW {
    * @returns Array of nearest neighbors
    */
   findNearest(query: Vector, k: number = 10, options: SearchOptions & { exactDimensions?: boolean } = {}): SearchResult[] {
-    console.log(`[HNSW] Searching for ${k} nearest neighbors`);
-    
     if (!this.entryPointId || !this.initialized) {
-      // Fall back to linear search (optimized linear search call)
-      return this._linearSearch(query, k, options);
+      // Fall back to linear search. This must run *after* the deleted-node and
+      // metadata filter are composed below, otherwise the fallback path
+      // returns soft-deleted vectors.
+      return this._linearSearch(query, k, this._withEffectiveFilter(options));
     }
 
     const timer = this.timer;
@@ -605,13 +631,7 @@ class HNSW {
 
     const queryDimension = query.length;
     const exactDimensions = options.exactDimensions || false;
-
-    // Modify search methods to filter out deleted nodes
-    const originalFilter = options.filter;
-    options.filter = (id) => {
-      // Skip deleted nodes and apply the original filter if it exists
-      return !this.deletedNodes.has(id) && (originalFilter ? originalFilter(id) : true);
-    };
+    const effectiveOptions = this._withEffectiveFilter(options);
 
     // For dimension-aware search with exact dimension matching
     if (this.dimensionAware && exactDimensions) {
@@ -625,27 +645,77 @@ class HNSW {
       }
 
       // Perform search using the dimension-specific entry point (optimized search call)
-      return this._searchWithEntryPoint(dimensionEntryPoint, query, k, options);
+      return this._searchWithEntryPoint(dimensionEntryPoint, query, k, effectiveOptions);
     }
 
     // Standard search using global entry point (optimized search call)
-    return this._searchWithEntryPoint(this.entryPointId, query, k, options);
+    return this._searchWithEntryPoint(this.entryPointId, query, k, effectiveOptions);
+  }
+
+  /**
+   * Composes the caller's filter with the internal deleted-node check and
+   * resolves metadata for each candidate.
+   *
+   * Two defects this replaces:
+   * 1. The old code assigned `options.filter = ...`, mutating the caller's
+   *    object — the wrapped filter then permanently shadowed the original for
+   *    any other holder of that object.
+   * 2. The wrapper called `originalFilter(id)` with the id only. Metadata
+   *    filters therefore received `undefined` and every one of them rejected
+   *    every node, so filtered HNSW searches returned no results at all.
+   *
+   * @private
+   */
+  private _withEffectiveFilter(options: SearchOptions & { exactDimensions?: boolean }): SearchOptions & { exactDimensions?: boolean } {
+    const baseFilter = options.filter;
+
+    const filter = (id: number | string, _metadata?: Record<string, any> | null): boolean => {
+      if (this.deletedNodes.has(id)) return false;
+      if (!baseFilter) return true;
+      // Resolve metadata here: the graph only stores ids.
+      return baseFilter(id, this._resolveMetadata(id) ?? undefined);
+    };
+
+    return { ...options, filter };
+  }
+
+  /**
+   * Resolves metadata for an id, tolerating providers that do not implement it.
+   * @private
+   */
+  private _resolveMetadata(id: number | string): Record<string, any> | null {
+    if (typeof this.db.getMetadata !== 'function') return null;
+    try {
+      return this.db.getMetadata(id) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
    * Fallback linear search implementation
    * @private
    */
-  private _linearSearch(query: Vector, k: number, options: SearchOptions = {}): SearchResult[] {
+  private _linearSearch(query: Vector, k: number, options: SearchOptions & { exactDimensions?: boolean } = {}): SearchResult[] {
     const filter = options.filter || (() => true);
+    const exactDimensions = options.exactDimensions === true;
     const queryDimension = query.length;
     const results: SearchResult[] = [];
 
-    // Optimized linear scan using for...of and direct Map iteration
-    for (const [id, vector] of this.db.memoryStorage.entries()) {
+    // Use getVectorIds as per VectorProvider interface
+    for (const id of this.db.getVectorIds()) {
+      // Skip deleted nodes even when no caller filter is present. This path is
+      // reached directly from `findNearest`'s fallback, which previously ran
+      // before the deleted-node wrapper was installed.
+      if (this.deletedNodes.has(id)) continue;
       // Skip if filter excludes this ID (optimized filter call)
       if (!filter(id)) continue;
-      if (vector.length !== queryDimension) continue;
+      const vector = this.db.getVector(id);
+      if (!vector) continue;
+      // Only require an exact dimension match when the caller asked for it.
+      // Enforcing it unconditionally made any query whose length differed from
+      // the indexed dimension silently return nothing.
+      if (exactDimensions && vector.length !== queryDimension) continue;
 
       const dist = this.distanceFunc(query, vector);
       results.push({ id, dist });
@@ -662,6 +732,10 @@ class HNSW {
     const progressCallback = options.progressCallback || (() => {});
     const dimensionAware = options.dimensionAware !== false;
 
+    if (options.useWorker) {
+      return this._buildIndexWorker(options);
+    }
+
     // Reset the index (optimized clear operations)
     this.nodes.clear();
     this.nodeToLevel.clear();
@@ -674,7 +748,7 @@ class HNSW {
     this.deletedNodes.clear(); // Clear deleted nodes
 
     // Get all vector IDs from the database (optimized key retrieval)
-    const ids = Array.from(this.db.memoryStorage.keys());
+    const ids = this.db.getVectorIds();
     const totalVectors = ids.length;
 
     if (totalVectors === 0) {
@@ -1035,16 +1109,18 @@ class HNSW {
   }
 
   /**
-   * Calculate distance from query to a node
+   * Distance that tolerates a node whose vector has vanished from the backing
+   * store (e.g. the underlying DB deleted it without going through
+   * `markDelete`, leaving a dangling graph edge).
+   *
+   * `_distanceToQuery` throws in that situation, turning any subsequent search
+   * into a 500. Returns `null` so callers can simply skip the node.
+   *
    * @private
    */
-  private _distanceToQuery(query: Vector, id: number | string): number {
-    const vec = this.db.getVector(id); // Optimized vector retrieval
-
-    if (!vec) {
-      throw new Error(`Vector not found: ${id}`);
-    }
-
+  private _safeDistanceToQuery(query: Vector, id: number | string): number | null {
+    const vec = this.db.getVector(id);
+    if (!vec) return null;
     return this.distanceFunc(query, vec);
   }
 
@@ -1054,7 +1130,12 @@ class HNSW {
    */
   getStats(): HNSWStats {
     const levels = Array.from(this.nodeToLevel.values()); // Optimized value retrieval
-    const maxLevel = levels.length > 0 ? Math.max(...levels) : 0;
+    // Reduce instead of Math.max(...levels): spreading N elements onto the
+    // call stack throws for graphs with roughly >=100k nodes.
+    let maxLevel = 0;
+    for (const level of levels) {
+      if (level > maxLevel) maxLevel = level;
+    }
 
     // Count nodes per level
     const nodesPerLevel: number[] = new Array(maxLevel + 1).fill(0);
@@ -1146,7 +1227,7 @@ class HNSW {
    * @param json - JSON string representation of the graph
    * @returns HNSW instance
    */
-  static deserialize(json: string, db: ClusteredVectorDB): HNSW {
+  static deserialize(json: string, db: VectorProvider): HNSW {
     // Parse JSON string (optimized error handling)
     const data = JSON.parse(json);
 
@@ -1218,7 +1299,7 @@ class HNSW {
    * @param filePath - Path to load the index from
    * @param db - Vector database
    */
-  static async loadIndex(filePath: string, db: ClusteredVectorDB, options: LoadIndexHNSWOptions = {}): Promise<HNSW> {
+  static async loadIndex(filePath: string, db: VectorProvider, options: LoadIndexHNSWOptions = {}): Promise<HNSW> {
     const data = await fs.readFile(filePath, 'utf8');
     const hnsw = HNSW.deserialize(data, db);
 
@@ -1243,6 +1324,124 @@ class HNSW {
     this.entryPointId = null;
     this.initialized = false;
     this.deletedNodes.clear(); // Clear deleted nodes
+  }
+
+  /**
+   * Build index using a worker thread
+   * @private
+   */
+  private async _buildIndexWorker(options: BuildIndexHNSWOptions): Promise<void> {
+    const progressCallback = options.progressCallback || (() => {});
+
+    // Collect all vectors to send to the worker.
+    //
+    // Each vector is copied into a single contiguous SharedArrayBuffer so the
+    // payload is cloned once (and shared rather than duplicated) instead of
+    // structured-cloning the whole dataset as a big object of typed arrays.
+    const ids = this.db.getVectorIds();
+    let totalValues = 0;
+    for (const id of ids) {
+      const vec = this.db.getVector(id);
+      if (vec) totalValues += vec.length;
+    }
+
+    const shared = new SharedArrayBuffer(totalValues * Float32Array.BYTES_PER_ELEMENT);
+    const sharedView = new Float32Array(shared);
+    const offsets = new Map<number | string, number>();
+    const vectorMap: Record<string, Float32Array> = {};
+    let cursor = 0;
+    for (const id of ids) {
+      const vec = this.db.getVector(id);
+      if (!vec) continue;
+      offsets.set(id, cursor);
+      // A subarray view over the shared buffer: no per-vector copy.
+      vectorMap[String(id)] = sharedView.subarray(cursor, cursor + vec.length);
+      cursor += vec.length;
+    }
+
+    return new Promise((resolve, reject) => {
+      // Path to the worker file (adjust based on build output)
+      const workerPath = path.resolve(__dirname, 'hnsw_worker.js');
+      // If running via ts-node, we might need to use the .ts file and register ts-node
+      const isTsNode = process.env.TS_NODE_DEV || process.argv.some(arg => arg.includes('ts-node')) || __filename.endsWith('.ts');
+
+      const worker = new Worker(
+        isTsNode ? path.resolve(__dirname, 'hnsw_worker.ts') : workerPath,
+        {
+          workerData: {
+            vectorMap,
+            options: {
+              M: this.M,
+              efConstruction: this.efConstruction,
+              efSearch: this.efSearch,
+              maxLevel: this.maxLevel,
+              levelProbability: this.levelProbability,
+              dimensionAware: options.dimensionAware !== false,
+            },
+          },
+          execArgv: isTsNode ? ['-r', 'ts-node/register'] : [],
+        }
+      );
+
+      let settled = false;
+      let terminating = false;
+
+      // Always tear the thread down. On the success path the worker used to be
+      // left running (holding a full clone of the dataset) because nothing ever
+      // called terminate().
+      const shutdown = async (): Promise<void> => {
+        if (terminating) return;
+        terminating = true;
+        try {
+          await worker.terminate();
+        } catch {
+          // The thread may already be gone; nothing to release.
+        }
+      };
+
+      const fail = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        void shutdown().finally(() => reject(error));
+      };
+
+      worker.on('message', (message) => {
+        if (message.type === 'progress') {
+          progressCallback(message.progress);
+        } else if (message.type === 'done') {
+          if (settled) return;
+          settled = true;
+          try {
+            // Deserialize the result into the current instance.
+            // structuredClone has already revived the Maps/Sets, so these
+            // assignments are plain state swaps (not a TS-visibility workaround).
+            const result = HNSW.deserialize(message.result, this.db);
+            (this as any).nodes = (result as any).nodes;
+            (this as any).nodeToLevel = (result as any).nodeToLevel;
+            (this as any).nodeDimensions = (result as any).nodeDimensions;
+            (this as any).dimensionGroups = (result as any).dimensionGroups;
+            (this as any).dimensionEntryPoints = (result as any).dimensionEntryPoints;
+            (this as any).entryPointId = (result as any).entryPointId;
+            (this as any).initialized = true;
+            void shutdown().finally(() => resolve());
+          } catch (error) {
+            void shutdown().finally(() =>
+              reject(error instanceof Error ? error : new Error(String(error)))
+            );
+          }
+        } else if (message.type === 'error') {
+          fail(new Error(message.error));
+        }
+      });
+
+      worker.on('error', fail);
+      worker.on('exit', (code) => {
+        if (settled) return;
+        if (code !== 0) {
+          fail(new Error(`Worker stopped with exit code ${code}`));
+        }
+      });
+    });
   }
 }
 

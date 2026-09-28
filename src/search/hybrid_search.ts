@@ -233,7 +233,8 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
         results = await this.db.findNearestHNSW(query, k, dbSearchOptions);
         this.timer.stop(dbMethodUsed);
       } else if (typeof this.db.findNearest === 'function') {
-        const { efSearch, ...clusteredOptions } = dbSearchOptions;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- stripped on purpose
+        const { efSearch: _efSearch, ...clusteredOptions } = dbSearchOptions;
         dbMethodUsed = 'PartitionedDB.findNearest';
         this.timer.start(dbMethodUsed);
         results = await this.db.findNearest(query, k, clusteredOptions);

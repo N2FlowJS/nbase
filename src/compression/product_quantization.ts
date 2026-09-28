@@ -784,7 +784,7 @@ export class ProductQuantization {
     }
 
     // Add size of dimension-specific models
-    for (const [dimension, model] of this.dimensionModels.entries()) {
+    for (const model of this.dimensionModels.values()) {
       if (model.trained) {
         centroidSize += model.centroids.reduce((sum, subquantizer) => sum + subquantizer.reduce((subSum, centroid) => subSum + centroid.length * 4, 0), 0);
       }

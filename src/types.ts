@@ -22,7 +22,6 @@ export interface RerankingOptions {
   metadata?: Map<string | number, any>;
   vectors?: Map<string | number, Vector>;
   weights?: Record<string, number>;
-  [key: string]: any;
 }
 
 /**
@@ -112,7 +111,12 @@ export interface BatchOperation {
 export interface SearchResult {
   id: IDVector;
   dist: number;
-  [key: string]: any; // For additional properties like metadata
+  /** Optional metadata, populated when the search was issued with `includeMetadata`. */
+  metadata?: Record<string, any>;
+  /** Optional vector, populated when the search was issued with `includeVectors`. */
+  vector?: Vector;
+  /** Vector length, derived by the API layer when a vector is present. */
+  dimension?: number;
 }
 
 /**
@@ -137,7 +141,12 @@ export interface DBStats {
       size: number;
       centroidNorm: number;
       dimension: number;
-      members: {
+      /**
+       * Full member id list for this cluster. Omitted unless explicitly
+       * requested, because serialising every vector id made `getStats()`
+       * O(total vectors) in both time and response size.
+       */
+      members?: {
         id: IDVector;
       }[];
     }>;
@@ -163,7 +172,7 @@ export interface VectorDBEventData {
   'metadata:update': { id: number | string; metadata: Record<string, any> };
   'db:save': { path: string; count: number };
   'db:load': { path: string; count: number };
-  'db:close': {}; // Geen data nodig voor close event
+  'db:close': EmptyPayload; // Geen data nodig voor close event
   'cluster:create': { clusterId: number; vectorId: number | string };
   'cluster:delete': { clusterId: number };
   'db:error': { operation: string; error: Error | unknown };
@@ -172,7 +181,7 @@ export interface VectorDBEventData {
   'kmeans:start': { k: number; iterations: number };
   'vector:update': { id: number | string; dimensions: number };
 }
-export type BulkAddResult = {};
+export type BulkAddResult = Record<string, never>;
 
 // Optioneel: Maak een strikter getypte EventEmitter klasse
 // Dit zorgt ervoor dat je alleen gedefinieerde events kunt emitten/listenen
@@ -286,15 +295,6 @@ export interface TimerResult {
   splits: { label: string | null; elapsed: number }[];
 }
 
-type OptionCheck<T> =
-  | {
-      enable: true;
-      options?: T;
-    }
-  | {
-      enable: false;
-    };
-
 // Interface for performance metrics (remains the same)
 export interface PerformanceMetrics {
   queries: number;
@@ -389,6 +389,7 @@ export interface BuildIndexHNSWOptions {
   progressCallback?: (progress: number) => void;
   dimensionAware?: boolean;
   force?: boolean;
+  useWorker?: boolean;
 }
 
 /**
@@ -526,6 +527,13 @@ export interface ClusteredVectorDBOptions {
   maxClusters?: number; // Hard limit on the number of clusters
   distanceMetric?: DistanceMetric; // Default metric for clustering and search
   kmeansMaxIterations?: number; // Max iterations for k-means clustering
+  /**
+   * Number of nearest clusters to probe per search.
+   *
+   * Defaults to `null`, which means "probe every cluster" — i.e. a full linear
+   * scan, the previous behaviour. Set a value to trade recall for speed.
+   */
+  nprobe?: number | null;
   runKMeansOnLoad?: boolean; // Run K-Means after loading if cluster state is missing/invalid
 }
 
@@ -604,7 +612,16 @@ export interface PartitionedDBEventData {
     indexType: string;
     path: string;
   };
-  'partition:indexProgress': {};
+  'partition:indexProgress': {
+    /** Partition the index build refers to. */
+    id: string;
+    /** Progress percentage, 0-100. */
+    progress: number;
+    /** Which build operation is reporting progress. */
+    operation: string;
+    /** Human-readable status line. */
+    message?: string;
+  };
   'partition:progress': { id: string; progress: number };
   'partition:save': { id: string; timeMs: number };
   'partition:load': { id: string; timeMs: number };
@@ -789,11 +806,6 @@ export interface KNNOptions {
   partitionCount?: number;
 }
 
-export interface WorkerInfo {
-  worker: Worker;
-  busy: boolean;
-}
-
 /**
  * Options for LSH configuration
  */
@@ -874,7 +886,8 @@ export interface BatchSearchOptions {
   prioritizeOrder?: boolean;
   groupSimilarQueries?: boolean;
   workerPath?: string;
-  [key: string]: any;
+  defaultSearchTimeout?: number;
+  defaultSearchTimeoutMs?: number;
 }
 
 export interface BatchSearchResult {
@@ -905,6 +918,29 @@ export interface BatchSearchOptions {
 }
 
 // --- Core Types ---
+
+export interface VectorProvider {
+  getVector(id: number | string): Float32Array | undefined | null;
+  getVectorIds(): (number | string)[];
+  /**
+   * Optional metadata lookup.
+   *
+   * HNSW traverses the graph by id only, so a metadata-aware `filter` can only
+   * be evaluated if the provider can resolve metadata. When this is absent the
+   * filter is invoked without metadata and implementations must degrade
+   * accordingly.
+   */
+  getMetadata?(id: number | string): Record<string, any> | undefined | null;
+}
+
+/**
+ * Marker for event payloads that intentionally carry no data.
+ *
+ * Using `{}` directly is rejected by `@typescript-eslint/no-empty-object-type`
+ * because it accepts any non-nullish value, which is almost never what an
+ * event author intends.
+ */
+export type EmptyPayload = Record<string, never>;
 
 export type Vector = Float32Array | number[];
 
@@ -957,6 +993,13 @@ export interface ClusteringConfiguration {
   distanceMetric?: DistanceMetric; // Metric for clustering
   useCompression?: boolean; // Compression specific to cluster data storage
   kmeansMaxIterations?: number; // Max iterations for k-means clustering
+  /**
+   * Number of nearest clusters to probe per search.
+   *
+   * Defaults to `null`, which means "probe every cluster" — i.e. a full linear
+   * scan, the previous behaviour. Set a value to trade recall for speed.
+   */
+  nprobe?: number | null;
 }
 
 // --- Partitioning Configuration (for PartitionedVectorDB) ---
@@ -1011,13 +1054,11 @@ export interface HNSWIndexConfiguration {
   nodes: HNSWNode[];
 }
 
-export interface HNSWBuildOptions extends IndexBuildOptions {
-  // HNSW specific build options can go here if any
-}
+/** HNSW currently takes no options beyond the shared {@link IndexBuildOptions}. */
+export type HNSWBuildOptions = IndexBuildOptions;
 
-export interface HNSWLoadOptions {
-  // HNSW specific load options can go here if any
-}
+/** HNSW currently takes no load options. */
+export type HNSWLoadOptions = Record<string, never>;
 
 export interface HNSWStats {
   totalNodes: number;
@@ -1045,8 +1086,9 @@ export interface LSHIndexConfiguration {
   numberOfBuckets?: number;
   // allowMismatchedDimensions handled internally
 }
-export interface LSHBuildOptions extends IndexBuildOptions {}
-export interface LSHLoadOptions {}
+export type LSHBuildOptions = IndexBuildOptions;
+/** LSH currently takes no load options. */
+export type LSHLoadOptions = Record<string, never>;
 // Add LSHStats if needed
 
 // --- PQ Index Types --- (Tương tự HNSW)
@@ -1056,10 +1098,10 @@ export interface PQIndexConfiguration {
   numClusters?: number; // Number of clusters (centroids) per subquantizer (k in k-means)
   // dynamicDimensions handled internally
 }
-export interface PQBuildOptions extends IndexBuildOptions {
-  // PQ training might have specific options
-}
-export interface PQLoadOptions {}
+/** PQ training currently takes no options beyond {@link IndexBuildOptions}. */
+export type PQBuildOptions = IndexBuildOptions;
+/** PQ currently takes no load options. */
+export type PQLoadOptions = Record<string, never>;
 // Add PQStats if needed
 
 // --- Indexing Configuration (for IndexManager or similar) ---
@@ -1076,7 +1118,8 @@ export interface IndexingConfiguration {
   hnsw?: HNSWIndexConfiguration;
   lsh?: LSHIndexConfiguration;
   pq?: PQIndexConfiguration;
-  flat?: {}; // Flat usually has no config, existence implies usage/availability
+  /** Flat index takes no configuration; its presence implies availability. */
+  flat?: EmptyPayload;
 }
 
 // --- Search Types ---
@@ -1133,7 +1176,14 @@ export interface RerankingOptions {
   k?: number; // Target number of results after reranking
   // Data needed for specific methods
   metadataMap?: Map<string | number, any>; // For weighted
-  // vectorsMap?: Map<string | number, Vector>; // Potentially needed for diversity
+  /** Original query vector; used by the diversity (MMR) reranker. */
+  queryVector?: Vector;
+  /** Vectors for the candidate results; used by the diversity reranker. */
+  vectorsMap?: Map<string | number, Vector>;
+  /** Distance metric used to compare candidates. */
+  distanceMetric?: DistanceMetric;
+  /** Trade-off between relevance and diversity for the MMR reranker. */
+  lambda?: number;
   weights?: Record<string, number>; // For weighted
 }
 
@@ -1153,20 +1203,10 @@ export interface MonitoringConfiguration {
 // ... (giữ lại các interface chi tiết cho Metrics: SystemMetricsHistory, SearchMetricsState, etc.)
 
 // --- Event Data Types ---
-// (Giữ lại các event data interface đã có, nhóm chúng lại)
-export interface VectorDBEventData {
-  /* ... */
-}
-export interface IndexManagerEventData {
-  /* ... */
-}
-export interface PartitionedDBEventData {
-  /* ... */
-}
-export interface MonitorEvents {
-  /* ... */
-}
-// ... other event data interfaces
+// The real event payload maps are declared alongside their features above
+// (`VectorDBEventData`, `PartitionedDBEventData`, `MonitorEvents`). Empty
+// `/* ... */` placeholders used to sit here, where declaration merging made
+// them look populated while contributing nothing.
 
 // --- Overall System Configuration ---
 
@@ -1362,7 +1402,7 @@ export type DatabaseEvents = {
   'index:complete': { partitionId?: string }; // Simplified event for completion
   /** Emitted when an error occurs during index building. */
   'index:error': { partitionId?: string; error: Error | unknown }; // Simplified error event
-  'search:start': {};
+  'search:start': EmptyPayload;
 
   // --- Forwarded Search Events (from UnifiedSearch) ---
   /** Emitted when a search operation (via findNearest/search) completes successfully. */
@@ -1540,6 +1580,15 @@ export type IServerOptions = {
   /** Whether to enable debug logging */
   debug?: boolean;
   database?: DatabaseOptions;
+  /**
+   * Hard cap on how many vectors a single `/api/search/relationships` or
+   * `/api/search/communities` request may scan.
+   *
+   * Both endpoints are O(n^2) in the vector count. With only a `threshold > 0`
+   * check, one HTTP call could pin a core for minutes and allocate gigabytes.
+   * Requests exceeding this are rejected with 413.
+   */
+  maxGraphExtractionVectors?: number;
   /** Custom error handler */
   errorHandler?: (err: Error, req: Request, res: Response, next: NextFunction) => void;
 };
@@ -1548,9 +1597,18 @@ export type IServerOptions = {
  * The API context object containing shared resources
  */
 export interface ApiContext {
-  timer: Timer;
+  /**
+   * Creates a fresh `Timer` for one request.
+   *
+   * This used to be a single shared instance, so two in-flight requests both
+   * called `start('search')` and the second overwrote the first's start
+   * timestamp — every response then reported the other request's duration.
+   */
+  createTimer: () => Timer;
   createFilterFunction: (filters: Record<string, any> | FilterConfig[]) => (id: number | string, metadata?: Record<string, any> | null) => boolean;
   database: Database;
+  /** Upper bound on vectors a single graph-extraction request may scan. */
+  maxGraphExtractionVectors: number;
 }
 
 /**
@@ -1618,6 +1676,25 @@ export interface HybridSearchEvents {
 }
 
 // Type aliases for DB event payloads (keep as before)
-export type IndexProgressPayload = PartitionedDBEventData['partition:indexProgress'] extends infer T ? (T extends { id: string; progress: number } ? T : any) : any;
-export type IndexedPayload = PartitionedDBEventData['partition:indexed'] extends infer T ? (T extends { id: string; indexType: string } ? T : any) : any;
-export type PartitionErrorPayload = PartitionedDBEventData['partition:error'] extends infer T ? (T extends { id?: string; error: unknown; operation: string } ? T : any) : any;
+export type IndexProgressPayload = PartitionedDBEventData['partition:indexProgress'];
+export type IndexedPayload = PartitionedDBEventData['partition:indexed'];
+export type PartitionErrorPayload = PartitionedDBEventData['partition:error'];
+
+/** Options accepted by `save()` across the VectorDB hierarchy. */
+export interface SaveOptions {
+  /**
+   * Bypass the "database is closing/closed" guard.
+   * Used internally by `close()` to perform its final flush.
+   * @internal
+   */
+  force?: boolean;
+}
+
+/** Options accepted by `close()` across the VectorDB hierarchy. */
+export interface CloseOptions {
+  /**
+   * Persist state to disk before releasing resources. Defaults to `true`.
+   * Pass `false` when the caller has already flushed state (e.g. LRU eviction).
+   */
+  save?: boolean;
+}

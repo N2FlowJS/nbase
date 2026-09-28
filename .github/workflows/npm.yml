@@ -3,25 +3,52 @@ name: Publish to npm
 on:
   push:
     branches: [main]
+    tags: ['v*']
+
+# Serialise publishes: two rapid pushes could both pass the "version exists?"
+# check and race, with one failing on EPUBLISHCONFLICT.
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Use Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org/'
+          cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Run test
+      # `dist/` is gitignored, so without an explicit build the published
+      # tarball's `main`/`types` point at files that do not exist.
+      - name: Build
+        run: npm run build
+
+      - name: Verify the published tarball actually contains the entry points
+        run: |
+          set -euo pipefail
+          npm pack --dry-run > /tmp/pack.txt
+          grep -q 'dist/index.js' /tmp/pack.txt || { echo "dist/index.js missing from tarball"; exit 1; }
+          grep -q 'dist/index.d.ts' /tmp/pack.txt || { echo "dist/index.d.ts missing from tarball"; exit 1; }
+          # Guard against re-introducing the 71MB tarball (logs, tests, .env).
+          if grep -qE '\.env$|daemon/.*\.log$|npm notice [0-9.]+kB test/' /tmp/pack.txt; then
+            echo "Unexpected file in tarball:"; grep -E '\.env$|daemon/.*\.log$|kB test/' /tmp/pack.txt
+            exit 1
+          fi
+
+      - name: Test
         run: npm test
 
       - name: Check if version exists on npm
@@ -37,8 +64,21 @@ jobs:
           fi
         shell: /usr/bin/bash -e {0}
 
+      # `id-token: write` is required for npm provenance attestations.
       - name: Publish to npm
         if: env.skip_publish != 'true'
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify the published package
+        if: env.skip_publish != 'true'
+        run: |
+          set -euo pipefail
+          sleep 10
+          npm view @n2flowjs/nbase@${{ steps.check_version.outputs.version || 'latest' }} version
+          # Consumers import `dist/index.js`; confirm it resolves from a clean install.
+          mkdir -p /tmp/verify && cd /tmp/verify
+          npm init -y > /dev/null
+          npm install @n2flowjs/nbase --silent
+          node -e "const n=require('@n2flowjs/nbase'); if(typeof n.PartitionedVectorDB!=='function') { throw new Error('PartitionedVectorDB not exported'); } console.log('published package imports OK');"

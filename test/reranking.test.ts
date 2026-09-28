@@ -21,7 +21,7 @@ describe('SearchReranker', () => {
 
     describe('rerank method', () => {
         it('should return empty array when input is not an array', () => {
-            // @ts-ignore - Intentionally passing invalid input
+            // @ts-expect-error - intentionally passing invalid input
             const result = reranker.rerank({});
             expect(result).to.be.an('array').that.is.empty;
         });

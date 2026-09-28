@@ -1,4 +1,3 @@
-import { PartitionedVectorDB } from "../../vector/partitioned_vector_db";
 import { FilterConfig } from "../../types";
 
 /**
@@ -38,7 +37,7 @@ export function createFilterFunction(
   const predicates = filterConfigs.map(compileFilterPredicate);
 
   // The actual filter function that will be returned
-  return function filterFunction(
+  const filterFunction = function (
     id: number | string,
     metadata?: Record<string, any> | null
   ): boolean {
@@ -67,6 +66,12 @@ export function createFilterFunction(
     // If we have no way to get metadata, we can't filter
     return false;
   };
+
+  // Expose the memoisation counters, which were otherwise incremented and
+  // never read.
+  return Object.assign(filterFunction, {
+    stats: { get hits() { return cacheHits; }, get misses() { return cacheMisses; } },
+  });
 }
 
 /**
@@ -153,67 +158,4 @@ function evaluatePredicates(
     }
   }
   return true;
-}
-
-/**
- * Creates a combined filter function from multiple filter conditions
- * using logical operations (AND, OR, NOT)
- */
-export function createLogicalFilterFunction(
-  conditions: Array<{
-    filter: Record<string, any> | FilterConfig[];
-    operation: "AND" | "OR" | "NOT";
-  }>,
-  db?: PartitionedVectorDB
-): (id: number | string, metadata?: Record<string, any> | null) => boolean {
-  const filterFunctions = conditions.map((condition) => {
-    const filterFn = createFilterFunction(condition.filter);
-
-    // For NOT operation, invert the result
-    if (condition.operation === "NOT") {
-      return (id: number | string, metadata?: Record<string, any> | null) =>
-        !filterFn(id, metadata);
-    }
-
-    return filterFn;
-  });
-
-  return (
-    id: number | string,
-    metadata?: Record<string, any> | null
-  ): boolean => {
-    // Handle OR operation
-    if (conditions.some((c) => c.operation === "OR")) {
-      return filterFunctions.some((fn) => fn(id, metadata));
-    }
-
-    // Default to AND operation
-    return filterFunctions.every((fn) => fn(id, metadata));
-  };
-}
-
-/**
- * Helper function to create a combined filter with OR logic
- */
-export function createOrFilter(
-  filters: Array<Record<string, any> | FilterConfig[]>,
-  db?: PartitionedVectorDB
-): (id: number | string, metadata?: Record<string, any> | null) => boolean {
-  return createLogicalFilterFunction(
-    filters.map((filter) => ({ filter, operation: "OR" as const })),
-    db
-  );
-}
-
-/**
- * Helper function to create a combined filter with AND logic
- */
-export function createAndFilter(
-  filters: Array<Record<string, any> | FilterConfig[]>,
-  db?: PartitionedVectorDB
-): (id: number | string, metadata?: Record<string, any> | null) => boolean {
-  return createLogicalFilterFunction(
-    filters.map((filter) => ({ filter, operation: "AND" as const })),
-    db
-  );
 }

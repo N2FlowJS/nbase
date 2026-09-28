@@ -2,25 +2,17 @@
 
 import { VectorDB } from './vector_db';
 import config from '../config'; // Assuming config exists and has defaults
-import { ClusteredVectorDBOptions, DBStats, DistanceMetric, IDVector, SearchResult, Vector } from '../types';
-import { existsSync, promises as fsPromises } from 'fs';
-import path from 'path';
-import zlib from 'zlib'; // Import zlib for potential compression
-import { promisify } from 'util'; // Import promisify
+import { ClusteredVectorDBOptions, CloseOptions, DBStats, DistanceMetric, IDVector, SaveOptions, SearchResult, Vector } from '../types';
+import { existsSync, promises as fsPromises } from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib'; // Import zlib for potential compression
+import { promisify } from 'node:util'; // Import promisify
 import {KMeans} from '../compression/kmeans'; // Import KMeans
 import { log } from '../utils/log'; // Thêm import log
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
-// Helper function to pick k random distinct elements from an array
-function getRandomElements<T>(arr: T[], k: number): T[] {
-  if (k >= arr.length) {
-    return [...arr]; // Return a copy of the whole array if k is too large
-  }
-  const shuffled = [...arr].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, k);
-}
 
 /**
  * A clustered vector database that extends the base VectorDB with efficient approximate nearest neighbor search.
@@ -61,6 +53,8 @@ export class ClusteredVectorDB extends VectorDB {
   protected readonly distanceMetric: DistanceMetric;
   protected readonly kmeansMaxIterations: number; // New config option
   protected readonly runKMeansOnLoad: boolean; // Option to run K-Means automatically on load
+  /** Clusters to probe per search; `null` means probe all (linear scan). */
+  protected readonly nprobe: number | null;
   private kmeans: KMeans;
 
   // Clustering structures
@@ -73,6 +67,8 @@ export class ClusteredVectorDB extends VectorDB {
   private clusterCentroids: Map<number, Float32Array>;
   private clusterDimensions: Map<number, number>; // Track dimensions per cluster centroid
   private clusterIdCounter: number;
+  /** Dedicated save lock — the inherited `savePromise` is owned by `VectorDB.save()`. */
+  private clusterSavePromise: Promise<void> | null = null;
 
   constructor(suggestedVectorSize: number | null = null, dbPath: string | null = null, options: ClusteredVectorDBOptions = {}) {
     super(suggestedVectorSize, dbPath, {
@@ -84,6 +80,8 @@ export class ClusteredVectorDB extends VectorDB {
     this.newClusterThresholdFactor = options.newClusterThresholdFactor ?? 1.5;
     this.newClusterDistanceThreshold = options.newClusterDistanceThreshold ?? 0.5;
     this.maxClusters = options.maxClusters ?? config.clustering.maxClusters ?? 1000; // Set a reasonable max
+    const nprobe = options.nprobe ?? null;
+    this.nprobe = nprobe !== null && nprobe > 0 ? Math.floor(nprobe) : null;
     this.distanceMetric = options.distanceMetric ?? 'euclidean'; // Default metric
     this.kmeansMaxIterations = options.kmeansMaxIterations ?? config.clustering.kmeansMaxIterations ?? 100; // K-Means iterations
     this.runKMeansOnLoad = options.runKMeansOnLoad ?? false; // Default to false
@@ -108,28 +106,31 @@ export class ClusteredVectorDB extends VectorDB {
   }
 
   // --- Overridden Save Method ---
-  override async save(): Promise<void> {
+  override async save(options: SaveOptions = {}): Promise<void> {
     if (!this.dbPath) {
       log('warn', '[ClusteredVectorDB] No dbPath specified, skipping save.');
       return;
     }
-    if (this.isClosed) {
+    if (this.isClosed && !options.force) {
       log('warn', '[ClusteredVectorDB] Attempted to save a closed database.');
       return;
     }
 
     log('info', `[ClusteredVectorDB] Saving state to ${this.dbPath}`);
 
-    // Use a single save promise to prevent race conditions if called multiple times
-    if (this.savePromise) {
+    // NOTE: this deliberately uses its own lock, not the inherited
+    // `savePromise`. Sharing one field meant `super.save()` (called below) and
+    // this method clobbered each other's lock, so concurrent callers could
+    // observe a "completed" save that omitted cluster.json.
+    if (this.clusterSavePromise) {
       log('info', `[ClusteredVectorDB] Save already in progress, waiting...`);
-      return this.savePromise;
+      return this.clusterSavePromise;
     }
 
-    this.savePromise = (async () => {
+    this.clusterSavePromise = (async () => {
       try {
         // 1. Save base data (vectors, metadata) using parent method
-        await super.save(); // This handles its own file paths and logic
+        await super.save(options); // This handles its own file paths and logic
         log('info', '[ClusteredVectorDB] Base VectorDB data saved.');
 
         // 2. Prepare cluster state for serialization
@@ -159,11 +160,11 @@ export class ClusteredVectorDB extends VectorDB {
         log('error', `[ClusteredVectorDB] Error saving database state to ${this.dbPath}:`, error);
         throw error; // Re-throw to indicate failure
       } finally {
-        this.savePromise = null; // Release lock
+        this.clusterSavePromise = null; // Release lock
       }
     })();
 
-    return this.savePromise;
+    return this.clusterSavePromise;
   }
 
   // --- Overridden Load Method ---
@@ -235,6 +236,12 @@ export class ClusteredVectorDB extends VectorDB {
   getDistanceMetric(): DistanceMetric {
     return this.distanceMetric;
   }
+  // --- VectorProvider Implementation ---
+
+  getVectorIds(): (number | string)[] {
+    return Array.from(this.memoryStorage.keys());
+  }
+
   // --- Overridden Methods ---
 
   override addVector(id: number | string | undefined, vector: Vector, metadata?: Record<string, any>): number | string {
@@ -253,7 +260,11 @@ export class ClusteredVectorDB extends VectorDB {
     const deleted = super.deleteVector(id); // Let parent handle deletion
 
     if (deleted && vector) {
-      this._removeVectorFromCluster(id);
+      // The vector must be handed to `_removeVectorFromCluster` explicitly:
+      // it re-reads from `memoryStorage`, which no longer contains the vector
+      // by this point. With `null` in hand it took the "cluster is empty"
+      // branch and destroyed the whole cluster, orphaning every sibling.
+      this._removeVectorFromCluster(id, vector);
     }
 
     return deleted;
@@ -277,6 +288,10 @@ export class ClusteredVectorDB extends VectorDB {
     const typedVector = this.memoryStorage.get(vectorId);
     if (!typedVector) return false; // Should not happen
 
+    // Detach the id from its previous cluster *before* re-assigning, otherwise
+    // the id ends up a member of two clusters and `_removeVectorFromCluster`
+    // later removes it from whichever happens to be found first.
+    this._removeVectorFromCluster(vectorId, oldVector);
     this._assignVectorToCluster(vectorId, typedVector);
 
     return true;
@@ -323,9 +338,19 @@ export class ClusteredVectorDB extends VectorDB {
       return [];
     }
 
-    const clustersToSearch = clusterDistances.sort((a, b) => a.dist - b.dist);
-    log('info', `[ClusteredVectorDB] [findNearest] Found ${clustersToSearch.length} candidate clusters.`);
-    
+    // Sort by centroid distance, nearest first.
+    clusterDistances.sort((a, b) => a.dist - b.dist);
+
+    // Probe a bounded number of clusters. Previously every cluster was probed,
+    // which made the "pruning" a no-op: the search was a full linear scan plus
+    // one extra centroid distance per cluster.
+    //
+    // Probe at least enough clusters to cover `k` candidates, so a small k still
+    // gets a full-width beam rather than being starved by a narrow probe.
+    const limit = this.nprobe ?? clusterDistances.length;
+    const clustersToSearch = this._selectClustersToProbe(clusterDistances, k, limit);
+    log('info', `[ClusteredVectorDB] [findNearest] Probing ${clustersToSearch.length}/${clusterDistances.length} clusters (nprobe=${this.nprobe ?? 'all'}).`);
+
     // 2. Collect candidate vectors from selected clusters
     const candidateIds = new Set<number | string>();
     for (const { key } of clustersToSearch) {
@@ -447,7 +472,45 @@ export class ClusteredVectorDB extends VectorDB {
     return newKey;
   }
 
-  private _removeVectorFromCluster(vectorId: number | string): void {
+  /**
+   * Picks which clusters to scan, walking outward from the nearest centroid
+   * until the probe limit is reached *and* enough members have been collected to
+   * satisfy `k`.
+   *
+   * Probing all clusters regardless of `nprobe` is equivalent to a linear scan
+   * plus one distance computation per cluster, so this is the main lever for
+   * clustered-search latency.
+   *
+   * @private
+   */
+  private _selectClustersToProbe(
+    rankedClusters: Array<{ key: number; dist: number }>,
+    k: number,
+    limit: number
+  ): Array<{ key: number; dist: number }> {
+    if (limit >= rankedClusters.length) return rankedClusters;
+
+    const selected: Array<{ key: number; dist: number }> = [];
+    let collected = 0;
+    for (let i = 0; i < rankedClusters.length && selected.length < limit; i++) {
+      selected.push(rankedClusters[i]);
+      const members = this.clusters.get(rankedClusters[i].key);
+      if (members) collected += members.length;
+      // Stop early once the beam is comfortably wider than what was asked for.
+      if (collected >= k * 2 && selected.length >= 1) break;
+    }
+    return selected;
+  }
+
+  /**
+   * Detaches `vectorId` from whichever cluster holds it.
+   *
+   * @param vector The vector being removed. Callers must pass the vector data
+   *   explicitly because it is usually already gone from `memoryStorage` by the
+   *   time this runs; without it the centroid is never updated and the cluster
+   *   is torn down even though it still has members.
+   */
+  private _removeVectorFromCluster(vectorId: number | string, vector?: Float32Array): void {
     let foundClusterKey: number | null = null;
     let indexToRemove: number | null = null;
 
@@ -461,26 +524,34 @@ export class ClusteredVectorDB extends VectorDB {
       }
     }
 
-    if (foundClusterKey !== null && indexToRemove !== null) {
-      const members = this.clusters.get(foundClusterKey)!;
-      const vectorToRemove = this.memoryStorage.get(vectorId) ?? null; // Get vector data for centroid update
-
-      // Remove from member list
-      members.splice(indexToRemove, 1);
-
-      // Update centroid or remove cluster if empty
-      if (members.length > 0 && vectorToRemove) {
-        // Update centroid incrementally
-        this._updateCentroidIncrementally(foundClusterKey, vectorToRemove, 'remove');
-      } else {
-        // Cluster is now empty, remove it
-        this.clusters.delete(foundClusterKey);
-        this.clusterCentroids.delete(foundClusterKey);
-        this.clusterDimensions.delete(foundClusterKey);
-        this.emit('cluster:delete', { clusterId: foundClusterKey });
-      }
-    } else {
+    if (foundClusterKey === null || indexToRemove === null) {
       log('warn', `Vector ${vectorId} not found in any cluster during deletion.`);
+      return;
+    }
+
+    const members = this.clusters.get(foundClusterKey)!;
+    const vectorToRemove = vector ?? this.memoryStorage.get(vectorId) ?? null;
+
+    // Remove from member list
+    members.splice(indexToRemove, 1);
+
+    if (members.length === 0) {
+      // Cluster is now empty, remove it
+      this.clusters.delete(foundClusterKey);
+      this.clusterCentroids.delete(foundClusterKey);
+      this.clusterDimensions.delete(foundClusterKey);
+      this.emit('cluster:delete', { clusterId: foundClusterKey });
+      return;
+    }
+
+    if (vectorToRemove) {
+      // Cluster still has members: keep it and correct its centroid.
+      this._updateCentroidIncrementally(foundClusterKey, vectorToRemove, 'remove');
+    } else {
+      // No vector data available to update the centroid incrementally; fall
+      // back to a full recompute rather than dropping the surviving members.
+      log('warn', `No vector data for ${vectorId}; recalculating centroid for cluster ${foundClusterKey}.`);
+      this._recalculateCentroid(foundClusterKey);
     }
   }
 
@@ -645,7 +716,7 @@ export class ClusteredVectorDB extends VectorDB {
 
   private _updateClustersFromKMeans(
     allVectors: [number | string, Float32Array][],
-    assignments: Map<number | string, number>, // vectorId -> centroidIndex
+    _assignments: Map<number | string, number>, // vectorId -> centroidIndex (kept for signature parity)
     finalCentroids: Float32Array[]
   ): void {
     // Clear existing cluster structures
@@ -718,7 +789,7 @@ export class ClusteredVectorDB extends VectorDB {
 
   // --- Stats (Override) ---
 
-  override getStats(): DBStats {
+  override getStats(options: { includeClusterMembers?: boolean } = {}): DBStats {
     const baseStats = super.getStats(); // Get stats from VectorDB
 
     const clusterSizes: Record<number, number> = {};
@@ -740,14 +811,15 @@ export class ClusteredVectorDB extends VectorDB {
       distribution: Object.entries(clusterSizes).map(([keyStr, size]) => {
         const key = parseInt(keyStr, 10); // Ensure key is number
         const centroid = this.clusterCentroids.get(key);
-        const members = this.clusters.get(key) || []; // Get members for this cluster
         return {
           id: key, // Cluster ID
           size,
           dimension: this.clusterDimensions.get(key) || 0, // Get stored dimension
           // Calculate norm only if centroid exists
           centroidNorm: centroid ? this._calculateNorm(centroid) : 0,
-          members: members, // Add the list of members (vector IDs)
+          // Omit the member id list unless asked: serialising every vector id
+          // made each getStats() response scale with the total vector count.
+          ...(options.includeClusterMembers ? { members: this.clusters.get(key) || [] } : {}),
         };
       }),
     };
@@ -765,14 +837,17 @@ export class ClusteredVectorDB extends VectorDB {
     return baseStats;
   }
 
-  override async close(): Promise<void> {
-    await super.close(); // Call parent close (saves data, clears base maps)
+  override async close(options: CloseOptions = {}): Promise<void> {
+    // `options` is forwarded so callers can release resources without paying for
+    // a redundant write (e.g. LRU eviction after an explicit save).
+    await super.close(options); // Call parent close (saves data, clears base maps)
     // Parent clear methods already handle memoryStorage, metadata, vectorDimensions
 
     // Clear clustering structures
     this.clusters.clear();
     this.clusterCentroids.clear();
     this.clusterDimensions.clear();
+    this.clusterSavePromise = null;
     // No need to emit 'db:close' again, parent does it
   }
 
@@ -966,25 +1041,26 @@ public extractRelationships(
           metadata?: Record<string, any>;
         }> = [];
         
-        // DFS to find all connected vectors
-        const dfs = (nodeId: number | string) => {
+        // Iterative DFS — recursion overflowed the stack on dense components.
+        const stack: Array<number | string> = [id];
+        while (stack.length > 0) {
+          const nodeId = stack.pop()!;
+          if (visited.has(nodeId)) continue;
           visited.add(nodeId);
           const metadata = this.metadata.get(nodeId);
           community.push({
             id: nodeId,
-            metadata: metadata ? { ...metadata } : undefined
+            metadata: metadata ? { ...metadata } : undefined,
           });
-          
+
           // Visit all neighbors
-          const neighbors = graph.get(nodeId) || new Set();
-          for (const neighbor of neighbors) {
-            if (!visited.has(neighbor)) {
-              dfs(neighbor);
+          const neighbors = graph.get(nodeId);
+          if (neighbors) {
+            for (const neighbor of neighbors) {
+              if (!visited.has(neighbor)) stack.push(neighbor);
             }
           }
-        };
-        
-        dfs(id);
+        }
         
         // Only include communities with at least 2 vectors
         if (community.length > 1) {

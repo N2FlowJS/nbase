@@ -1,4 +1,4 @@
-import { RerankingOptions, SearchResult } from '../types';
+import { RerankingOptions, SearchResult, Vector } from '../types';
 import * as distanceMetrics from '../utils/distance_metrics'; // Import distance functions
 
 /**
@@ -107,9 +107,8 @@ export class SearchReranker {
 
     // --- Setup ---
     const distanceFunc = distanceMetrics.getDistanceFunction(distanceMetric);
-    const typedQueryVector = queryVector instanceof Float32Array ? queryVector : new Float32Array(queryVector);
     const remainingResults = new Map<number | string, SearchResult>();
-    const resultVectors = new Map<number | string, Float32Array>();
+    const resultVectors = new Map<number | string, Vector>();
 
     initialResults.forEach((res) => {
       const vector = vectorsMap.get(res.id);

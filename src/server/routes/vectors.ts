@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { ensureDatabaseReady } from '../middleware/common';
+import { asyncHandler } from '../utils/async_handler';
 import { UpdateMetadataRequest, ApiContext, VectorData } from '../../types'; // Thêm VectorData
 
 /**
@@ -24,7 +25,7 @@ import { UpdateMetadataRequest, ApiContext, VectorData } from '../../types'; // 
 export function vectorRoutes(context: ApiContext) {
   const router = Router();
   // Database bây giờ là instance của Database class mới (DatabasePartitioned)
-  const { database, timer } = context;
+  const { database, createTimer } = context;
 
   // Apply database readiness middleware to all routes
   router.use(ensureDatabaseReady(database));
@@ -34,8 +35,8 @@ export function vectorRoutes(context: ApiContext) {
    * POST /api/vectors
    * Tương tác với database.addVector hoặc database.bulkAdd (async)
    */
-  router.post('/', async (req: Request, res: Response) => {
-    // Thêm async
+  router.post('/', asyncHandler(async (req: Request, res: Response) => {
+    const timer = createTimer();    // Thêm async
     timer.start('add_vectors');
 
     const { vectors } = req.body;
@@ -156,15 +157,15 @@ export function vectorRoutes(context: ApiContext) {
       });
       return;
     }
-  });
+  }));
 
   /**
    * Get a vector by ID
    * GET /api/vectors/:id
    * Tương tác với database.getVector và database.getMetadata (async)
    */
-  router.get('/:id', async (req: Request, res: Response) => {
-    // Thêm async
+  router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
+    const timer = createTimer();    // Thêm async
     const idParam = req.params.id;
     const includeVector = req.query.includeVector === 'true';
     const includeMetadata = req.query.includeMetadata !== 'false';
@@ -253,15 +254,15 @@ export function vectorRoutes(context: ApiContext) {
       });
       return;
     }
-  });
+  }));
 
   /**
    * Check if a vector exists
    * GET /api/vectors/:id/exists
    * Tương tác với database.hasVector (async) và getVector/getMetadata để lấy dimension
    */
-  router.get('/:id/exists', async (req: Request, res: Response) => {
-    // Thêm async
+  router.get('/:id/exists', asyncHandler(async (req: Request, res: Response) => {
+    const timer = createTimer();    // Thêm async
     const idParam = req.params.id;
     timer.start('check_vector_exists');
 
@@ -315,15 +316,15 @@ export function vectorRoutes(context: ApiContext) {
         duration,
       });
     }
-  });
+  }));
 
   /**
    * Update vector metadata
    * PATCH /api/vectors/:id/metadata
    * Tương tác với database.updateMetadata (async)
    */
-  router.patch('/:id/metadata', async (req: Request, res: Response) => {
-    // Thêm async
+  router.patch('/:id/metadata', asyncHandler(async (req: Request, res: Response) => {
+    const timer = createTimer();    // Thêm async
     const idParam = req.params.id;
     const { metadata, operation = 'merge' } = req.body as UpdateMetadataRequest;
 
@@ -423,15 +424,15 @@ export function vectorRoutes(context: ApiContext) {
       });
       return;
     }
-  });
+  }));
 
   /**
    * Delete vector
    * DELETE /api/vectors/:id
    * Tương tác với database.deleteVector (async)
    */
-  router.delete('/:id', async (req: Request, res: Response) => {
-    // Thêm async
+  router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
+    const timer = createTimer();    // Thêm async
     const idParam = req.params.id;
 
     timer.start('delete_vector');
@@ -482,15 +483,15 @@ export function vectorRoutes(context: ApiContext) {
       });
       return;
     }
-  });
+  }));
 
   /**
    * Find similar vectors
    * GET /api/vectors/:id/similar
    * Tương tác với database.getVector và database.search (async)
    */
-  router.get('/:id/similar', async (req: Request, res: Response) => {
-    // Thêm async
+  router.get('/:id/similar', asyncHandler(async (req: Request, res: Response) => {
+    const timer = createTimer();    // Thêm async
     const idParam = req.params.id;
     const k = parseInt((req.query.k as string) || '10', 10);
     const includeMetadata = req.query.includeMetadata !== 'false';
@@ -583,7 +584,7 @@ export function vectorRoutes(context: ApiContext) {
       });
       return;
     }
-  });
+  }));
 
   return router;
 }

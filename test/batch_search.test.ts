@@ -39,8 +39,8 @@ describe("BatchEngineSearch", () => {
     ];
 
     const mockResults: SearchResult[][] = [
-      [{ id: "a", score: 0.9, dist: 0.1 }],
-      [{ id: "b", score: 0.8, dist: 0.2 }],
+      [{ id: "a", dist: 0.1 }],
+      [{ id: "b", dist: 0.1 }],
     ];
 
     mockSearchEngine.findNearest.resolves(mockResults[0]);
@@ -58,8 +58,8 @@ describe("BatchEngineSearch", () => {
     ];
 
     const mockResults: SearchResult[][] = [
-      [{ id: "a", score: 0.9, dist: 0.1 }],
-      [{ id: "b", score: 0.8, dist: 0.2 }],
+      [{ id: "a", dist: 0.1 }],
+      [{ id: "b", dist: 0.1 }],
     ];
 
     mockSearchEngine.findNearestHNSW.resolves(mockResults[0]);
@@ -78,9 +78,9 @@ describe("BatchEngineSearch", () => {
     ];
 
     const mockResults: SearchResult[][] = [
-      [{ id: "a", score: 0.9, dist: 0.1 }],
-      [{ id: "b", score: 0.8, dist: 0.2 }],
-      [{ id: "c", score: 0.7, dist: 0.3 }],
+      [{ id: "a", dist: 0.1 }],
+      [{ id: "b", dist: 0.1 }],
+      [{ id: "c", dist: 0.1 }],
     ];
 
     mockSearchEngine.findNearest.onCall(0).resolves(mockResults[0]);
@@ -130,8 +130,8 @@ describe("BatchEngineSearch", () => {
     ];
 
     const mockResults: SearchResult[][] = [
-      [{ id: "b", score: 0.8, dist: 0.2 }],
-      [{ id: "a", score: 0.9, dist: 0.1 }],
+      [{ id: "b", dist: 0.1 }],
+      [{ id: "a", dist: 0.1 }],
     ];
 
     mockSearchEngine.findNearest.onCall(0).resolves(mockResults[1]);

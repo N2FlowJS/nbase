@@ -1,5 +1,5 @@
-import { EventEmitter } from 'events';
-import { existsSync, mkdirSync } from 'fs';
+import { EventEmitter } from 'node:events';
+import { existsSync, mkdirSync } from 'node:fs';
 import { LRUCache } from 'lru-cache';
 import path from 'path'; // Import path for directory handling
 import configDefaults from '../config'; // Import the default config object
@@ -22,6 +22,7 @@ import {
   VectorData,
 } from '../types';
 import { createTimer, Timer } from '../utils/profiling';
+import { log } from '../utils/log';
 import { VectorDBMonitor } from '../utils/vector_monitoring';
 import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
 
@@ -90,12 +91,20 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
 
   // Caching & Monitoring
   private readonly searchCache: LRUCache<string, SearchResult[]>;
+  /** Identity map for function-valued filters, used to build distinct cache keys. */
+  private readonly _filterIds: WeakMap<object, string> = new WeakMap();
+  private _filterSeq: number = 0;
+  /** Coalesces monitor metric refreshes so a burst of writes costs one pass. */
+  private _monitorMetricsTimer: NodeJS.Timeout | null = null;
+  private _monitorMetricsDirty: boolean = false;
+  private readonly _monitorMetricsThrottleMs: number = 1000;
   private readonly monitor: VectorDBMonitor | null;
   private readonly timer: Timer = createTimer(); // General purpose timer
 
   // State & Configuration
   private readonly options: Required<DatabaseOptions>; // Use Required for internal consistency
   private isClosed: boolean = false;
+  private isClosing: boolean = false;
   private isReady: boolean = false;
   public initializationPromise: Promise<void>; // Tracks async initialization
 
@@ -282,6 +291,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
         this.emit('index:progress', {
           message: 'Building initial indices...',
           progress,
+          // `id` and `operation` are required by IndexProgressEvent; the
+          // initial build is not scoped to a single partition, so say so
+          // explicitly rather than leaving the payload short.
+          id: '',
+          operation: 'buildInitialIndices',
         });
       };
 
@@ -369,7 +383,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
 
       this.handleCacheInvalidation(eventName);
       this.forwardEvent(eventName, data);
-      this.updateMetrics(eventName, data);
+      this.updateMetrics(eventName);
       this.recordEventInMonitor(eventName, data);
     };
 
@@ -395,12 +409,37 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /**
-   * Updates performance metrics based on event type
+   * Records the event for the monitor, coalescing with any update already in
+   * flight.
+   *
+   * `vector:add` is a metrics event, so a bulk load of N vectors used to trigger
+   * N unawaited `getStats()` calls. `getStats()` is O(vectors + partitions), so
+   * that is O(N^2) work plus an unbounded pile-up of concurrent promises. The
+   * dirty flag collapses a burst into a single recomputation.
+   *
+   * @private
    */
-  private updateMetrics(eventName: string, data: any): void {
+  private updateMetrics(eventName: string): void {
     if (Database.METRICS_EVENTS.includes(eventName as any)) {
-      this._updateMonitorDbMetrics();
+      this._monitorMetricsDirty = true;
+      this._scheduleMonitorDbMetrics();
     }
+  }
+
+  /**
+   * Coalesces monitor metric refreshes to at most one per interval.
+   * @private
+   */
+  private _scheduleMonitorDbMetrics(): void {
+    if (this._monitorMetricsTimer || !this.options.monitoring.enableDatabaseMetrics) return;
+    this._monitorMetricsTimer = setTimeout(() => {
+      this._monitorMetricsTimer = null;
+      if (!this._monitorMetricsDirty) return;
+      this._monitorMetricsDirty = false;
+      // Fire and forget: metrics must never block a write path.
+      void this._updateMonitorDbMetrics();
+    }, this._monitorMetricsThrottleMs);
+    this._monitorMetricsTimer.unref?.();
   }
 
   /**
@@ -551,34 +590,77 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   /** Generates a cache key for search results. */
   private _getCacheKey(query: Vector, k: number, options: UnifiedSearchOptions): string {
     const vectorHash = this._hashVector(query);
-    // Include all options that influence the search result
+    // Include every option that can change the result set.
+    //
+    // `filter` used to be flattened to the string 'present'/'absent', so two
+    // completely different predicates hashed to the same key and a cached
+    // result for one filter was served in response to another.
     const optionsKey = JSON.stringify({
       k,
-      filter: options.filter ? 'present' : 'absent', // Simplify filter representation
+      filter: this._hashFilter(options.filter),
       distanceMetric: options.distanceMetric ?? 'default', // Use default marker
       efSearch: options.efSearch,
       useHNSW: options.useHNSW,
       rerank: options.rerank,
       rerankingMethod: options.rerankingMethod,
-      partitionIds: options.partitionIds?.sort(), // Sort for consistency
+      // Copy before sorting: `.sort()` mutates in place, and this array belongs
+      // to the caller.
+      partitionIds: options.partitionIds ? [...options.partitionIds].sort() : undefined,
       searchMethod: options.searchMethod,
     });
     return `${vectorHash}::${optionsKey}`;
   }
 
-  /** Simple, fast vector hash (not cryptographically secure). */
-  private _hashVector(vector: Vector): string {
-    let hash = 0;
-    // Sample fewer points for potentially faster hashing
-    const samples = Math.min(vector.length, 16);
-    const step = Math.max(1, Math.floor(vector.length / samples));
-    for (let i = 0; i < vector.length; i += step) {
-      // Combine value and index for slightly better distribution
-      const val = Math.round((vector[i] || 0) * 1000); // Use 1000x scaling
-      hash = (hash << 5) - hash + val + i;
-      hash |= 0; // Convert to 32bit integer
+  /**
+   * Produces a stable identity for a filter predicate.
+   *
+   * Function predicates cannot be serialised, so each distinct function is
+   * assigned a unique id. That is still strictly better than the previous
+   * behaviour (every filter collapsing to one key): it guarantees two different
+   * predicates never share a cache entry, at the cost of not sharing entries
+   * across requests that pass a fresh closure.
+   *
+   * @private
+   */
+  private _hashFilter(filter: unknown): string {
+    if (filter === undefined || filter === null) return 'none';
+    if (typeof filter === 'function') {
+      const existing = this._filterIds.get(filter);
+      if (existing) return existing;
+      const id = `fn#${++this._filterSeq}`;
+      this._filterIds.set(filter, id);
+      return id;
     }
-    return hash.toString(36); // Use base 36 for shorter string
+    if (typeof filter === 'object') {
+      try {
+        return `obj:${JSON.stringify(filter, Object.keys(filter as object).sort())}`;
+      } catch {
+        return 'obj:unserializable';
+      }
+    }
+    return `val:${String(filter)}`;
+  }
+
+  /**
+   * FNV-1a over the full vector.
+   *
+   * The previous hash sampled at most 16 dimensions, so two distinct vectors
+   * that agreed on those samples collided and a cached result for one was
+   * returned for the other. Full-length hashing removes that collision class.
+   *
+   * @private
+   */
+  private _hashVector(vector: Vector): string {
+    // 32-bit FNV-1a, accumulated across two lanes to widen the effective range
+    // (two vectors only collide if both lanes match).
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    for (let i = 0; i < vector.length; i++) {
+      const val = Math.round((vector[i] || 0) * 1000); // Use 1000x scaling
+      h1 = Math.imul(h1 ^ val, 16777619);
+      h2 = Math.imul(h2 ^ (val + i), 2654435761);
+    }
+    return `${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}`;
   }
 
   // --- Public API Methods ---
@@ -953,40 +1035,47 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
 
   /** Closes the database, saves state, stops background tasks, and releases resources. */
   async close(): Promise<void> {
-    if (this.isClosed) {
-      console.log('Database already closed.');
+    if (this.isClosed || this.isClosing) {
       return;
     }
-    console.log('Closing database...');
-    this.isClosed = true; // Mark as closing immediately
+    log('info', '[Database] Closing database...');
+    this.isClosing = true;
     this.isReady = false;
 
     // Stop background tasks
     if (this.autoSaveTimer) clearInterval(this.autoSaveTimer);
     this.autoSaveTimer = null;
+    if (this._monitorMetricsTimer) clearTimeout(this._monitorMetricsTimer);
+    this._monitorMetricsTimer = null;
 
     // Stop monitoring
     this.monitor?.stop();
 
-    // Wait for active searches? (Optional, might delay closing)
-    // console.log(`Waiting for ${this.activeSearchPromises.size} active searches to complete...`);
-    // await Promise.allSettled(this.activeSearchPromises);
+    // Wait for in-flight searches so they do not keep running against a
+    // database that is being torn down underneath them.
+    const inFlight = Array.from(this.activeSearchPromises);
+    if (inFlight.length > 0) {
+      log('info', `[Database] Waiting for ${inFlight.length} in-flight search(es) to settle...`);
+      await Promise.allSettled(inFlight);
+    }
     this.activeSearchPromises.clear();
 
-    // Close UnifiedSearch
+    // NOTE: `unifiedSearch.close()` also closes the underlying database, so
+    // closing it here *and* below closed the database twice. The database is
+    // closed exactly once, here.
     try {
-      this.unifiedSearch?.close(); // Assuming UnifiedSearch has a close method
+      this.unifiedSearch?.removeAllListeners();
     } catch (e) {
-      console.error('Error closing UnifiedSearch:', e);
+      log('error', '[Database] Error detaching UnifiedSearch listeners:', e);
     }
 
-    // Close PartitionedVectorDB (this should handle saving its state)
+    // Close PartitionedVectorDB (this performs the final save)
     if (this.vectorDB && typeof this.vectorDB.close === 'function') {
       try {
-        console.log('Closing PartitionedVectorDB (will trigger final save)...');
+        log('info', '[Database] Closing PartitionedVectorDB (will trigger final save)...');
         await this.vectorDB.close();
       } catch (err: any) {
-        console.error('Error closing PartitionedVectorDB:', err.message);
+        log('error', '[Database] Error closing PartitionedVectorDB:', err.message);
         // Continue closing process
       }
     }
@@ -994,7 +1083,9 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     // Clear search cache
     this.searchCache.clear();
 
-    console.log('Database closed successfully.');
+    this.isClosed = true;
+    this.isClosing = false;
+    log('info', '[Database] Database closed successfully.');
     this.emit('close', undefined);
     this.removeAllListeners(); // Clean up all listeners on this instance
   }

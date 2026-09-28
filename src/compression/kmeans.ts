@@ -99,7 +99,7 @@ export class KMeans {
     centroids.push(vectors[firstIdx] instanceof Float32Array ? (vectors[firstIdx].slice() as Float32Array) : new Float32Array(vectors[firstIdx]));
 
     // KMeans++ initialization
-    let distances = new Float32Array(n).fill(0);
+    const distances = new Float32Array(n).fill(0);
     for (let i = 1; i < this.k; i++) {
       let totalDistance = 0;
       for (let j = 0; j < n; j++) {
@@ -127,7 +127,7 @@ export class KMeans {
         centroids.push(vectors[nextCentroidIndex] instanceof Float32Array ? (vectors[nextCentroidIndex].slice() as Float32Array) : new Float32Array(vectors[nextCentroidIndex]));
       } else {
         // Fallback: choose a random vector
-        let randomIndex = Math.floor(Math.random() * n);
+        const randomIndex = Math.floor(Math.random() * n);
         centroids.push(vectors[randomIndex] instanceof Float32Array ? (vectors[randomIndex].slice() as Float32Array) : new Float32Array(vectors[randomIndex]));
       }
     }

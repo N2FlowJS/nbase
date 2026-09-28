@@ -1,9 +1,8 @@
 # PartitionedVectorDB Benchmark Results - Suite 1 - v0.1.10
 
-_Run at: 2025-08-29T13:46:50.436Z_
+*Run at: 2026-06-05T16:11:19.830Z*
 
 ## Configuration
-
 - Total Vectors: 50000
 - Vector Dimension: 128
 - Partition Capacity: 10000
@@ -13,39 +12,39 @@ _Run at: 2025-08-29T13:46:50.436Z_
 
 ## Results
 
-| Operation                        | Total Time (ms) | Average Time (ms) |
-| -------------------------------- | --------------: | ----------------: |
-| DB Initialization                |          131.29 |            131.29 |
-| Bulk Add Batch 1 (5000 vectors)  |         6980.68 |           6980.68 |
-| Bulk Add Batch 2 (5000 vectors)  |        23761.83 |          23761.83 |
-| Bulk Add Batch 3 (5000 vectors)  |         6793.39 |           6793.39 |
-| Bulk Add Batch 4 (5000 vectors)  |        20354.65 |          20354.65 |
-| Bulk Add Batch 5 (5000 vectors)  |        11071.97 |          11071.97 |
-| Bulk Add Batch 6 (5000 vectors)  |        24820.04 |          24820.04 |
-| Bulk Add Batch 7 (5000 vectors)  |         7616.75 |           7616.75 |
-| Bulk Add Batch 8 (5000 vectors)  |        25521.73 |          25521.73 |
-| Bulk Add Batch 9 (5000 vectors)  |         7129.80 |           7129.80 |
-| Bulk Add Batch 10 (5000 vectors) |        23002.02 |          23002.02 |
-| Total Bulk Add                   |       157825.62 |          15782.56 |
-| Standard FindNearest             |          318.01 |            318.01 |
-| Total HNSW Build                 |       570504.33 |         190168.11 |
-| HNSW FindNearest                 |          120.18 |            120.18 |
-| DB Save                          |         2651.97 |           2651.97 |
-| DB Close                         |            0.55 |              0.55 |
-| DB Re-Load                       |         1110.56 |           1110.56 |
-| HNSW FindNearest After Re-Load   |           84.31 |             84.31 |
+| Operation | Total Time (ms) | Average Time (ms) |
+|-----------|----------------:|------------------:|
+| DB Initialization | 19.89 | 19.89 |
+| Bulk Add Batch 1 (5000 vectors) | 4027.64 | 4027.64 |
+| Bulk Add Batch 2 (5000 vectors) | 13692.22 | 13692.22 |
+| Bulk Add Batch 3 (5000 vectors) | 4714.89 | 4714.89 |
+| Bulk Add Batch 4 (5000 vectors) | 13205.01 | 13205.01 |
+| Bulk Add Batch 5 (5000 vectors) | 4388.27 | 4388.27 |
+| Bulk Add Batch 6 (5000 vectors) | 15321.62 | 15321.62 |
+| Bulk Add Batch 7 (5000 vectors) | 4644.37 | 4644.37 |
+| Bulk Add Batch 8 (5000 vectors) | 15544.03 | 15544.03 |
+| Bulk Add Batch 9 (5000 vectors) | 4278.13 | 4278.13 |
+| Bulk Add Batch 10 (5000 vectors) | 14936.42 | 14936.42 |
+| Total Bulk Add | 95222.55 | 9522.25 |
+| Standard FindNearest | 81.31 | 81.31 |
+| Total HNSW Build | 359095.34 | 119698.45 |
+| HNSW FindNearest | 25.34 | 25.34 |
+| DB Save | 1260.85 | 1260.85 |
+| DB Close | 0.34 | 0.34 |
+| DB Re-Load | 546.51 | 546.51 |
+| HNSW FindNearest After Re-Load | 19.23 | 19.23 |
 
 ## Search Performance Summary
 
 ### Standard vs HNSW Search Comparison
 
-| Search Method              | Time (ms) | Speedup Factor |
-| -------------------------- | --------: | -------------: |
-| Standard Search            |    318.01 |          1.00x |
-| HNSW Search                |    120.18 |          2.65x |
-| HNSW Search (After Reload) |     84.31 |          3.77x |
+| Search Method | Time (ms) | Speedup Factor |
+|---------------|----------:|---------------:|
+| Standard Search | 81.31 | 1.00x |
+| HNSW Search | 25.34 | 3.21x |
+| HNSW Search (After Reload) | 19.23 | 4.23x |
 
-**Note**: HNSW search is faster by a factor of 1.65x.
+**Note**: HNSW search is faster by a factor of 2.21x.
 
 ## Database Stats
 
@@ -56,4 +55,4 @@ _Run at: 2025-08-29T13:46:50.436Z_
 
 ## Summary
 
-Total benchmark execution time: 733.65 seconds
+Total benchmark execution time: 456.44 seconds

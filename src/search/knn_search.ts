@@ -1,6 +1,5 @@
 // --- START OF FILE knn_search_partitioned.ts ---
 
-import * as distanceMetrics from "../utils/distance_metrics";
 import { createTimer } from "../utils/profiling";
 
 import { PartitionedVectorDB } from "../vector/partitioned_vector_db"; // Import Partitioned DB
@@ -39,7 +38,6 @@ import { LRUCache } from "lru-cache"; // Still using cache for results
 export class KNNEngineSearch {
   private db: PartitionedVectorDB; // Using PartitionedVectorDB
   private options: Required<KNNOptionsPartitioned>;
-  private distanceFunc: (a: Vector, b: Vector) => number; // Still need distance function for reference
   private timer: ReturnType<typeof createTimer>;
   private resultCache: LRUCache<string, SearchResult[]>;
   private stats: {
@@ -69,11 +67,6 @@ export class KNNEngineSearch {
         Object.entries(options).filter(([_, v]) => v !== undefined)
       ),
     } as Required<KNNOptionsPartitioned>;
-
-    // Get distance function (may not be used directly but kept for reference)
-    this.distanceFunc = distanceMetrics.getDistanceFunction(
-      this.options.metric
-    );
 
     // No longer caching normalized vectors
     // this.normalizedCache = new Map();

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ApiContext, SearchResult, UnifiedSearchOptions } from '../../types';
+import { asyncHandler } from '../utils/async_handler';
 
 /**
  * Configures and returns the search-related routes for the API.
@@ -70,7 +71,7 @@ import { ApiContext, SearchResult, UnifiedSearchOptions } from '../../types';
  */
 export function searchRoutes(context: ApiContext) {
   const router = Router();
-  const { database, timer, createFilterFunction } = context;
+  const { database, createTimer, createFilterFunction, maxGraphExtractionVectors } = context;
   /**
    * Nearest neighbor search endpoint
    *
@@ -139,7 +140,8 @@ export function searchRoutes(context: ApiContext) {
    *     }
    *
    */
-  router.post('/', async function (req: Request, res: Response) {
+  router.post('/', asyncHandler(async function (req: Request, res: Response) {
+    const timer = createTimer();
     timer.start('search');
 
     const { query, k, method, partitionIds, efSearch, distanceMetric, rerank, rerankingMethod, rerankLambda, filters = {}, includeMetadata, includeVectors, skipCache, searchTimeoutMs } = req.body;
@@ -210,7 +212,7 @@ export function searchRoutes(context: ApiContext) {
       });
       return;
     }
-  });
+  }));
   /**
    * Metadata search endpoint
    *
@@ -263,7 +265,8 @@ export function searchRoutes(context: ApiContext) {
    * }
    * @returns Array of metadata entries matching the criteria with partition and vector IDs
    */
-  router.post('/metadata', async function (req: Request, res: Response) {
+  router.post('/metadata', asyncHandler(async function (req: Request, res: Response) {
+    const timer = createTimer();
     timer.start('metadata_search');
 
     const { criteria, values, includeVectors = false, limit } = req.body;
@@ -317,7 +320,7 @@ export function searchRoutes(context: ApiContext) {
         duration,
       });
     }
-  });
+  }));
 
   /**
    * Vector relationships extraction endpoint
@@ -361,7 +364,8 @@ export function searchRoutes(context: ApiContext) {
    * }
    * ```
    */
-  router.post('/relationships', async function (req: Request, res: Response) {
+  router.post('/relationships', asyncHandler(async function (req: Request, res: Response) {
+    const timer = createTimer();
     timer.start('extract_relationships');
 
     const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
@@ -369,6 +373,19 @@ export function searchRoutes(context: ApiContext) {
     if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
       res.status(400).json({
         error: 'Invalid request: threshold must be a positive number',
+      });
+      return;
+    }
+
+    // Both graph endpoints compare every pair of vectors (O(n^2)). Reject a
+    // request that would exceed the configured scan budget rather than letting
+    // a single HTTP call stall the event loop for minutes.
+    const totalVectors = (await database.getStats()).database?.vectors.totalInMemory ?? 0;
+    if (totalVectors > maxGraphExtractionVectors) {
+      res.status(413).json({
+        error:
+          `Request would scan ${totalVectors} vectors, above the limit of ${maxGraphExtractionVectors}. ` +
+          `Narrow it with 'partitionIds' or raise the server's maxGraphExtractionVectors.`,
       });
       return;
     }
@@ -397,7 +414,7 @@ export function searchRoutes(context: ApiContext) {
         duration,
       });
     }
-  });
+  }));
 
   /**
    * Vector communities extraction endpoint
@@ -442,7 +459,8 @@ export function searchRoutes(context: ApiContext) {
    * }
    * ```
    */
-  router.post('/communities', async function (req: Request, res: Response) {
+  router.post('/communities', asyncHandler(async function (req: Request, res: Response) {
+    const timer = createTimer();
     timer.start('extract_communities');
 
     const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
@@ -450,6 +468,19 @@ export function searchRoutes(context: ApiContext) {
     if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
       res.status(400).json({
         error: 'Invalid request: threshold must be a positive number',
+      });
+      return;
+    }
+
+    // Both graph endpoints compare every pair of vectors (O(n^2)). Reject a
+    // request that would exceed the configured scan budget rather than letting
+    // a single HTTP call stall the event loop for minutes.
+    const totalVectors = (await database.getStats()).database?.vectors.totalInMemory ?? 0;
+    if (totalVectors > maxGraphExtractionVectors) {
+      res.status(413).json({
+        error:
+          `Request would scan ${totalVectors} vectors, above the limit of ${maxGraphExtractionVectors}. ` +
+          `Narrow it with 'partitionIds' or raise the server's maxGraphExtractionVectors.`,
       });
       return;
     }
@@ -479,7 +510,7 @@ export function searchRoutes(context: ApiContext) {
         duration,
       });
     }
-  });
+  }));
 
   return router;
 }

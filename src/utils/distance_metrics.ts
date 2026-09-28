@@ -7,15 +7,7 @@ import { Vector } from '../types';
  * @returns Euclidean distance between vectors
  */
 export function euclidean(a: Vector, b: Vector): number {
-  let sum = 0;
-  const len = Math.min(a.length, b.length);
-
-  for (let i = 0; i < len; i++) {
-    const diff = a[i] - b[i];
-    sum += diff * diff;
-  }
-
-  return Math.sqrt(sum);
+  return Math.sqrt(squaredEuclidean(a, b));
 }
 
 /**
@@ -27,9 +19,11 @@ export function euclidean(a: Vector, b: Vector): number {
 export function manhattan(a: Vector, b: Vector): number {
   let sum = 0;
   const len = Math.min(a.length, b.length);
+  let i = 0;
 
-  for (let i = 0; i < len; i++) {
-    sum += Math.abs(a[i] - b[i]);
+  for (; i < len; i++) {
+    const d = a[i] - b[i];
+    sum += (d < 0 ? -d : d);
   }
 
   return sum;
@@ -42,28 +36,25 @@ export function manhattan(a: Vector, b: Vector): number {
  * @returns Cosine distance between vectors
  */
 export function cosine(a: Vector, b: Vector): number {
-  let dotProduct = 0;
+  let dotProductVal = 0;
   let normA = 0;
   let normB = 0;
   const len = Math.min(a.length, b.length);
+  let i = 0;
 
-  for (let i = 0; i < len; i++) {
-    dotProduct += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+  for (; i < len; i++) {
+    const ai = a[i], bi = b[i];
+    dotProductVal += ai * bi;
+    normA += ai * ai;
+    normB += bi * bi;
   }
 
   if (normA === 0 || normB === 0) {
-    return 1; // Maximum distance for zero vectors
+    return 1;
   }
 
-  const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-
-  // Bound similarity to [-1, 1] to handle floating-point errors
-  const boundedSimilarity = Math.max(-1, Math.min(1, similarity));
-
-  // Convert to distance (1 - similarity)
-  return 1 - boundedSimilarity;
+  const similarity = dotProductVal / Math.sqrt(normA * normB);
+  return 1 - Math.max(-1, Math.min(1, similarity));
 }
 
 /**
@@ -76,8 +67,9 @@ export function cosine(a: Vector, b: Vector): number {
 export function dotProduct(a: Vector, b: Vector): number {
   let sum = 0;
   const len = Math.min(a.length, b.length);
+  let i = 0;
 
-  for (let i = 0; i < len; i++) {
+  for (; i < len; i++) {
     sum += a[i] * b[i];
   }
 
@@ -107,7 +99,7 @@ export function chebyshev(a: Vector, b: Vector): number {
 
   for (let i = 0; i < len; i++) {
     const diff = Math.abs(a[i] - b[i]);
-    max = Math.max(max, diff);
+    if (diff > max) max = diff;
   }
 
   return max;
@@ -123,8 +115,9 @@ export function chebyshev(a: Vector, b: Vector): number {
 export function squaredEuclidean(a: Vector, b: Vector): number {
   let sum = 0;
   const len = Math.min(a.length, b.length);
+  let i = 0;
 
-  for (let i = 0; i < len; i++) {
+  for (; i < len; i++) {
     const diff = a[i] - b[i];
     sum += diff * diff;
   }

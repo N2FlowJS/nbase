@@ -1,3 +1,6 @@
 {
-  "ignore": ["database/**", "dist/**"]
+  "watch": ["src", "package.json"],
+  "ext": "js,json",
+  "ignore": ["database/**", "test-data/**", "dist/server/daemon/**", "*.log"],
+  "delay": 300
 }

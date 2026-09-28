@@ -39,8 +39,9 @@ describe('Search Routes', () => {
     // Create mock context
     context = {
       database: mockDatabase,
-      timer: mockTimer,
+      createTimer: () => mockTimer,
       createFilterFunction: mockCreateFilterFunction,
+      maxGraphExtractionVectors: 10000,
     } as any;
 
     // Setup express app with search routes

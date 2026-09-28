@@ -3,6 +3,7 @@ import { VectorDB } from '../src';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
+import { tmpdir } from 'os';
 
 const mkdtemp = promisify(fs.mkdtemp);
 const rimraf = promisify(fs.rm);
@@ -11,7 +12,9 @@ describe('VectorDB', () => {
     let tempDir: string;
     
     before(async () => {
-        tempDir = await mkdtemp(path.join(__dirname, 'vector_db_test_'));
+        // os.tmpdir(), not __dirname: writing fixtures into the repo made
+        // them survive an aborted run and blocked parallel test execution.
+        tempDir = await mkdtemp(path.join(tmpdir(), 'nbase-vectordb-'));
     });
     
     after(async () => {

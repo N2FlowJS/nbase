@@ -1,11 +1,12 @@
 // --- START OF FILE vector_db.ts ---
 
-import { EventEmitter } from 'events';
-import path from 'path';
-import { promises as fsPromises, existsSync } from 'fs';
-import zlib from 'zlib';
-import { promisify } from 'util';
+import { EventEmitter } from 'node:events';
+import path from 'node:path';
+import { promises as fsPromises, existsSync } from 'node:fs';
+import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import { log } from '../utils/log';
+import type { CloseOptions, SaveOptions } from '../types';
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -79,6 +80,12 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
   protected dbPath: string | null; // Base path (without extension)
   protected savePromise: Promise<void> | null = null;
   protected isClosed: boolean = false;
+  /** Guards against concurrent `close()` calls before `isClosed` is set. */
+  protected isClosing: boolean = false;
+  /** In-flight `load()`, so concurrent callers share one load instead of racing. */
+  protected loadPromise: Promise<void> | null = null;
+  /** Settles when the constructor's implicit initial load finishes. */
+  public readyPromise: Promise<void> | null = null;
   protected useCompression: boolean; // Option for compression
   public isReady: boolean = false; // Flag to indicate if the database is ready for operations
   constructor(suggestedVectorSize: number | null = null, dbPath: string | null = null, options: { useCompression?: boolean } = {}) {
@@ -95,7 +102,10 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     if (dbPath) {
       log('info', `[VectorDB] Constructor Loading database from ${dbPath}...`);
 
-      this.load()
+      // Exposed so callers can await the constructor's implicit load instead of
+      // issuing a second one (which used to re-read the files and clear +
+      // repopulate the same Maps a second time).
+      this.readyPromise = this.load()
         .catch((err) => {
           // Only log error if file likely existed but failed to load
           if (err.code !== 'ENOENT') {
@@ -145,7 +155,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     vector: Vector,
     metadata?: Record<string, any> // Allow adding metadata directly
   ): number | string {
-    let vectorId = id !== undefined ? id : this.idCounter++;
+    const vectorId = id !== undefined ? id : this.idCounter++;
 
     // Optional: Standardize ID to string for internal consistency?
     // vectorId = String(vectorId);
@@ -406,14 +416,14 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     return path.join(this.dbPath, 'vec.bin' + (this.useCompression ? '.gz' : ''));
   }
 
-  async save(): Promise<void> {
+  async save(options: SaveOptions = {}): Promise<void> {
     log('info', '[VectorDB] Saving database...');
 
     if (!this.dbPath) {
       log('warn', '[VectorDB] No dbPath specified, skipping save.');
       return;
     }
-    if (this.isClosed) {
+    if (this.isClosed && !options.force) {
       log('warn', '[VectorDB] Attempted to save a closed database.');
       return;
     }
@@ -513,7 +523,25 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     return this.savePromise;
   }
 
+  /**
+   * Loads persisted state from disk.
+   *
+   * Concurrent callers share a single in-flight load: two overlapping loads
+   * used to both read the files and both `clear()` + repopulate the same Maps,
+   * so whichever finished last silently clobbered the other's result.
+   */
   async load(): Promise<void> {
+    if (this.loadPromise) {
+      log('info', '[VectorDB] Load already in progress, waiting...');
+      return this.loadPromise;
+    }
+    this.loadPromise = this._loadInternal().finally(() => {
+      this.loadPromise = null;
+    });
+    return this.loadPromise;
+  }
+
+  private async _loadInternal(): Promise<void> {
     if (!this.dbPath) {
       throw new Error('Database path not specified for loading.');
     }
@@ -887,25 +915,27 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
           metadata?: Record<string, any>;
         }> = [];
         
-        // DFS to find all connected vectors
-        const dfs = (nodeId: number | string) => {
+        // Iterative DFS. Recursion over a dense component overflowed the call
+        // stack (RangeError) for large graphs.
+        const stack: Array<number | string> = [id];
+        while (stack.length > 0) {
+          const nodeId = stack.pop()!;
+          if (visited.has(nodeId)) continue;
           visited.add(nodeId);
           const metadata = this.metadata.get(nodeId);
           community.push({
             id: nodeId,
-            metadata: metadata ? { ...metadata } : undefined
+            metadata: metadata ? { ...metadata } : undefined,
           });
-          
+
           // Visit all neighbors
-          const neighbors = graph.get(nodeId) || new Set();
-          for (const neighbor of neighbors) {
-            if (!visited.has(neighbor)) {
-              dfs(neighbor);
+          const neighbors = graph.get(nodeId);
+          if (neighbors) {
+            for (const neighbor of neighbors) {
+              if (!visited.has(neighbor)) stack.push(neighbor);
             }
           }
-        };
-        
-        dfs(id);
+        }
         
         // Only include communities with at least 2 vectors
         if (community.length > 1) {
@@ -918,21 +948,27 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     return communities;
   }
 
-  async close(): Promise<void> {
-    if (this.isClosed) return;
-    this.isClosed = true; // Mark as closed immediately
+  async close(options: CloseOptions = {}): Promise<void> {
+    if (this.isClosed || this.isClosing) return;
+    // NOTE: `isClosed` is intentionally NOT set here. Setting it before the
+    // final save made `save()` bail out on its own `isClosed` guard, so
+    // `close()` silently discarded every unpersisted vector.
+    this.isClosing = true;
 
     try {
-      if (this.dbPath) {
-        await this.save(); // Attempt to save on close
+      if (this.dbPath && options.save !== false) {
+        await this.save({ force: true }); // Attempt to save on close
       }
     } catch (error) {
       log('error', 'Error saving database during close:', error);
     } finally {
+      this.isClosed = true;
+      this.isClosing = false;
       // Clear memory regardless of save success
       this.memoryStorage.clear();
       this.metadata.clear();
       this.vectorDimensions.clear();
+      this.isReady = false;
       this.emit('db:close', {});
       log('info', 'Database closed.');
     }

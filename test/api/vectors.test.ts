@@ -35,7 +35,7 @@ describe('Vector Routes', () => {
         };
       },
       hasVector: async (id: string | number) => id !== 'nonexistent',
-      updateMetadata: async (id: string | number, metadataOrFn: any) => id !== 'nonexistent',
+      updateMetadata: async (id: string | number) => id !== 'nonexistent',
       deleteVector: async (id: string | number) => id !== 'nonexistent',
       search: async () => [
         {
@@ -55,15 +55,16 @@ describe('Vector Routes', () => {
 
     // Create mock timer
     mockTimer = {
-      start: (name: string) => {},
-      stop: (name: string) => ({ total: 10 }),
+      start: () => {},
+      stop: () => ({ total: 10 }),
     };
 
-    // Setup context
+    // Setup context. `createTimer` (rather than a shared `timer`) gives every
+    // request its own Timer instance.
     context = {
       database: mockDatabase,
-      timer: mockTimer,
-    } as ApiContext;
+      createTimer: () => mockTimer,
+    } as unknown as ApiContext;
 
     // Setup express app
     app = express();

@@ -1,26 +1,31 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "module": "commonjs",
-    "moduleResolution": "node",
-    "declaration": true,
+    "moduleResolution": "node10",
+    "lib": ["ES2022"],
+
     "outDir": "./dist",
-    "baseUrl": "./src",
-    "paths": {
-      "@/*": ["./src/*"]
-    },
+    "rootDir": "./src",
+
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "inlineSources": true,
+
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "strict": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
-    "sourceMap": true,
-    "types": ["node", "mocha", "chai"],
-    "lib": ["ES2020", "WebWorker"],
-    "resolveJsonModule": true
+
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "types": ["node"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist/**/*", "test/**/*", "database/**/*"],
-  "watchOptions": {
-    "excludeDirectories": ["database", "test"]
-  }
+  "exclude": ["node_modules", "dist/**/*", "test/**/*", "database/**/*", "test-data/**/*"]
 }

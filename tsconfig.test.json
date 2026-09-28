@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `rootDir` is pinned to ./src for the build; the test program includes
+    // test/**, so it has to be relaxed here or TS6059 fires.
+    "rootDir": ".",
+    "types": ["node", "mocha", "chai"],
+
+    // Test files routinely declare scaffolding variables (IDs kept for
+    // readability across a describe block) and stub parameters that exist only
+    // to match an interface. The strict variants stay on for `src`.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": ["node_modules", "dist/**/*", "test/benchmarks/**/*"]
+}
