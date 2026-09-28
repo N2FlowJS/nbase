@@ -35,6 +35,34 @@ Thank you for considering contributing to NBase! Your help is appreciated.
 - Ensure code passes linting and tests.
 - Be respectful and constructive in discussions.
 
+## TypeScript configuration
+
+`tsconfig.json` is stricter than the TypeScript defaults. On top of `strict`,
+these are enabled because each one surfaced real defects when turned on:
+
+| Option | Why |
+| --- | --- |
+| `noUncheckedIndexedAccess` | Array/record reads are `T \| undefined`. Required explicit handling in the distance kernels, HNSW traversal and k-means loops. |
+| `exactOptionalPropertyTypes` | An optional property is not the same as `prop: T \| undefined`. Passing a possibly-absent value means omitting the key — see `VectorStoreSearchOptions` in `src/types.ts`. |
+| `noPropertyAccessFromIndexSignature` | `process.env.FOO` and `req.body.foo` must use bracket access, so a typo is visible. |
+| `noImplicitOverride` | Overriding a base member requires the `override` keyword. |
+| `noUnusedLocals` / `noUnusedParameters` | Dead code and unused parameters are errors. |
+| `noImplicitReturns` / `noFallthroughCasesInSwitch` | Every code path returns; switch cases fall through deliberately or not at all. |
+| `allowUnreachableCode: false` / `allowUnusedLabels: false` | No dead branches or stray labels. |
+
+There are two configs: `tsconfig.build.json` (emits `dist/`) and
+`tsconfig.test.json` (typechecks `src` + `test`). Run the checks with:
+
+```bash
+npm run typecheck   # tsc -p tsconfig.test.json --noEmit
+npm run lint        # eslint . (type-aware; uses tsconfig.test.json)
+npm run build       # tsc -p tsconfig.build.json
+npm test
+```
+
+`npm run lint` uses the type-aware rules, so a type error is reported by both
+commands. Fix types first, then re-run lint.
+
 ## Reporting Issues
 
 If you find a bug or have a feature request, please [open an issue](https://github.com/N2FlowJS/nbase/issues) and provide as much detail as possible.

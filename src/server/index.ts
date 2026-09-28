@@ -121,7 +121,7 @@ function createServer(options: IServerOptions = {}): IServerInstance {
         log('error', 'API Error:', err);
         res.status(500).json({
           error: err.message,
-          stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+          stack: process.env['NODE_ENV'] === 'development' ? err.stack : undefined,
         });
       }),
   };
@@ -139,9 +139,11 @@ function createServer(options: IServerOptions = {}): IServerInstance {
 
   // Rate limiting
   if (serverOptions.rateLimit.enable) {
+    // Omit absent keys: express-rate-limit's Options type does not accept an
+    // explicit undefined under exactOptionalPropertyTypes.
     const apiLimiter = rateLimit({
-      windowMs: serverOptions.rateLimit.windowMs,
-      max: serverOptions.rateLimit.maxRequestsPerMinute,
+      ...(serverOptions.rateLimit.windowMs !== undefined ? { windowMs: serverOptions.rateLimit.windowMs } : {}),
+      ...(serverOptions.rateLimit.maxRequestsPerMinute !== undefined ? { max: serverOptions.rateLimit.maxRequestsPerMinute } : {}),
       standardHeaders: true,
       legacyHeaders: false,
       message: 'Too many requests, please try again later',
@@ -230,8 +232,8 @@ if (require.main === module) {
         },
       },
     }) as IServerInstance;
-    const PORT = process.env.PORT || config.server.port || 1307;
-    const HOST = process.env.HOST || config.server.host || 'localhost';
+    const PORT = process.env['PORT'] || config.server.port || 1307;
+    const HOST = process.env['HOST'] || config.server.host || 'localhost';
 
     // Check if port is in use and kill process if necessary
     const portInUse = await isPortInUse(Number(PORT));

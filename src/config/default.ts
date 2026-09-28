@@ -11,7 +11,7 @@ export const defaultSystemConfiguration: SystemConfiguration = {
   version: '0.1.0',
 
   persistence: {
-    dbPath: process.env.NBASE_DB_PATH || 'database',
+    dbPath: process.env['NBASE_DB_PATH'] || 'database',
     autoSave: true,
     saveIntervalMs: 1 * 60 * 1000, // 1 minutes
     useCompression: true,
@@ -93,8 +93,8 @@ export const defaultSystemConfiguration: SystemConfiguration = {
   },
 
   server: {
-    port: parseInt(process.env.NBASE_PORT || '1307', 10),
-    host: process.env.NBASE_HOST || 'localhost',
+    port: parseInt(process.env['NBASE_PORT'] || '1307', 10),
+    host: process.env['NBASE_HOST'] || 'localhost',
     enableRateLimit: false,
     maxRequestsPerMinute: 1000,
     rateLimit: {

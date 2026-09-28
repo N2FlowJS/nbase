@@ -15,6 +15,9 @@ export function createConfig(userConfig: Partial<SystemConfiguration> = {}): Sys
  */
 function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>): T {
   // ... (implementation không đổi)
+  // `satisfies` cannot be used here: the result is a fresh object widened to
+  // T, and the merge below mutates it. The assertion is load-bearing.
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
   const output = { ...target } as T;
 
   if (isObject(target) && isObject(source)) {

@@ -6,7 +6,7 @@ import { promises as fsPromises, existsSync } from 'node:fs';
 import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import { log } from '../utils/log';
-import type { CloseOptions, SaveOptions } from '../types';
+import type { CloseOptions, SaveOptions, VectorStoreSearchOptions } from '../types';
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -297,8 +297,11 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
   protected _calculateNorm(vector: Float32Array): number {
     let sum = 0;
+    // `?? 0` is unreachable (i < vector.length); required because
+    // noUncheckedIndexedAccess widens numeric element reads.
     for (let i = 0; i < vector.length; i++) {
-      sum += vector[i] * vector[i];
+      const v = vector[i] ?? 0;
+      sum += v * v;
     }
     return Math.sqrt(sum);
   }
@@ -307,7 +310,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     const len = Math.min(a.length, b.length); // Handle dimension mismatch
     let dot = 0;
     for (let i = 0; i < len; i++) {
-      dot += a[i] * b[i];
+      dot += (a[i] ?? 0) * (b[i] ?? 0);
     }
     return dot;
   }
@@ -316,7 +319,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     const len = Math.min(a.length, b.length);
     let sum = 0;
     for (let i = 0; i < len; i++) {
-      const d = a[i] - b[i];
+      const d = (a[i] ?? 0) - (b[i] ?? 0);
       sum += d * d;
     }
     // Optional: Penalty for dimension mismatch (consider if really needed)
@@ -364,10 +367,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
   findNearest(
     query: Vector,
     k: number = 10,
-    options: {
-      filter?: (id: number | string, metadata?: Record<string, any>) => boolean;
-      metric?: DistanceMetric; // Allow specifying metric
-    } = {}
+    options: VectorStoreSearchOptions = {}
   ): SearchResult[] {
     const typedQuery = query instanceof Float32Array ? query : new Float32Array(query);
     const metric = options.metric ?? 'euclidean'; // Default metric
@@ -816,10 +816,14 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     // Iterate over all vectors
     const vectorEntries = Array.from(this.memoryStorage.entries());
     for (let i = 0; i < vectorEntries.length; i++) {
-      const [id1, vector1] = vectorEntries[i];
+      const entry = vectorEntries[i];
+      if (!entry) continue;
+      const [id1, vector1] = entry;
 
       for (let j = i + 1; j < vectorEntries.length; j++) {
-        const [id2, vector2] = vectorEntries[j];
+        const other = vectorEntries[j];
+        if (!other) continue;
+        const [id2, vector2] = other;
 
         // Ensure dimension compatibility
         if (vector1.length !== vector2.length) {
@@ -840,8 +844,10 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
             vector1: id1, 
             vector2: id2, 
             distance,
-            metadata1: metadata1 ? { ...metadata1 } : undefined,
-            metadata2: metadata2 ? { ...metadata2 } : undefined 
+            // Omit the keys entirely rather than assigning undefined, so the
+            // result objects match the declared optional shape.
+            ...(metadata1 ? { metadata1: { ...metadata1 } } : {}),
+            ...(metadata2 ? { metadata2: { ...metadata2 } } : {}),
           });
         }
       }
@@ -880,11 +886,15 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     
     // Build edges
     for (let i = 0; i < vectorEntries.length; i++) {
-      const [id1, vector1] = vectorEntries[i];
-      
+      const entry = vectorEntries[i];
+      if (!entry) continue;
+      const [id1, vector1] = entry;
+
       for (let j = i + 1; j < vectorEntries.length; j++) {
-        const [id2, vector2] = vectorEntries[j];
-        
+        const other = vectorEntries[j];
+        if (!other) continue;
+        const [id2, vector2] = other;
+
         // Ensure dimension compatibility
         if (vector1.length !== vector2.length) {
           continue;
@@ -925,7 +935,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
           const metadata = this.metadata.get(nodeId);
           community.push({
             id: nodeId,
-            metadata: metadata ? { ...metadata } : undefined,
+            ...(metadata ? { metadata: { ...metadata } } : {}),
           });
 
           // Visit all neighbors

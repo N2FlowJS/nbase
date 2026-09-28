@@ -62,7 +62,8 @@ class LSH {
   private numberOfHashes: number;
   private numberOfBuckets: number;
   private hashFunctions: Map<number, Float32Array[][]>;
-  private buckets: Map<number, Map<number, number | string[]>[]>;
+  /** dimension -> hash table (one per hash function) -> hash value -> vector ids. */
+  private buckets: Map<number, Array<Map<number, Array<number | string>>>>;
   private vectorDimensions: Map<number | string, number>;
   private dimensionGroups: Map<number, Set<number | string>>;
   private allowMismatchedDimensions: boolean;
@@ -84,7 +85,7 @@ class LSH {
 
     // Initialize data structures for multi-dimensional support
     this.hashFunctions = new Map<number, Float32Array[][]>();
-    this.buckets = new Map<number, Map<number, number | string[]>[]>();
+    this.buckets = new Map<number, Array<Map<number, Array<number | string>>>>();
     this.vectorDimensions = new Map<number | string, number>();
     this.dimensionGroups = new Map<number, Set<number | string>>();
 
@@ -154,21 +155,26 @@ class LSH {
       this._generateHashFunctions(dimension);
     }
 
-    const hashFunctions = this.hashFunctions.get(dimension)!;
+    const hashFunctions = this.hashFunctions.get(dimension);
+    if (!hashFunctions) {
+      throw new Error(`LSH: no hash functions registered for dimension ${dimension}`);
+    }
     const hashes: number[] = [];
 
     for (let i = 0; i < this.numberOfHashes; i++) {
       const hyperplanes = hashFunctions[i];
+      if (!hyperplanes) continue;
       let hash = 0;
 
       // Compute hash by checking which side of each hyperplane the vector falls on
       for (let j = 0; j < hyperplanes.length && j < 31; j++) {
         const hyperplane = hyperplanes[j];
+        if (!hyperplane) continue;
 
         // Compute dot product
         let dotProduct = 0;
         for (let d = 0; d < dimension; d++) {
-          dotProduct += vector[d] * hyperplane[d];
+          dotProduct += (vector[d] ?? 0) * (hyperplane[d] ?? 0);
         }
 
         // Set the corresponding bit based on sign of dot product
@@ -212,13 +218,14 @@ class LSH {
     for (let i = 0; i < hashes.length; i++) {
       const hash = hashes[i];
       const bucket = dimensionBuckets[i];
+      if (hash === undefined || !bucket) continue;
 
       if (!bucket.has(hash)) {
         bucket.set(hash, []);
       }
 
-      const ids = bucket.get(hash) as (number | string)[];
-      ids.push(id);
+      const ids = bucket.get(hash);
+      if (ids) ids.push(id);
     }
 
     return id;
@@ -253,6 +260,7 @@ class LSH {
 
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
+      if (id === undefined) continue;
       let dimension: number;
 
       // Try to get dimension from db.getVectorDimension if available (faster)
@@ -297,6 +305,7 @@ class LSH {
 
         for (let i = 0; i < idsInDimension.length; i++) {
           const id = idsInDimension[i];
+          if (id === undefined) continue;
           const vector = this.db.getVector(id);
 
           if (vector) {
@@ -315,6 +324,7 @@ class LSH {
       // Process all vectors regardless of dimension
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
+        if (id === undefined) continue;
         const vector = this.db.getVector(id);
 
         if (vector) {
@@ -360,10 +370,12 @@ class LSH {
       for (let i = 0; i < hashes.length; i++) {
         const hash = hashes[i];
         const bucket = dimensionBuckets[i];
+        if (hash === undefined || !bucket) continue;
 
         // Get exact bucket
-        if (bucket.has(hash)) {
-          for (const id of bucket.get(hash) as (number | string)[]) {
+        const exact = bucket.get(hash);
+        if (exact) {
+          for (const id of exact) {
             candidateIds.add(id);
           }
         }
@@ -415,12 +427,16 @@ class LSH {
           i++
         ) {
           // Adapt hash to the current dimension's bucket count
-          const hash = hashes[i] % this.numberOfBuckets;
+          const rawHash = hashes[i];
+          if (rawHash === undefined) continue;
+          const hash = rawHash % this.numberOfBuckets;
           const bucket = dimensionBuckets[i];
+          if (!bucket) continue;
 
           // Get exact bucket
-          if (bucket.has(hash)) {
-            for (const id of bucket.get(hash) as (number | string)[]) {
+          const exact = bucket.get(hash);
+          if (exact) {
+            for (const id of exact) {
               candidateIds.add(id);
             }
           }
@@ -519,19 +535,22 @@ class LSH {
     const len = Math.min(a.length, b.length);
     let sum = 0;
 
-    // Process 4 elements at a time for better performance
+    // Process 4 elements at a time for better performance.
+    // The `?? 0` fallbacks are unreachable: every index below is < len, and
+    // len <= min(a.length, b.length). They exist because `noUncheckedIndexedAccess`
+    // widens `number[]` element reads to `number | undefined`.
     for (let i = 0; i < len - 3; i += 4) {
-      const d1 = a[i] - b[i];
-      const d2 = a[i + 1] - b[i + 1];
-      const d3 = a[i + 2] - b[i + 2];
-      const d4 = a[i + 3] - b[i + 3];
+      const d1 = (a[i] ?? 0) - (b[i] ?? 0);
+      const d2 = (a[i + 1] ?? 0) - (b[i + 1] ?? 0);
+      const d3 = (a[i + 2] ?? 0) - (b[i + 2] ?? 0);
+      const d4 = (a[i + 3] ?? 0) - (b[i + 3] ?? 0);
 
       sum += d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4;
     }
 
     // Handle remaining elements
     for (let i = len - (len % 4); i < len; i++) {
-      const diff = a[i] - b[i];
+      const diff = (a[i] ?? 0) - (b[i] ?? 0);
       sum += diff * diff;
     }
 
@@ -589,7 +608,11 @@ class LSH {
       bucketsUsed: 0,
       avgBucketSize: 0,
       maxBucketSize: 0,
+      // Annotated empty maps; `satisfies` would not supply the index
+      // signature these counters rely on.
+      // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
       vectorsPerDimension: {} as Record<number, number>,
+      // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
       bucketsPerDimension: {} as Record<number, number>,
       initialized: this.initialized,
       allowMismatchedDimensions: this.allowMismatchedDimensions,
@@ -657,15 +680,15 @@ class LSH {
 
     // Convert buckets
     for (const [dimension, tables] of this.buckets.entries()) {
-      bucketsData[dimension] = {};
+      const perTable: Record<number, Record<string, Array<number | string>>> = {};
+      bucketsData[dimension] = perTable;
 
       tables.forEach((table, tableIndex) => {
-        bucketsData[dimension][tableIndex] = {};
+        const perHash: Record<string, Array<number | string>> = {};
+        perTable[tableIndex] = perHash;
 
         for (const [hash, ids] of table.entries()) {
-          bucketsData[dimension][tableIndex][hash] = Array.isArray(ids)
-            ? ids
-            : [ids];
+          perHash[hash] = Array.isArray(ids) ? ids : [ids];
         }
       });
     }
@@ -734,13 +757,13 @@ class LSH {
     // Restore buckets
     for (const [dimensionStr, tables] of Object.entries(data.buckets)) {
       const dimension = parseInt(dimensionStr, 10);
-      const dimensionBuckets: Map<number, number | string[]>[] = [];
+      const dimensionBuckets: Array<Map<number, Array<number | string>>> = [];
 
       for (const [tableIndexStr, hashTable] of Object.entries(
         tables as Record<string, Record<string, (number | string)[]>>
       )) {
         const tableIndex = parseInt(tableIndexStr, 10);
-        const bucketMap = new Map<number, number | string[]>();
+        const bucketMap = new Map<number, Array<number | string>>();
 
         // Ensure we have enough tables
         while (dimensionBuckets.length <= tableIndex) {
@@ -750,7 +773,7 @@ class LSH {
         // Restore each hash bucket
         for (const [hashStr, ids] of Object.entries(hashTable)) {
           const hash = parseInt(hashStr, 10);
-          bucketMap.set(hash, ids as string[]);
+          bucketMap.set(hash, ids);
         }
 
         dimensionBuckets[tableIndex] = bucketMap;

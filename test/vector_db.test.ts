@@ -138,7 +138,7 @@ describe('VectorDB', () => {
         it('should update metadata with function', () => {
             db.addMetadata(1, { counter: 5 });
             const updated = db.updateMetadata(1, (current) => {
-                return { counter: current ? current.counter + 1 : 1 };
+                return { counter: current ? current['counter'] + 1 : 1 };
             });
             expect(updated).to.be.true;
             expect(db.getMetadata(1)).to.deep.equal({ counter: 6 });
@@ -164,22 +164,22 @@ describe('VectorDB', () => {
         it('should find nearest vectors using euclidean distance', () => {
             const results = db.findNearest([0.8, 0.8, 0], 2);
             expect(results.length).to.equal(2);
-            expect(results[0].id).to.equal(4); // Vector 4 should be closest
-            expect(results[1].id).to.be.oneOf([1, 2]); // Either vector 1 or 2
+            expect(results[0]!.id).to.equal(4); // Vector 4 should be closest
+            expect(results[1]!.id).to.be.oneOf([1, 2]); // Either vector 1 or 2
         });
         
         it('should find nearest vectors using cosine distance', () => {
             const results = db.findNearest([0.5, 0.5, 0], 2, { metric: 'cosine' });
             expect(results.length).to.equal(2);
-            expect(results[0].id).to.equal(4); // Vector 4 should be closest
+            expect(results[0]!.id).to.equal(4); // Vector 4 should be closest
         });
         
         it('should apply filter when searching', () => {
             const results = db.findNearest([0.8, 0.8, 0], 3, {
-                filter: (id, metadata) => metadata?.category === 'xy'
+                filter: (id, metadata) => metadata?.['category'] === 'xy'
             });
             expect(results.length).to.equal(1);
-            expect(results[0].id).to.equal(4);
+            expect(results[0]!.id).to.equal(4);
         });
     });
     

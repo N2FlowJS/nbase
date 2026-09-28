@@ -14,15 +14,33 @@
     "inlineSources": true,
 
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
 
+    // --- Strictness ---
+    // `strict` turns on the strictNullChecks family. The rest are opt-in and
+    // each one caught real defects when enabled:
     "strict": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
+    // Array/record index reads are `T | undefined`. This is the single
+    // highest-value flag here: it caught ~170 unchecked reads across the
+    // distance kernels, the HNSW traversal and the k-means inner loops.
+    "noUncheckedIndexedAccess": true,
+    // An optional property is not the same as `prop: T | undefined`. Callers
+    // passing a possibly-undefined value are now forced to omit the key, which
+    // is what `VectorStoreSearchOptions` and friends encode.
+    "exactOptionalPropertyTypes": true,
+    // `process.env.FOO` / `req.body.foo` are index-signature reads; require
+    // bracket access so a typo is visible.
+    "noPropertyAccessFromIndexSignature": true,
+    "noImplicitOverride": true,
+    "useUnknownInCatchVariables": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "forceConsistentCasingInFileNames": true,
 
     "types": ["node"]
   },

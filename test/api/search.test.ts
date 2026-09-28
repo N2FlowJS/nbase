@@ -168,7 +168,7 @@ describe('Search Routes', () => {
   });
 
   it('should include stack trace in development mode', async () => {
-    process.env.NODE_ENV = 'development';
+    process.env['NODE_ENV'] = 'development';
     mockDatabase.findNearest.rejects(new Error('Test error'));
 
     const response = await request(app)
@@ -179,6 +179,6 @@ describe('Search Routes', () => {
     expect(response.body.stack).to.be.a('string');
 
     // Reset NODE_ENV
-    delete process.env.NODE_ENV;
+    delete process.env['NODE_ENV'];
   });
 });

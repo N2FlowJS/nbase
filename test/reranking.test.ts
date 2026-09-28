@@ -81,7 +81,7 @@ describe('SearchReranker', () => {
             expect(result).to.have.lengthOf(testResults.length);
             
             // Verify first result is still the most relevant one
-            expect(result[0].id).to.equal(1);
+            expect(result[0]!.id).to.equal(1);
             
             // Verify the exact order is different from the original
             const originalIds = testResults.map(r => r.id);
@@ -115,7 +115,7 @@ describe('SearchReranker', () => {
             });
             
             // Item 2 should come first due to high popularity
-            expect(result[0].id).to.equal(2);
+            expect(result[0]!.id).to.equal(2);
             
             // Verify all results are returned but in different order
             expect(result).to.have.lengthOf(testResults.length);

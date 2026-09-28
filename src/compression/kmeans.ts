@@ -95,17 +95,20 @@ export class KMeans {
     const n = vectors.length;
 
     // Choose first centroid randomly
-    const firstIdx = Math.floor(Math.random() * n);
-    centroids.push(vectors[firstIdx] instanceof Float32Array ? (vectors[firstIdx].slice() as Float32Array) : new Float32Array(vectors[firstIdx]));
+    if (n === 0) return centroids;
+    const first = vectors[Math.floor(Math.random() * n)];
+    if (first) centroids.push(first instanceof Float32Array ? (first.slice() as Float32Array) : new Float32Array(first));
 
     // KMeans++ initialization
     const distances = new Float32Array(n).fill(0);
     for (let i = 1; i < this.k; i++) {
       let totalDistance = 0;
       for (let j = 0; j < n; j++) {
+        const vector = vectors[j];
+        if (!vector) continue;
         let minDist = Infinity;
         for (const centroid of centroids) {
-          const dist = this._squaredDistance(vectors[j], centroid);
+          const dist = this._squaredDistance(vector, centroid);
           minDist = Math.min(minDist, dist);
         }
         distances[j] = minDist;
@@ -116,19 +119,17 @@ export class KMeans {
       let rand = Math.random() * totalDistance;
       let nextCentroidIndex = -1;
       for (let j = 0; j < n; j++) {
-        rand -= distances[j];
+        rand -= distances[j] ?? 0;
         if (rand <= 0) {
           nextCentroidIndex = j;
           break;
         }
       }
 
-      if (nextCentroidIndex !== -1) {
-        centroids.push(vectors[nextCentroidIndex] instanceof Float32Array ? (vectors[nextCentroidIndex].slice() as Float32Array) : new Float32Array(vectors[nextCentroidIndex]));
-      } else {
-        // Fallback: choose a random vector
-        const randomIndex = Math.floor(Math.random() * n);
-        centroids.push(vectors[randomIndex] instanceof Float32Array ? (vectors[randomIndex].slice() as Float32Array) : new Float32Array(vectors[randomIndex]));
+      // Fallback to a random vector when the weighted draw found no candidate.
+      const chosen = vectors[nextCentroidIndex !== -1 ? nextCentroidIndex : Math.floor(Math.random() * n)];
+      if (chosen) {
+        centroids.push(chosen instanceof Float32Array ? (chosen.slice() as Float32Array) : new Float32Array(chosen));
       }
     }
 
@@ -147,8 +148,12 @@ export class KMeans {
       let minDist = Infinity;
       let nearestCentroid = 0;
 
+      const vector = vectors[i];
+      if (!vector) continue;
       for (let c = 0; c < centroids.length; c++) {
-        const dist = this._squaredDistance(vectors[i], centroids[c]);
+        const centroid = centroids[c];
+        if (!centroid) continue;
+        const dist = this._squaredDistance(vector, centroid);
         if (dist < minDist) {
           minDist = dist;
           nearestCentroid = c;
@@ -167,7 +172,9 @@ export class KMeans {
    */
   private _updateCentroids(vectors: Vector[], assignments: number[], centroids: Float32Array[]): boolean {
     const n = vectors.length;
-    const dimensions = vectors[0].length;
+    const firstVector = vectors[0];
+    if (!firstVector) return false;
+    const dimensions = firstVector.length;
     const k = centroids.length;
 
     // Count vectors in each cluster
@@ -183,11 +190,13 @@ export class KMeans {
     for (let i = 0; i < n; i++) {
       const clusterIdx = assignments[i];
       const vector = vectors[i];
+      const accumulator = clusterIdx === undefined ? undefined : newCentroids[clusterIdx];
+      if (clusterIdx === undefined || !vector || !accumulator) continue;
 
-      counts[clusterIdx]++;
+      counts[clusterIdx] = (counts[clusterIdx] ?? 0) + 1;
 
       for (let d = 0; d < dimensions; d++) {
-        newCentroids[clusterIdx][d] += vector[d];
+        accumulator[d] = (accumulator[d] ?? 0) + (vector[d] ?? 0);
       }
     }
 
@@ -202,8 +211,9 @@ export class KMeans {
         let largestCluster = 0;
 
         for (let j = 0; j < k; j++) {
-          if (counts[j] > maxCount) {
-            maxCount = counts[j];
+          const count = counts[j] ?? 0;
+          if (count > maxCount) {
+            maxCount = count;
             largestCluster = j;
           }
         }
@@ -220,31 +230,42 @@ export class KMeans {
         if (pointsInLargest.length > 0) {
           const randomIdx = Math.floor(Math.random() * pointsInLargest.length);
           const vectorIdx = pointsInLargest[randomIdx];
+          const donorVector = vectorIdx === undefined ? undefined : vectors[vectorIdx];
+          const target = newCentroids[c];
 
           // Copy this vector as new centroid for empty cluster
-          for (let d = 0; d < dimensions; d++) {
-            newCentroids[c][d] = vectors[vectorIdx][d];
+          if (donorVector && target) {
+            for (let d = 0; d < dimensions; d++) {
+              target[d] = donorVector[d] ?? 0;
+            }
+            changed = true;
           }
-
-          changed = true;
         }
 
         continue;
       }
 
       // Calculate mean and check for change
-      for (let d = 0; d < dimensions; d++) {
-        newCentroids[c][d] /= counts[c];
+      const updated = newCentroids[c];
+      const previous = centroids[c];
+      const count = counts[c] ?? 0;
+      if (updated && previous) {
+        // A zero count means the cluster emptied; the repair pass above already
+        // handled it, so leave the row untouched rather than dividing by zero.
+        if (count > 0) {
+          for (let d = 0; d < dimensions; d++) {
+            const mean = (updated[d] ?? 0) / count;
+            updated[d] = mean;
 
-        // Check if centroid moved significantly
-        const diff = Math.abs(newCentroids[c][d] - centroids[c][d]);
-        if (diff > this.tolerance) {
-          changed = true;
+            // Check if centroid moved significantly
+            if (Math.abs(mean - (previous[d] ?? 0)) > this.tolerance) {
+              changed = true;
+            }
+          }
         }
+        // Update centroid
+        centroids[c] = updated;
       }
-
-      // Update centroid
-      centroids[c] = newCentroids[c];
     }
 
     return changed;
@@ -258,8 +279,9 @@ export class KMeans {
     let sum = 0;
     const len = Math.min(a.length, b.length);
 
+    // The `?? 0` fallbacks are unreachable: i < len <= min(a.length, b.length).
     for (let i = 0; i < len; i++) {
-      const diff = a[i] - b[i];
+      const diff = (a[i] ?? 0) - (b[i] ?? 0);
       sum += diff * diff;
     }
 

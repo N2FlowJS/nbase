@@ -221,7 +221,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
 
       // Load Average
       const loadAvg = os.loadavg();
-      loadAvg1m = loadAvg.length > 0 ? loadAvg[0] : null;
+      loadAvg1m = loadAvg.length > 0 ? (loadAvg[0] ?? null) : null;
       this._addMetricHistory('loadAvg1m', loadAvg1m); // Correct key used here
 
       // CPU Usage (Interval Calculation)
@@ -233,8 +233,8 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
         for (let i = 0; i < currentCpuInfo.cpus.length; i++) {
           const currentCore = currentCpuInfo.cpus[i];
           // Ensure the corresponding core exists in the previous snapshot
-          if (this.lastCpuInfo.cpus && i < this.lastCpuInfo.cpus.length) {
-            const lastCore = this.lastCpuInfo.cpus[i];
+          const lastCore = this.lastCpuInfo.cpus?.[i];
+          if (currentCore && lastCore) {
             const currentTotal = Object.values(currentCore.times).reduce((a, b) => a + b, 0);
             const lastTotal = Object.values(lastCore.times).reduce((a, b) => a + b, 0);
             totalDiff += currentTotal - lastTotal;
@@ -288,7 +288,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
     }
 
     // Calculate QPM based on queries counted in the last interval
-    const intervalSeconds = this.options.interval / 1000;
+    const intervalSeconds = (this.options.interval ?? 1000) / 1000;
     const calculatedQPM = intervalSeconds > 0 ? Math.round((this.queriesInLastInterval / intervalSeconds) * 60) : 0;
 
     return {
@@ -337,7 +337,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
     const historyArray = this.metricsHistory.system[key];
     historyArray.push(value);
     // Trim history
-    if (historyArray.length > this.options.historySize) {
+    if (historyArray.length > (this.options.historySize ?? 60)) {
       historyArray.shift();
     }
   }

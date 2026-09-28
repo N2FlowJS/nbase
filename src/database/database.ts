@@ -207,7 +207,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       await this.handleInitialIndexing();
       this.startBackgroundTasks();
 
-      this.markAsReady();
+      await this.markAsReady();
     } catch (error: any) {
       await this.handleInitializationError(error);
       throw error;
@@ -265,7 +265,9 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     console.log('[Database] Initializing UnifiedSearch...');
 
     this.unifiedSearch = new UnifiedSearch(this.vectorDB, {
-      debug: this.options.monitoring.logToConsole,
+      ...(this.options.monitoring.logToConsole !== undefined
+        ? { debug: this.options.monitoring.logToConsole }
+        : {}),
     });
 
     this.setupUnifiedSearchListeners();
@@ -1278,8 +1280,8 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
 
       // Delegate to the vectorDB implementation
       const communities = await this.vectorDB.extractCommunities(threshold, {
-        metric: options.metric,
-        partitionIds,
+        ...(options.metric !== undefined ? { metric: options.metric } : {}),
+        ...(partitionIds !== undefined ? { partitionIds } : {}),
         includeMetadata: options.includeMetadata ?? true,
       });
 

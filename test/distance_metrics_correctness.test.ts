@@ -55,10 +55,10 @@ describe('Distance Metrics', () => {
       const va = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       const vb = new Float32Array([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
       
-      const expectedSq = va.reduce((acc, val, i) => acc + Math.pow(val - vb[i], 2), 0);
+      const expectedSq = va.reduce((acc, val, i) => acc + Math.pow(val - (vb[i] ?? 0), 2), 0);
       expect(squaredEuclidean(va, vb)).to.be.closeTo(expectedSq, 1e-10);
 
-      const expectedDot = va.reduce((acc, val, i) => acc + val * vb[i], 0);
+      const expectedDot = va.reduce((acc, val, i) => acc + val * (vb[i] ?? 0), 0);
       expect(dotProduct(va, vb)).to.be.closeTo(expectedDot, 1e-10);
     });
   });

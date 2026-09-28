@@ -54,7 +54,7 @@ describe("PartitionedVectorDB - State Persistence", () => {
       vectorCount += config.vectorCount;
     }
     expect(configs.length).to.equal(2); // Initial + saved partition
-    expect(configs[1].id).to.equal("save-test");
+    expect(configs[1]!.id).to.equal("save-test");
 
     // The vector count should match what we added
     expect(vectorCount).to.be.at.least(20, "Expected at least 20 vectors to be persisted");
@@ -68,7 +68,7 @@ describe("PartitionedVectorDB - State Persistence", () => {
     expect(vector).to.not.be.null;
 
     // Also try to find similar vectors
-    const similar = await newDB.findNearest(vectors[0].vector, 1);
+    const similar = await newDB.findNearest(vectors[0]!.vector, 1);
     console.log("[TEST] Found similar vectors:", similar);
     expect(similar).to.have.lengthOf.at.least(1, "Expected to find at least one similar vector");
 

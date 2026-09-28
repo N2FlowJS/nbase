@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import { Worker } from 'worker_threads';
 import path from 'path';
-import { BuildIndexHNSWOptions, HNSWNode, HNSWOptions, HNSWStats, LoadIndexHNSWOptions, SearchOptions, SearchResult, Vector, VectorProvider } from '../types';
+import { BuildIndexHNSWOptions, HNSWNode, HNSWOptions, HNSWStats, LoadIndexHNSWOptions, SearchResult, Vector, VectorProvider, VectorStoreSearchOptions } from '../types';
 import { createTimer } from '../utils/profiling';
 import { log } from '../utils/log';
 
@@ -82,21 +82,25 @@ class HNSW {
       const len = Math.min(a.length, b.length);
       let i = 0;
       
-      // Unroll by 8
+      // Unroll by 8.
+      // The `?? 0` fallbacks are unreachable: every index below is < len and
+      // len <= min(a.length, b.length). They are required because
+      // `noUncheckedIndexedAccess` widens `number[]` element reads to
+      // `number | undefined`.
       for (; i <= len - 8; i += 8) {
-        const d0 = a[i] - b[i];
-        const d1 = a[i + 1] - b[i + 1];
-        const d2 = a[i + 2] - b[i + 2];
-        const d3 = a[i + 3] - b[i + 3];
-        const d4 = a[i + 4] - b[i + 4];
-        const d5 = a[i + 5] - b[i + 5];
-        const d6 = a[i + 6] - b[i + 6];
-        const d7 = a[i + 7] - b[i + 7];
+        const d0 = (a[i] ?? 0) - (b[i] ?? 0);
+        const d1 = (a[i + 1] ?? 0) - (b[i + 1] ?? 0);
+        const d2 = (a[i + 2] ?? 0) - (b[i + 2] ?? 0);
+        const d3 = (a[i + 3] ?? 0) - (b[i + 3] ?? 0);
+        const d4 = (a[i + 4] ?? 0) - (b[i + 4] ?? 0);
+        const d5 = (a[i + 5] ?? 0) - (b[i + 5] ?? 0);
+        const d6 = (a[i + 6] ?? 0) - (b[i + 6] ?? 0);
+        const d7 = (a[i + 7] ?? 0) - (b[i + 7] ?? 0);
         sum += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4 + d5 * d5 + d6 * d6 + d7 * d7;
       }
       
       for (; i < len; i++) {
-        const diff = a[i] - b[i];
+        const diff = (a[i] ?? 0) - (b[i] ?? 0);
         sum += diff * diff;
       }
       
@@ -329,7 +333,7 @@ class HNSW {
    * Search with a specific entry point
    * @private
    */
-  private _searchWithEntryPoint(entryPoint: number | string, query: Vector, k: number, options: SearchOptions & { exactDimensions?: boolean } = {}): SearchResult[] {
+  private _searchWithEntryPoint(entryPoint: number | string, query: Vector, k: number, options: VectorStoreSearchOptions = {}): SearchResult[] {
     const timer = this.timer;
     const queryDimension = query.length;
     const exactDimensions = options.exactDimensions || false;
@@ -618,7 +622,7 @@ class HNSW {
    * @param options - Search options
    * @returns Array of nearest neighbors
    */
-  findNearest(query: Vector, k: number = 10, options: SearchOptions & { exactDimensions?: boolean } = {}): SearchResult[] {
+  findNearest(query: Vector, k: number = 10, options: VectorStoreSearchOptions = {}): SearchResult[] {
     if (!this.entryPointId || !this.initialized) {
       // Fall back to linear search. This must run *after* the deleted-node and
       // metadata filter are composed below, otherwise the fallback path
@@ -666,7 +670,7 @@ class HNSW {
    *
    * @private
    */
-  private _withEffectiveFilter(options: SearchOptions & { exactDimensions?: boolean }): SearchOptions & { exactDimensions?: boolean } {
+  private _withEffectiveFilter(options: VectorStoreSearchOptions): VectorStoreSearchOptions {
     const baseFilter = options.filter;
 
     const filter = (id: number | string, _metadata?: Record<string, any> | null): boolean => {
@@ -696,7 +700,7 @@ class HNSW {
    * Fallback linear search implementation
    * @private
    */
-  private _linearSearch(query: Vector, k: number, options: SearchOptions & { exactDimensions?: boolean } = {}): SearchResult[] {
+  private _linearSearch(query: Vector, k: number, options: VectorStoreSearchOptions = {}): SearchResult[] {
     const filter = options.filter || (() => true);
     const exactDimensions = options.exactDimensions === true;
     const queryDimension = query.length;
@@ -759,6 +763,7 @@ class HNSW {
     // First, scan all vectors to collect dimensions (optimized loop)
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
+      if (id === undefined) continue;
       const vector = this.db.getVector(id); // Optimized vector retrieval
 
       if (vector) {
@@ -799,6 +804,7 @@ class HNSW {
         // Process vectors in this dimension (optimized loop)
         for (let i = 0; i < dimensionIds.length; i++) {
           const id = dimensionIds[i];
+          if (id === undefined) continue;
           const vector = this.db.getVector(id); // Optimized vector retrieval
 
           if (vector) {
@@ -818,6 +824,7 @@ class HNSW {
       // Process all vectors regardless of dimension (optimized loop)
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
+        if (id === undefined) continue;
         const vector = this.db.getVector(id); // Optimized vector retrieval
 
         if (vector) {
@@ -844,8 +851,10 @@ class HNSW {
     // Initialize connections for each level (optimized Map and Set creation)
     const node: HNSWNode = {
       id,
-      connections: new Map(),
-      dimension,
+      connections: new Map<number, Set<number | string>>(),
+      // Omit  when the caller did not supply one; the field is
+      // optional, so assigning undefined would be a different shape.
+      ...(dimension !== undefined ? { dimension } : {}),
     };
 
     // Create empty connection sets for each level (optimized loop)
@@ -1073,7 +1082,8 @@ class HNSW {
     // Create new connection set with only M closest (optimized Set creation and population)
     const newConnections = new Set<number | string>();
     for (let i = 0; i < Math.min(this.M, distances.length); i++) {
-      newConnections.add(distances[i].id); // Optimized Set add
+      const entry = distances[i];
+      if (entry) newConnections.add(entry.id); // Optimized Set add
     }
 
     // Replace old connections with pruned set (optimized Map set)
@@ -1140,8 +1150,9 @@ class HNSW {
     // Count nodes per level
     const nodesPerLevel: number[] = new Array(maxLevel + 1).fill(0);
     for (const level of levels) {
-      // Optimized loop
-      nodesPerLevel[level]++;
+      // Optimized loop. The array is pre-filled with 0, so the read is always
+      // defined; `?? 0` only satisfies noUncheckedIndexedAccess.
+      nodesPerLevel[level] = (nodesPerLevel[level] ?? 0) + 1;
     }
 
     // Calculate average connections per node per level
@@ -1208,7 +1219,9 @@ class HNSW {
           // Optimized Map iteration and mapping
           id,
           level: this.nodeToLevel.get(id), // Optimized retrieval
-          dimension: this.nodeDimensions.get(id), // Optimized retrieval
+          // Omit  when the node has none, rather than setting it to
+          // undefined; the declared shape marks it optional.
+          ...(this.nodeDimensions.has(id) ? { dimension: this.nodeDimensions.get(id) } : {}),
           connections: Array.from(node.connections.entries()).map(
             // Optimized Map iteration and mapping
             ([level, connections]) => ({
@@ -1363,7 +1376,7 @@ class HNSW {
       // Path to the worker file (adjust based on build output)
       const workerPath = path.resolve(__dirname, 'hnsw_worker.js');
       // If running via ts-node, we might need to use the .ts file and register ts-node
-      const isTsNode = process.env.TS_NODE_DEV || process.argv.some(arg => arg.includes('ts-node')) || __filename.endsWith('.ts');
+      const isTsNode = process.env['TS_NODE_DEV'] || process.argv.some(arg => arg.includes('ts-node')) || __filename.endsWith('.ts');
 
       const worker = new Worker(
         isTsNode ? path.resolve(__dirname, 'hnsw_worker.ts') : workerPath,

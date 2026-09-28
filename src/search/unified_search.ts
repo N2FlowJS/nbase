@@ -367,7 +367,9 @@ export class UnifiedSearch extends EventEmitter {
    * @returns Object containing search statistics according to UnifiedSearchPartitionedStats
    */
   async getStats(): Promise<UnifiedSearchPartitionedStats> {
-    let dbStats: PartitionedDBStats = {} as PartitionedDBStats;
+    // Placeholder until getStats() resolves; the try/catch below replaces it.
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+    let dbStats = {} as PartitionedDBStats;
     try {
       if (typeof this.db.getStats === 'function') {
         dbStats = await this.db.getStats();

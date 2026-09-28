@@ -2,7 +2,7 @@
 
 import { VectorDB } from './vector_db';
 import config from '../config'; // Assuming config exists and has defaults
-import { ClusteredVectorDBOptions, CloseOptions, DBStats, DistanceMetric, IDVector, SaveOptions, SearchResult, Vector } from '../types';
+import { VectorStoreSearchOptions, ClusteredVectorDBOptions, CloseOptions, DBStats, DistanceMetric, IDVector, SaveOptions, SearchResult, Vector } from '../types';
 import { existsSync, promises as fsPromises } from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib'; // Import zlib for potential compression
@@ -71,8 +71,9 @@ export class ClusteredVectorDB extends VectorDB {
   private clusterSavePromise: Promise<void> | null = null;
 
   constructor(suggestedVectorSize: number | null = null, dbPath: string | null = null, options: ClusteredVectorDBOptions = {}) {
+    // Omit the key when unset so the parent's default applies unchanged.
     super(suggestedVectorSize, dbPath, {
-      useCompression: options.useCompression,
+      ...(options.useCompression !== undefined ? { useCompression: options.useCompression } : {}),
     });
 
     // Set configuration with defaults from config or reasonable values
@@ -300,10 +301,7 @@ export class ClusteredVectorDB extends VectorDB {
   override findNearest(
     query: Vector,
     k: number = 10,
-    options: {
-      filter?: (id: number | string, metadata?: Record<string, any>) => boolean;
-      metric?: DistanceMetric;
-    } = {}
+    options: VectorStoreSearchOptions = {}
   ): SearchResult[] {
     log('info', `[ClusteredVectorDB] [findNearest] Searching for nearest vectors... with k=${k}}`);
 
@@ -493,8 +491,10 @@ export class ClusteredVectorDB extends VectorDB {
     const selected: Array<{ key: number; dist: number }> = [];
     let collected = 0;
     for (let i = 0; i < rankedClusters.length && selected.length < limit; i++) {
-      selected.push(rankedClusters[i]);
-      const members = this.clusters.get(rankedClusters[i].key);
+      const ranked = rankedClusters[i];
+      if (!ranked) continue;
+      selected.push(ranked);
+      const members = this.clusters.get(ranked.key);
       if (members) collected += members.length;
       // Stop early once the beam is comfortably wider than what was asked for.
       if (collected >= k * 2 && selected.length >= 1) break;
@@ -584,16 +584,18 @@ export class ClusteredVectorDB extends VectorDB {
       return;
     }
 
+    // `?? 0` fallbacks are unreachable: the loop is bounded by centroid.length
+    // and the caller guarantees the vectors share that dimension.
     if (operation === 'add') {
       // new_centroid = (old_centroid * old_size + new_vector) / new_size
       for (let i = 0; i < centroid.length; i++) {
-        centroid[i] = (centroid[i] * currentSize + vector[i]) / newSize;
+        centroid[i] = ((centroid[i] ?? 0) * currentSize + (vector[i] ?? 0)) / newSize;
       }
     } else {
       // operation === 'remove'
       // new_centroid = (old_centroid * old_size - removed_vector) / new_size
       for (let i = 0; i < centroid.length; i++) {
-        centroid[i] = (centroid[i] * currentSize - vector[i]) / newSize;
+        centroid[i] = ((centroid[i] ?? 0) * currentSize - (vector[i] ?? 0)) / newSize;
       }
     }
 
@@ -645,7 +647,7 @@ export class ClusteredVectorDB extends VectorDB {
         continue;
       }
       for (let i = 0; i < dimensions; i++) {
-        centroid[i] += vector[i];
+        centroid[i] = (centroid[i] ?? 0) + (vector[i] ?? 0);
       }
     }
 
@@ -653,7 +655,7 @@ export class ClusteredVectorDB extends VectorDB {
     const count = memberVectors.length;
     if (count > 0) {
       for (let i = 0; i < dimensions; i++) {
-        centroid[i] /= count;
+        centroid[i] = (centroid[i] ?? 0) / count;
       }
     }
 
@@ -730,6 +732,7 @@ export class ClusteredVectorDB extends VectorDB {
     // Create new cluster structures based on final centroids
     for (let i = 0; i < finalCentroids.length; i++) {
       const centroid = finalCentroids[i];
+      if (!centroid) continue;
       const newKey = this.clusterIdCounter++;
       centroidIndexToClusterKey.set(i, newKey); // Map K-Means index to new DB cluster key
 
@@ -745,6 +748,7 @@ export class ClusteredVectorDB extends VectorDB {
 
       for (let i = 0; i < finalCentroids.length; i++) {
         const centroid = finalCentroids[i];
+        if (!centroid) continue;
         // Ensure dimension compatibility if needed by metric
         if (this.distanceMetric === 'cosine' && vector.length !== centroid.length) {
           continue;
@@ -873,7 +877,7 @@ export class ClusteredVectorDB extends VectorDB {
  * @param metric - Distance metric to use (e.g., 'cosine', 'euclidean').
  * @returns An array of relationships, where each relationship links two vector IDs, their distance, and optional metadata.
  */
-public extractRelationships(
+override extractRelationships(
   threshold: number,
   metric: DistanceMetric = this.distanceMetric
 ): Array<{ 
@@ -894,10 +898,14 @@ public extractRelationships(
   // Iterate over all vectors
   const vectorEntries = Array.from(this.memoryStorage.entries());
   for (let i = 0; i < vectorEntries.length; i++) {
-    const [id1, vector1] = vectorEntries[i];
+    const entry = vectorEntries[i];
+    if (!entry) continue;
+    const [id1, vector1] = entry;
 
     for (let j = i + 1; j < vectorEntries.length; j++) {
-      const [id2, vector2] = vectorEntries[j];
+      const other = vectorEntries[j];
+      if (!other) continue;
+      const [id2, vector2] = other;
 
       // Ensure dimension compatibility
       if (vector1.length !== vector2.length) {
@@ -918,8 +926,9 @@ public extractRelationships(
           vector1: id1, 
           vector2: id2, 
           distance,
-          metadata1: metadata1 ? { ...metadata1 } : undefined,
-          metadata2: metadata2 ? { ...metadata2 } : undefined 
+          // Omit the keys entirely rather than assigning undefined.
+          ...(metadata1 ? { metadata1: { ...metadata1 } } : {}),
+          ...(metadata2 ? { metadata2: { ...metadata2 } } : {}),
         });
       }
     }
@@ -1050,7 +1059,7 @@ public extractRelationships(
           const metadata = this.metadata.get(nodeId);
           community.push({
             id: nodeId,
-            metadata: metadata ? { ...metadata } : undefined,
+            ...(metadata ? { metadata: { ...metadata } } : {}),
           });
 
           // Visit all neighbors

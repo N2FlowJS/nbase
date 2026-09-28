@@ -10,18 +10,18 @@ import { ClusteredVectorDB } from './vector';
 export interface VectorData {
   id: number | string;
   vector: Vector;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, any> | undefined;
 }
 
 /**
  * Reranking options interface
  */
 export interface RerankingOptions {
-  method?: RerankingMethod;
-  k?: number;
-  metadata?: Map<string | number, any>;
+  method?: RerankingMethod | undefined;
+  k?: number | undefined;
+  metadata?: Map<string | number, any> | undefined;
   vectors?: Map<string | number, Vector>;
-  weights?: Record<string, number>;
+  weights?: Record<string, number> | undefined;
 }
 
 /**
@@ -54,7 +54,7 @@ export interface HybridSearchOptions extends UnifiedSearchOptions {
  */
 export interface ImportExportOptions {
   format?: 'json' | 'binary' | 'csv';
-  includeMetadata?: boolean;
+  includeMetadata?: boolean | undefined;
   compression?: boolean;
   csvSeparator?: string;
   precision?: number;
@@ -285,9 +285,9 @@ export interface IndexStats {
 }
 
 export interface TimerData {
-  start: [number, number];
+  start: [number, number] | undefined;
   splits: { label: string | null; elapsed: number }[];
-  lastDuration?: number; // Store the duration of the last stop
+  lastDuration?: number | undefined; // Store the duration of the last stop
 }
 
 export interface TimerResult {
@@ -311,12 +311,12 @@ export interface PerformanceMetrics {
  * Options for the monitoring system
  */
 export interface MonitoringOptions {
-  interval?: number;
-  historySize?: number;
-  logToConsole?: boolean;
-  enableSystemMetrics?: boolean;
+  interval?: number | undefined;
+  historySize?: number | undefined;
+  logToConsole?: boolean | undefined;
+  enableSystemMetrics?: boolean | undefined;
   enableSearchMetrics?: boolean;
-  enableDatabaseMetrics?: boolean; // Add option for DB metrics
+  enableDatabaseMetrics?: boolean | undefined; // Add option for DB metrics
   enableCacheMetrics?: boolean; // Add option for cache metrics
 }
 
@@ -364,21 +364,21 @@ export interface SearchMetrics {
 export interface HNSWNode {
   id: number | string;
   connections: Map<number, Set<number | string>>;
-  dimension?: number; // Store vector dimension
+  dimension?: number | undefined; // Store vector dimension
 }
 
 /**
  * HNSW options interface
  */
 export interface HNSWOptions {
-  M?: number; // Maximum number of connections per node
-  efConstruction?: number; // Size of the dynamic candidate list during construction
-  efSearch?: number; // Size of the dynamic candidate list during search
+  M?: number | undefined; // Maximum number of connections per node
+  efConstruction?: number | undefined; // Size of the dynamic candidate list during construction
+  efSearch?: number | undefined; // Size of the dynamic candidate list during search
   distanceFunc?: (a: Vector, b: Vector) => number;
-  maxLevel?: number; // Maximum level in the graph
-  levelProbability?: number; // Probability of assigning a higher level
+  maxLevel?: number | undefined; // Maximum level in the graph
+  levelProbability?: number | undefined; // Probability of assigning a higher level
   entryPointId?: number | string; // Custom entry point ID
-  dimensionAware?: boolean; // Whether to handle vectors of different dimensions
+  dimensionAware?: boolean | undefined; // Whether to handle vectors of different dimensions
   nodes?: HNSWNode[]; // Predefined nodes for loading
 }
 
@@ -386,17 +386,17 @@ export interface HNSWOptions {
  * HNSW build index options
  */
 export interface BuildIndexHNSWOptions {
-  progressCallback?: (progress: number) => void;
-  dimensionAware?: boolean;
+  progressCallback?: ((progress: number) => void) | undefined;
+  dimensionAware?: boolean | undefined;
   force?: boolean;
-  useWorker?: boolean;
+  useWorker?: boolean | undefined;
 }
 
 /**
  * HNSW load index options
  */
 export interface LoadIndexHNSWOptions {
-  dimensionAware?: boolean;
+  dimensionAware?: boolean | undefined;
 }
 
 // --- Interfaces for Monitoring Data ---
@@ -519,22 +519,22 @@ export interface CacheMetricsSnapshotData {
   hitRate: number | null;
 }
 export interface ClusteredVectorDBOptions {
-  useCompression?: boolean;
-  clusterSize?: number; // Target cluster size
+  useCompression?: boolean | undefined;
+  clusterSize?: number | undefined; // Target cluster size
   // Search parameters
-  newClusterThresholdFactor?: number; // e.g., 1.5 -> create new if best cluster > 1.5 * target size
-  newClusterDistanceThreshold?: number; // e.g., 0.5 -> create new if distance > threshold
-  maxClusters?: number; // Hard limit on the number of clusters
-  distanceMetric?: DistanceMetric; // Default metric for clustering and search
-  kmeansMaxIterations?: number; // Max iterations for k-means clustering
+  newClusterThresholdFactor?: number | undefined; // e.g., 1.5 -> create new if best cluster > 1.5 * target size
+  newClusterDistanceThreshold?: number | undefined; // e.g., 0.5 -> create new if distance > threshold
+  maxClusters?: number | undefined; // Hard limit on the number of clusters
+  distanceMetric?: DistanceMetric | undefined; // Default metric for clustering and search
+  kmeansMaxIterations?: number | undefined; // Max iterations for k-means clustering
   /**
    * Number of nearest clusters to probe per search.
    *
    * Defaults to `null`, which means "probe every cluster" — i.e. a full linear
    * scan, the previous behaviour. Set a value to trade recall for speed.
    */
-  nprobe?: number | null;
-  runKMeansOnLoad?: boolean; // Run K-Means after loading if cluster state is missing/invalid
+  nprobe?: number | null | undefined;
+  runKMeansOnLoad?: boolean | undefined; // Run K-Means after loading if cluster state is missing/invalid
 }
 
 export interface PartitionConfig {
@@ -543,23 +543,23 @@ export interface PartitionConfig {
   dbDirName: string; // Store the directory name relative to partitionsDir
   active: boolean;
   vectorCount: number; // Renamed from size for clarity
-  description?: string;
-  properties?: Record<string, any>;
-  clusterSize?: number; // Specific cluster setting for this partition
+  description?: string | undefined;
+  properties?: Record<string, any> | undefined;
+  clusterSize?: number | undefined; // Specific cluster setting for this partition
   // Add other relevant metadata if needed
 }
 
 export interface PartitionedVectorDBOptions {
-  partitionsDir?: string;
-  partitionCapacity?: number; // Max vectors per partition (approximate)
-  autoLoadPartitions?: boolean; // Load active/recent on start
-  autoCreatePartitions?: boolean; // Create new partition when active is full
-  maxActivePartitions?: number; // Max partitions loaded in memory (LRU)
-  vectorSize?: number | null; // Default vector size suggestion
-  useCompression?: boolean; // Compression for underlying DBs
-  autoLoadHNSW?: boolean; // Compression for underlying DBs
-  clusterOptions?: Omit<ClusteredVectorDBOptions, 'clusterSize'>; // Default options for new clusters
-  runKMeansOnLoad?: boolean; // Option to run K-Means on partition load if needed
+  partitionsDir?: string | undefined;
+  partitionCapacity?: number | undefined; // Max vectors per partition (approximate)
+  autoLoadPartitions?: boolean | undefined; // Load active/recent on start
+  autoCreatePartitions?: boolean | undefined; // Create new partition when active is full
+  maxActivePartitions?: number | undefined; // Max partitions loaded in memory (LRU)
+  vectorSize?: number | null | undefined; // Default vector size suggestion
+  useCompression?: boolean | undefined; // Compression for underlying DBs
+  autoLoadHNSW?: boolean | undefined; // Compression for underlying DBs
+  clusterOptions?: Omit<ClusteredVectorDBOptions, 'clusterSize'> | undefined; // Default options for new clusters
+  runKMeansOnLoad?: boolean | undefined; // Option to run K-Means on partition load if needed
 }
 
 // Define events and their payload types
@@ -593,7 +593,7 @@ export interface PartitionedDBEventData {
   'vector:add': {
     partitionId: string;
     vectorId: number | string;
-    metadata?: Record<string, any>;
+    metadata?: Record<string, any> | undefined;
   };
   'vector:delete': { partitionId: string; vectorId: number | string };
   'db:close': void;
@@ -724,10 +724,7 @@ export interface PartitionedVectorDBInterface {
   findNearestHNSW(
     query: Vector,
     k: number,
-    options: SearchOptions & {
-      partitionIds?: string[];
-      exactDimensions?: boolean;
-    }
+    options: VectorStoreSearchOptions
   ): Promise<SearchResult[]>;
   getMetadata(id: number | string): Promise<{ partitionId: string; metadata: Record<string, any> } | null>;
   saveHNSWIndices(partitionId?: string): Promise<void>;
@@ -755,7 +752,7 @@ export interface UnifiedSearchStats {
     lastSearchTime: number;
     errors: number;
     lastError?: Error;
-    lastSearchTimestamp?: Date;
+    lastSearchTimestamp?: Date | undefined;
     methods: {
       knn: { available: boolean; stats?: KNNStats };
       hnsw: { available: boolean; stats?: HNSWStats };
@@ -879,15 +876,15 @@ export interface BatchQuery {
 
 export interface BatchSearchOptions {
   filter?: (id: number | string, meta: any) => boolean;
-  maxBatchSize?: number;
-  maxWorkers?: number;
-  useWorkers?: boolean;
-  disableWorkers?: boolean;
-  prioritizeOrder?: boolean;
-  groupSimilarQueries?: boolean;
-  workerPath?: string;
-  defaultSearchTimeout?: number;
-  defaultSearchTimeoutMs?: number;
+  maxBatchSize?: number | undefined;
+  maxWorkers?: number | undefined;
+  useWorkers?: boolean | undefined;
+  disableWorkers?: boolean | undefined;
+  prioritizeOrder?: boolean | undefined;
+  groupSimilarQueries?: boolean | undefined;
+  workerPath?: string | undefined;
+  defaultSearchTimeout?: number | undefined;
+  defaultSearchTimeoutMs?: number | undefined;
 }
 
 export interface BatchSearchResult {
@@ -934,6 +931,42 @@ export interface VectorProvider {
 }
 
 /**
+ * Options accepted by the vector-store search entry points.
+ *
+ * Previously these were duplicated as inline object literals in every
+ * `findNearest` override, which meant each copy had to be widened
+ * independently for `exactOptionalPropertyTypes`.
+ */
+export interface VectorStoreSearchOptions {
+  /** Predicate evaluated per candidate id. */
+  filter?: ((id: number | string, metadata?: Record<string, any> | null) => boolean) | undefined;
+  includeMetadata?: boolean | undefined;
+  includeVectors?: boolean | undefined;
+  /** Distance metric override for this call. */
+  metric?: DistanceMetric | undefined;
+  /** Alias for `metric`, used by the higher-level search APIs. */
+  distanceMetric?: DistanceMetric | undefined;
+  partitionIds?: string[] | undefined;
+  efSearch?: number | undefined;
+  exactDimensions?: boolean | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+  stopEarly?: boolean | undefined;
+  useHNSW?: boolean | undefined;
+  rerank?: boolean | undefined;
+  rerankingMethod?: RerankingMethod | undefined;
+  rerankLambda?: number | undefined;
+  skipCache?: boolean | undefined;
+  groupSimilarQueries?: boolean | undefined;
+  maxWorkers?: number | undefined;
+  prioritizeOrder?: boolean | undefined;
+  disableWorkers?: boolean | undefined;
+  defaultSearchTimeout?: number | undefined;
+  searchTimeoutMs?: number | undefined;
+  searchMethod?: string | undefined;
+}
+
+/**
  * Marker for event payloads that intentionally carry no data.
  *
  * Using `{}` directly is rejected by `@typescript-eslint/no-empty-object-type`
@@ -961,10 +994,10 @@ export type DistanceMetric = 'euclidean' | 'cosine';
 // --- Database & Persistence Types ---
 
 export interface PersistenceOptions {
-  dbPath?: string; // Đường dẫn chính cho dữ liệu DB
-  autoSave?: boolean;
-  saveIntervalMs?: number; // Đổi tên rõ ràng hơn
-  useCompression?: boolean;
+  dbPath?: string | undefined; // Đường dẫn chính cho dữ liệu DB
+  autoSave?: boolean | undefined;
+  saveIntervalMs?: number | undefined; // Đổi tên rõ ràng hơn
+  useCompression?: boolean | undefined;
 }
 
 export interface BackupOptions {
@@ -986,20 +1019,20 @@ export interface ImportExportOptions {
 // --- Clustering Configuration (for ClusteredVectorDB) ---
 
 export interface ClusteringConfiguration {
-  clusterSize?: number; // Target cluster size
-  newClusterThresholdFactor?: number;
-  newClusterDistanceThreshold?: number;
-  maxClusters?: number; // Hard limit
-  distanceMetric?: DistanceMetric; // Metric for clustering
-  useCompression?: boolean; // Compression specific to cluster data storage
-  kmeansMaxIterations?: number; // Max iterations for k-means clustering
+  clusterSize?: number | undefined; // Target cluster size
+  newClusterThresholdFactor?: number | undefined;
+  newClusterDistanceThreshold?: number | undefined;
+  maxClusters?: number | undefined; // Hard limit
+  distanceMetric?: DistanceMetric | undefined; // Metric for clustering
+  useCompression?: boolean | undefined; // Compression specific to cluster data storage
+  kmeansMaxIterations?: number | undefined; // Max iterations for k-means clustering
   /**
    * Number of nearest clusters to probe per search.
    *
    * Defaults to `null`, which means "probe every cluster" — i.e. a full linear
    * scan, the previous behaviour. Set a value to trade recall for speed.
    */
-  nprobe?: number | null;
+  nprobe?: number | null | undefined;
 }
 
 // --- Partitioning Configuration (for PartitionedVectorDB) ---
@@ -1017,11 +1050,11 @@ export interface PartitionConfig {
 }
 
 export interface PartitioningConfiguration {
-  partitionsDir?: string; // Directory for all partitions
-  partitionCapacity?: number; // Max vectors per partition (approximate)
-  autoLoadPartitions?: boolean; // Load active/recent on start
-  autoCreatePartitions?: boolean; // Create new partition when active is full
-  maxActivePartitions?: number; // Max partitions loaded in memory (LRU)
+  partitionsDir?: string | undefined; // Directory for all partitions
+  partitionCapacity?: number | undefined; // Max vectors per partition (approximate)
+  autoLoadPartitions?: boolean | undefined; // Load active/recent on start
+  autoCreatePartitions?: boolean | undefined; // Create new partition when active is full
+  maxActivePartitions?: number | undefined; // Max partitions loaded in memory (LRU)
   defaultVectorSize?: number | null; // Hint for vector size if needed early
   // Default clustering options applied to *new* partitions if not overridden
   defaultClusterOptions?: ClusteringConfiguration;
@@ -1110,14 +1143,14 @@ export interface IndexingConfiguration {
   indexPath?: string; // Directory for index files (relative to dbPath?)
   buildOnStart?: boolean; // Build indexes when DB starts
   autoLoad?: boolean; // Save indexes automatically after building
-  autoSave?: boolean; // Save indexes automatically after building
+  autoSave?: boolean | undefined; // Save indexes automatically after building
   autoRebuildThreshold?: number; // Rebuild if DB size changes significantly
-  runKMeansOnLoad: boolean; // Run K-Means after loading if needed
+  runKMeansOnLoad: boolean | undefined; // Run K-Means after loading if needed
   // Configuration for specific index types
   // Use optional properties: if the property exists, the index is enabled
-  hnsw?: HNSWIndexConfiguration;
-  lsh?: LSHIndexConfiguration;
-  pq?: PQIndexConfiguration;
+  hnsw?: HNSWIndexConfiguration | undefined;
+  lsh?: LSHIndexConfiguration | undefined;
+  pq?: PQIndexConfiguration | undefined;
   /** Flat index takes no configuration; its presence implies availability. */
   flat?: EmptyPayload;
 }
@@ -1125,18 +1158,18 @@ export interface IndexingConfiguration {
 // --- Search Types ---
 
 export interface BaseSearchOptions {
-  k?: number;
-  filter?: (id: number | string, metadata?: Record<string, any>) => boolean;
-  includeMetadata?: boolean;
-  includeVectors?: boolean;
-  distanceMetric?: DistanceMetric; // Overrides default if specified
+  k?: number | undefined;
+  filter?: ((id: number | string, metadata?: Record<string, any> | null) => boolean) | undefined;
+  includeMetadata?: boolean | undefined;
+  includeVectors?: boolean | undefined;
+  distanceMetric?: DistanceMetric | undefined; // Overrides default if specified
 }
 
 // Options specific to *how* the search is performed, especially within PartitionedDB
 export interface SearchExecutionOptions {
-  partitionIds?: string[]; // Limit search to specific partitions
+  partitionIds?: string[] | undefined; // Limit search to specific partitions
   // HNSW search specific
-  efSearch?: number; // Overrides HNSW efSearch config for this query
+  efSearch?: number | undefined; // Overrides HNSW efSearch config for this query
 }
 
 // Options passed to unified search methods
@@ -1190,13 +1223,13 @@ export interface RerankingOptions {
 // --- Monitoring Types ---
 
 export interface MonitoringConfiguration {
-  enable?: boolean; // Simple toggle
-  intervalMs?: number;
-  historySize?: number;
-  logToConsole?: boolean;
-  enableSystemMetrics?: boolean;
+  enable?: boolean | undefined; // Simple toggle
+  intervalMs?: number | undefined;
+  historySize?: number | undefined;
+  logToConsole?: boolean | undefined;
+  enableSystemMetrics?: boolean | undefined;
   enableSearchMetrics?: boolean;
-  enableDatabaseMetrics?: boolean;
+  enableDatabaseMetrics?: boolean | undefined;
   enableCacheMetrics?: boolean; // If caching is implemented
 }
 
@@ -1479,7 +1512,7 @@ export interface DatabaseStats {
   };
 
   /** Basic information about the host system. */
-  system?: ISystem;
+  system?: ISystem | undefined;
 
   /** Memory usage of the current Node.js process. */
   memoryUsage: NodeJS.MemoryUsage;

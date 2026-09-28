@@ -9,7 +9,7 @@ import HNSW from '../ann/hnsw'; // Assuming HNSW is a class for the clustering a
 import { log } from '../utils/log';
 
 import defaultSystemConfiguration from '../config';
-import { BuildIndexHNSWOptions, CloseOptions, ClusteredVectorDBOptions, DBStats, DistanceMetric, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SaveOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData } from '../types'; // Adjust path as needed
+import { BuildIndexHNSWOptions, CloseOptions, ClusteredVectorDBOptions, DBStats, DistanceMetric, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SaveOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData, VectorStoreSearchOptions } from '../types'; // Adjust path as needed
 import { ClusteredVectorDB } from './clustered_vector_db';
 
 // --- Types ---
@@ -164,7 +164,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     this.useCompression = options.useCompression ?? false; // Default false
     this.defaultClusterOptions = options.clusterOptions ?? {};
     this.autoLoadHNSW = options.autoLoadHNSW ?? true; // Default true
-    this.runKMeansOnLoad = options.runKMeansOnLoad ?? defaultSystemConfiguration.indexing.runKMeansOnLoad; // Default false
+    this.runKMeansOnLoad = options.runKMeansOnLoad ?? defaultSystemConfiguration.indexing.runKMeansOnLoad ?? false;
 
     log('info', `[PartitionedVectorDB] Configuration:
       - partitionsDir: ${this.partitionsDir}
@@ -183,7 +183,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     // --- Initialize LRU Cache ---
     this.loadedPartitions = new LRUCache<string, ClusteredVectorDB>({
       max: this.maxActivePartitions,
-      // Dispose function called when an item is removed (evicted)
+      // Dispose function called when an item is removed (evicted).
+      // lru-cache awaits a Promise-returning dispose; no-misused-promises cannot
+      // see through the generic and flags this as a void-return violation.
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       dispose: async (dbInstance, partitionId, reason) => {
         log('info', `[PartitionedVectorDB] Disposing partition ${partitionId} from memory (Reason: ${reason}).`);
         // Save is handled by the main save() method or explicitly before eviction if needed.
@@ -829,10 +832,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   async findNearestHNSW(
     query: Vector,
     k: number = 10,
-    options: SearchOptions & {
-      partitionIds?: string[];
-      exactDimensions?: boolean;
-    } = {}
+    options: VectorStoreSearchOptions = {}
   ): Promise<SearchResult[]> {
     await this._ensureInitialized();
 
@@ -1054,7 +1054,12 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   /** Schedules a config save if one isn't already pending. */
   private scheduleSaveConfigs(): void {
     if (!this.saveConfigPromise && !this.isClosing) {
-      this.savePartitionConfigs();
+      // Deliberately fire-and-forget: this is a debounce scheduler and the
+      // in-flight promise is tracked by `saveConfigPromise` for awaiters. The
+      // catch prevents an unhandled rejection when the write fails.
+      void this.savePartitionConfigs().catch((error) => {
+        log('error', '[PartitionedVectorDB] Debounced config save failed:', error);
+      });
     }
   }
 
@@ -1618,9 +1623,10 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       if (partition) {
         try {
           // Pass options down to the underlying ClusteredVectorDB's findNearest
+          // Omit absent keys so the callee keeps its own defaults.
           return partition.findNearest(queryVector, k, {
-            filter: options.filter,
-            metric: options.distanceMetric,
+            ...(options.filter !== undefined ? { filter: options.filter } : {}),
+            ...(options.distanceMetric !== undefined ? { metric: options.distanceMetric } : {}),
           });
         } catch (err) {
           log('error', `[PartitionedVectorDB] Error searching partition ${partitionId}:`, err);
@@ -1889,10 +1895,14 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       for (const community of communities) {
         // For each community, add edges between all nodes
         for (let i = 0; i < community.length; i++) {
-          const nodeId1 = getGlobalId(partitionId, community[i].id);
+          const first = community[i];
+          if (!first) continue;
+          const nodeId1 = getGlobalId(partitionId, first.id);
 
           for (let j = i + 1; j < community.length; j++) {
-            const nodeId2 = getGlobalId(partitionId, community[j].id);
+            const second = community[j];
+            if (!second) continue;
+            const nodeId2 = getGlobalId(partitionId, second.id);
 
             // Add bidirectional connections
             crossPartitionGraph.get(nodeId1)?.add(nodeId2);
@@ -1932,8 +1942,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           // Recover the original (partitionId, id) pair — never re-parse the
           // composite string, which would coerce numeric ids to strings.
           const entry = idRegistry.get(nodeGlobalId);
-          const partId = entry ? entry.partitionId : nodeGlobalId.split(':')[0];
-          const localId = entry ? entry.id : nodeGlobalId.split(':').slice(1).join(':');
+          const [head, ...rest] = nodeGlobalId.split(':');
+          const partId = entry ? entry.partitionId : (head ?? nodeGlobalId);
+          const localId = entry ? entry.id : rest.join(':');
 
           // Find metadata if requested
           let metadata: Record<string, any> | null = null;
@@ -1948,7 +1959,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           community.push({
             id: localId,
             partitionId: partId,
-            metadata: metadata || undefined,
+            ...(metadata ? { metadata } : {}),
           });
 
           // Visit neighbors
@@ -2024,17 +2035,16 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
         // Transform the results to include partition IDs and optionally metadata
         for (const rel of partitionRelationships) {
-          const relationship = {
-            vector1: {
-              id: rel.vector1,
-              partitionId,
-              metadata: undefined as Record<string, any> | undefined,
-            },
-            vector2: {
-              id: rel.vector2,
-              partitionId,
-              metadata: undefined as Record<string, any> | undefined,
-            },
+          // Start without ; it is attached below only when present.
+          // Seeding the field with `undefined as ...` made the object a
+          // different shape than the declared optional one.
+          const relationship: {
+            vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+            vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+            distance: number;
+          } = {
+            vector1: { id: rel.vector1, partitionId },
+            vector2: { id: rel.vector2, partitionId },
             distance: rel.distance,
           };
 

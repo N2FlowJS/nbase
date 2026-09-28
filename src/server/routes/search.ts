@@ -207,7 +207,7 @@ export function searchRoutes(context: ApiContext) {
       // Provide detailed error response
       res.status(500).json({
         error: (error as Error).message,
-        stack: process.env.NODE_ENV === 'development' ? (error as Error).stack : undefined,
+        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
         duration,
       });
       return;
@@ -316,7 +316,7 @@ export function searchRoutes(context: ApiContext) {
 
       res.status(500).json({
         error: (error as Error).message,
-        stack: process.env.NODE_ENV === 'development' ? (error as Error).stack : undefined,
+        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
         duration,
       });
     }
@@ -410,7 +410,7 @@ export function searchRoutes(context: ApiContext) {
 
       res.status(500).json({
         error: (error as Error).message,
-        stack: process.env.NODE_ENV === 'development' ? (error as Error).stack : undefined,
+        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
         duration,
       });
     }
@@ -506,7 +506,7 @@ export function searchRoutes(context: ApiContext) {
 
       res.status(500).json({
         error: (error as Error).message,
-        stack: process.env.NODE_ENV === 'development' ? (error as Error).stack : undefined,
+        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
         duration,
       });
     }

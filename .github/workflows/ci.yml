@@ -25,7 +25,7 @@ jobs:
       matrix:
         # Matches `engines.node` (>=20.11.0); lru-cache@11 and rimraf@6
         # require Node 20+, so the previous ">=14" claim was never true.
-        node: ['20', '22']
+        node: ['20', '22', '24']
 
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +40,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Typecheck covers src + test with the full strict set
+      # (noUncheckedIndexedAccess, exactOptionalPropertyTypes, ...).
       - name: Typecheck
         run: npm run typecheck
 

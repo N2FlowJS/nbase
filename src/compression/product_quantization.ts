@@ -180,7 +180,9 @@ export class ProductQuantization {
     }
 
     // Determine vector dimension from training data
-    const vectorDim = vectors[0].length;
+    const firstVector = vectors[0];
+    if (!firstVector) throw new Error('ProductQuantization.train: no training vectors supplied');
+    const vectorDim = firstVector.length;
 
     // If dimension parameter is specified, we're training a dimension-specific model
     if (dimension !== undefined && this.dynamicDimensions) {
@@ -477,7 +479,7 @@ export class ProductQuantization {
       // For each centroid in this subquantizer
       for (let i = 0; i < this.numClusters; i++) {
         // Get centroid vector
-        const centroid = modelCentroids[m][i];
+        const centroid = modelCentroids[m]?.[i];
 
         // Skip if centroid doesn't exist (can happen if numClusters > training data)
         if (!centroid) continue;
@@ -485,8 +487,9 @@ export class ProductQuantization {
         // Compute squared distance
         let dist = 0;
         for (let j = 0; j < length; j++) {
-          const qval = typeof query[start + j] === 'number' ? query[start + j] : 0;
-          const cval = j < centroid.length ? centroid[j] : 0;
+          const raw = query[start + j];
+          const qval = typeof raw === 'number' ? raw : 0;
+          const cval = j < centroid.length ? (centroid[j] ?? 0) : 0;
           const diff = qval - cval;
           dist += diff * diff;
         }
@@ -520,7 +523,11 @@ export class ProductQuantization {
 
     for (let m = 0; m < numSubquantizers; m++) {
       const centroidIndex = code[m];
-      dist += tables[m][centroidIndex];
+      const table = tables[m];
+      // A code can reference a centroid that was never trained (e.g. an
+      // out-of-range index from malformed input); treat it as zero distance
+      // rather than reading `undefined` and producing NaN.
+      dist += (centroidIndex === undefined ? 0 : table?.[centroidIndex]) ?? 0;
     }
 
     return dist;
@@ -587,7 +594,7 @@ export class ProductQuantization {
       let bestIndex = 0;
 
       for (let i = 0; i < this.numClusters; i++) {
-        const centroid = modelCentroids[m][i];
+        const centroid = modelCentroids[m]?.[i];
         // Skip if centroid doesn't exist
         if (!centroid) continue;
 
@@ -595,8 +602,9 @@ export class ProductQuantization {
         let dist = 0;
         for (let j = 0; j < end - start; j++) {
           if (start + j >= vectorDim) break;
-          const vval = typeof vector[start + j] === 'number' ? vector[start + j] : 0;
-          const cval = j < centroid.length ? centroid[j] : 0;
+          const raw = vector[start + j];
+          const vval = typeof raw === 'number' ? raw : 0;
+          const cval = j < centroid.length ? (centroid[j] ?? 0) : 0;
           const diff = vval - cval;
           dist += diff * diff;
         }

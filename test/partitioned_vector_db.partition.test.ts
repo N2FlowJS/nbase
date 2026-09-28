@@ -52,13 +52,13 @@ describe("PartitionedVectorDB - Partition Management", () => {
     const configs = db.getPartitionConfigs();
 
     expect(configs.length).to.equal(2);
-    expect(configs[0].id).to.include("p-");
-    expect(configs[0].name).to.equal("Initial Partition");
-    expect(configs[0].active).to.be.false;
+    expect(configs[0]!.id).to.include("p-");
+    expect(configs[0]!.name).to.equal("Initial Partition");
+    expect(configs[0]!.active).to.be.false;
 
-    expect(configs[1].id).to.equal("test-partition");
-    expect(configs[1].name).to.equal("Test Partition");
-    expect(configs[1].active).to.be.true;
+    expect(configs[1]!.id).to.equal("test-partition");
+    expect(configs[1]!.name).to.equal("Test Partition");
+    expect(configs[1]!.active).to.be.true;
 
     const activePartition = await db.getActivePartition();
     expect(activePartition).to.be.an.instanceOf(ClusteredVectorDB);

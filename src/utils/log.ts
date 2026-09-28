@@ -6,8 +6,8 @@ import * as path from 'node:path';
  */
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
-const LOG_DIR = process.env.NBASE_LOG_DIR
-  ? path.resolve(process.env.NBASE_LOG_DIR)
+const LOG_DIR = process.env['NBASE_LOG_DIR']
+  ? path.resolve(process.env['NBASE_LOG_DIR'])
   : path.resolve(__dirname, '../../logs');
 const MAX_LINES = 1000;
 
@@ -18,7 +18,7 @@ const MAX_LINES = 1000;
  * made the file-writing branch unreachable, so the rotation machinery below
  * (and the stream lifecycle) was dead code.
  */
-const logToFile = process.env.NBASE_LOG_TO_FILE === 'true';
+const logToFile = process.env['NBASE_LOG_TO_FILE'] === 'true';
 
 // Color codes for console output
 const colors = {

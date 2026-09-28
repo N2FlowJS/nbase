@@ -166,9 +166,16 @@ export function vectorRoutes(context: ApiContext) {
    */
   router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
     const timer = createTimer();    // Thêm async
-    const idParam = req.params.id;
-    const includeVector = req.query.includeVector === 'true';
-    const includeMetadata = req.query.includeMetadata !== 'false';
+    const idParam = req.params['id'];
+    if (typeof idParam !== 'string' || idParam.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Vector id is required',
+      });
+      return;
+    }
+    const includeVector = req.query['includeVector'] === 'true';
+    const includeMetadata = req.query['includeMetadata'] !== 'false';
 
     timer.start('get_vector');
 
@@ -231,8 +238,8 @@ export function vectorRoutes(context: ApiContext) {
 
       if (metadataInfo?.metadata) {
         // Lấy dimension từ metadata nếu chưa có từ vector
-        if (dimension === null && metadataInfo.metadata.dimension !== undefined) {
-          response.dimension = metadataInfo.metadata.dimension;
+        if (dimension === null && metadataInfo.metadata['dimension'] !== undefined) {
+          response.dimension = metadataInfo.metadata['dimension'];
         }
         if (includeMetadata) {
           response.metadata = metadataInfo.metadata;
@@ -263,7 +270,14 @@ export function vectorRoutes(context: ApiContext) {
    */
   router.get('/:id/exists', asyncHandler(async (req: Request, res: Response) => {
     const timer = createTimer();    // Thêm async
-    const idParam = req.params.id;
+    const idParam = req.params['id'];
+    if (typeof idParam !== 'string' || idParam.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Vector id is required',
+      });
+      return;
+    }
     timer.start('check_vector_exists');
 
     try {
@@ -291,8 +305,8 @@ export function vectorRoutes(context: ApiContext) {
         } else {
           // Nếu không có vector, thử lấy từ metadata
           const metadataInfo = await database.getMetadata(foundId);
-          if (metadataInfo?.metadata?.dimension !== undefined) {
-            dimension = metadataInfo.metadata.dimension;
+          if (metadataInfo?.metadata?.['dimension'] !== undefined) {
+            dimension = metadataInfo.metadata['dimension'];
           }
         }
       }
@@ -325,7 +339,14 @@ export function vectorRoutes(context: ApiContext) {
    */
   router.patch('/:id/metadata', asyncHandler(async (req: Request, res: Response) => {
     const timer = createTimer();    // Thêm async
-    const idParam = req.params.id;
+    const idParam = req.params['id'];
+    if (typeof idParam !== 'string' || idParam.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Vector id is required',
+      });
+      return;
+    }
     const { metadata, operation = 'merge' } = req.body as UpdateMetadataRequest;
 
     if (!metadata || typeof metadata !== 'object') {
@@ -372,7 +393,7 @@ export function vectorRoutes(context: ApiContext) {
         dimension = vectorInfo.vector.length;
       } else {
         const metadataInfo = await database.getMetadata(foundId);
-        dimension = metadataInfo?.metadata?.dimension ?? null;
+        dimension = metadataInfo?.metadata?.['dimension'] ?? null;
       }
 
       let success = false;
@@ -388,7 +409,7 @@ export function vectorRoutes(context: ApiContext) {
           const merged = { ...base, ...metadata };
           // Đảm bảo dimension được giữ lại hoặc thêm vào
           if (dimension !== null) {
-            merged.dimension = dimension;
+            merged['dimension'] = dimension;
           }
           return merged;
         });
@@ -433,7 +454,14 @@ export function vectorRoutes(context: ApiContext) {
    */
   router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
     const timer = createTimer();    // Thêm async
-    const idParam = req.params.id;
+    const idParam = req.params['id'];
+    if (typeof idParam !== 'string' || idParam.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Vector id is required',
+      });
+      return;
+    }
 
     timer.start('delete_vector');
 
@@ -492,12 +520,19 @@ export function vectorRoutes(context: ApiContext) {
    */
   router.get('/:id/similar', asyncHandler(async (req: Request, res: Response) => {
     const timer = createTimer();    // Thêm async
-    const idParam = req.params.id;
-    const k = parseInt((req.query.k as string) || '10', 10);
-    const includeMetadata = req.query.includeMetadata !== 'false';
+    const idParam = req.params['id'];
+    if (typeof idParam !== 'string' || idParam.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Vector id is required',
+      });
+      return;
+    }
+    const k = parseInt((req.query['k'] as string) || '10', 10);
+    const includeMetadata = req.query['includeMetadata'] !== 'false';
     // UnifiedSearch sẽ quyết định includeVectors dựa trên tùy chọn, không cần query param riêng?
     // Hoặc ta có thể thêm nó vào UnifiedSearchOptions
-    const includeVectors = req.query.includeVectors === 'true';
+    const includeVectors = req.query['includeVectors'] === 'true';
     // UnifiedSearch không có tùy chọn 'exactDimensions', nó sẽ tìm kiếm trên các partition phù hợp
     // const exactDimensions = req.query.exactDimensions === "true"; // Bỏ tùy chọn này
 
@@ -558,8 +593,8 @@ export function vectorRoutes(context: ApiContext) {
       for (const result of topResults) {
         if (result.vector && result.dimension === undefined) {
           result.dimension = result.vector.length;
-        } else if (!result.vector && result.metadata?.dimension !== undefined && result.dimension === undefined) {
-          result.dimension = result.metadata.dimension;
+        } else if (!result.vector && result.metadata?.['dimension'] !== undefined && result.dimension === undefined) {
+          result.dimension = result.metadata['dimension'];
         }
       }
 

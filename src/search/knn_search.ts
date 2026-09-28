@@ -61,6 +61,9 @@ export class KNNEngineSearch {
     };
 
     // Merge defaults with options
+    // Defaults are known-complete, so the merge is a `Required<...>` by
+    // construction; only the caller's extra keys are unknown at this point.
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
     this.options = {
       ...defaults,
       ...Object.fromEntries(

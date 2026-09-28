@@ -16,7 +16,7 @@ import path from 'node:path';
 
 import { ClusteredVectorDB } from '../src/vector/clustered_vector_db';
 import HNSW from '../src/ann/hnsw';
-import type { VectorProvider } from '../src/types';
+import type { VectorProvider, VectorStoreSearchOptions } from '../src/types';
 
 const DIM = 4;
 const COUNT = 200;
@@ -73,24 +73,25 @@ describe('HNSW filtering', () => {
 
   it('applies a metadata filter instead of returning nothing', () => {
     const results = hnsw.findNearest(makeVector(0), 20, {
-      filter: (_id, metadata) => metadata?.parity === 'even',
+      filter: (_id, metadata) => metadata?.['parity'] === 'even',
     });
     expect(results.length, 'metadata filter must not reject every node').to.be.greaterThan(0);
   });
 
   it('only returns ids the filter accepts', () => {
-    const results = hnsw.findNearest(makeVector(3), 30, {
-      filter: (_id, metadata) => metadata?.parity === 'even',
-    });
+    const searchOptions: VectorStoreSearchOptions = {
+      filter: (_id, metadata) => metadata?.['parity'] === 'even',
+    };
+    const results = hnsw.findNearest(makeVector(3), 30, searchOptions);
     for (const r of results) {
       expect(Number(r.id) % 2, `id ${r.id} should be even`).to.equal(0);
     }
   });
 
   it('does not mutate the caller-supplied options object', () => {
-    const original = (_id: number | string, _m?: Record<string, any>) => true;
+    const original = (_id: number | string, _m?: Record<string, any> | null) => true;
     const options = { k: 5, filter: original };
-    hnsw.findNearest(makeVector(0), 5, options);
+    hnsw.findNearest(makeVector(0), 5, options as VectorStoreSearchOptions);
     expect(options.filter).to.equal(original);
   });
 
@@ -101,7 +102,7 @@ describe('HNSW filtering', () => {
     }
 
     const results = hnsw.findNearest(makeVector(0), 40, {
-      filter: (_id, metadata) => metadata?.parity !== undefined,
+      filter: (_id, metadata) => metadata?.['parity'] !== undefined,
     });
 
     for (const r of results) {

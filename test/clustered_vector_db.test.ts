@@ -157,19 +157,19 @@ describe("ClusteredVectorDB", () => {
       // Add a vector and capture the initial centroid
       db.addVector(1, createTestVector([1, 2, 3, 4]));
       const initialClusters = db.getClusterInfo();
-      const initialCentroid = Array.from(initialClusters[0].centroid);
+      const initialCentroid = Array.from(initialClusters[0]!.centroid);
 
       // Add a second vector that's very similar to ensure it goes in the same cluster
       db.addVector(2, createTestVector([1.1, 2.1, 3.1, 4.1]));
       const updatedClusters = db.getClusterInfo();
-      const updatedCentroid = Array.from(updatedClusters[0].centroid);
+      const updatedCentroid = Array.from(updatedClusters[0]!.centroid);
 
       // Verify clusters are functioning correctly
       expect(updatedClusters.length).to.equal(
         1,
         "Should have exactly one cluster"
       );
-      expect(updatedClusters[0].size).to.equal(
+      expect(updatedClusters[0]!.size).to.equal(
         2,
         "Cluster should contain both vectors"
       );
@@ -180,7 +180,7 @@ describe("ClusteredVectorDB", () => {
       // Verify centroid calculation: (vector1 + vector2) / 2
       const expectedCentroid = [1.05, 2.05, 3.05, 4.05]; // Average of [1,2,3,4] and [1.1,2.1,3.1,4.1]
       updatedCentroid.forEach((value, i) => {
-        expect(value).to.be.closeTo(expectedCentroid[i], 0.001);
+        expect(value).to.be.closeTo(expectedCentroid[i]!, 0.001);
       });
     });
   });
@@ -335,8 +335,8 @@ describe("ClusteredVectorDB", () => {
       // A more robust test might check the distribution of points if k is achieved.
       if (finalClusters.length === 2 && finalStats.clusters?.distribution) {
         // Check if vectors are roughly assigned correctly (this is probabilistic)
-        const cluster1Info = finalStats.clusters.distribution.find(c => c.id === finalClusters[0].id);
-        const cluster2Info = finalStats.clusters.distribution.find(c => c.id === finalClusters[1].id);
+        const cluster1Info = finalStats.clusters.distribution.find(c => c.id === finalClusters[0]!.id);
+        const cluster2Info = finalStats.clusters.distribution.find(c => c.id === finalClusters[1]!.id);
 
         const cluster1Members = new Set(cluster1Info?.members?.map(m => m.id) ?? []);
         const cluster2Members = new Set(cluster2Info?.members?.map(m => m.id) ?? []);

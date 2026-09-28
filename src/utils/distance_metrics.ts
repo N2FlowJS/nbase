@@ -1,3 +1,12 @@
+/**
+ * Distance kernels.
+ *
+ * Every loop below is bounded by `len = min(a.length, b.length)`, so an
+ * in-bounds index is always defined. The `?? 0` fallbacks are therefore
+ * unreachable; they are present because `noUncheckedIndexedAccess` widens
+ * `number[]` element reads to `number | undefined`, and `Vector` is a union of
+ * `Float32Array | number[]`.
+ */
 import { Vector } from '../types';
 
 /**
@@ -22,7 +31,7 @@ export function manhattan(a: Vector, b: Vector): number {
   let i = 0;
 
   for (; i < len; i++) {
-    const d = a[i] - b[i];
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
     sum += (d < 0 ? -d : d);
   }
 
@@ -43,7 +52,7 @@ export function cosine(a: Vector, b: Vector): number {
   let i = 0;
 
   for (; i < len; i++) {
-    const ai = a[i], bi = b[i];
+    const ai = a[i] ?? 0, bi = b[i] ?? 0;
     dotProductVal += ai * bi;
     normA += ai * ai;
     normB += bi * bi;
@@ -70,7 +79,7 @@ export function dotProduct(a: Vector, b: Vector): number {
   let i = 0;
 
   for (; i < len; i++) {
-    sum += a[i] * b[i];
+    sum += (a[i] ?? 0) * (b[i] ?? 0);
   }
 
   return sum;
@@ -98,7 +107,7 @@ export function chebyshev(a: Vector, b: Vector): number {
   const len = Math.min(a.length, b.length);
 
   for (let i = 0; i < len; i++) {
-    const diff = Math.abs(a[i] - b[i]);
+    const diff = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
     if (diff > max) max = diff;
   }
 
@@ -118,7 +127,7 @@ export function squaredEuclidean(a: Vector, b: Vector): number {
   let i = 0;
 
   for (; i < len; i++) {
-    const diff = a[i] - b[i];
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
     sum += diff * diff;
   }
 
