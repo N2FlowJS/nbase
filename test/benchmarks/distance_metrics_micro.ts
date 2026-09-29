@@ -2,8 +2,10 @@ import { euclidean, squaredEuclidean, dotProduct, cosine } from '../../src/utils
 
 function naiveSquaredEuclidean(a: number[] | Float32Array, b: number[] | Float32Array): number {
   let sum = 0;
+  // `?? 0` is unreachable: i < a.length and the callers pass equal-length
+  // vectors. Required by noUncheckedIndexedAccess for the number[] branch.
   for (let i = 0; i < a.length; i++) {
-    const diff = a[i] - b[i];
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
     sum += diff * diff;
   }
   return sum;
@@ -11,8 +13,9 @@ function naiveSquaredEuclidean(a: number[] | Float32Array, b: number[] | Float32
 
 function naiveDotProduct(a: number[] | Float32Array, b: number[] | Float32Array): number {
   let sum = 0;
+  // See the note above on the `?? 0` fallbacks.
   for (let i = 0; i < a.length; i++) {
-    sum += a[i] * b[i];
+    sum += (a[i] ?? 0) * (b[i] ?? 0);
   }
   return sum;
 }

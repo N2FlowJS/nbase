@@ -70,6 +70,13 @@ function startTimer(label: string): void {
 function endTimer(label: string): number {
   console.timeEnd(label);
   const startTime = benchmarkTimes[label];
+  if (startTime === undefined) {
+    // endTimer without a matching startTimer. Reporting 0 is more useful than
+    // a NaN that would silently corrupt the generated report.
+    console.warn(`Timer '${label}' ended without a matching start; recording 0.`);
+    benchmarkResults[label] = 0;
+    return 0;
+  }
   const endTime = process.hrtime.bigint();
   const durationMs = Number(endTime - startTime) / 1000000;
   benchmarkResults[label] = durationMs;
@@ -218,16 +225,19 @@ async function generateMarkdownReport(
   const timestamp = new Date().toISOString();
 
   // Calculate average times
+  // A timing that was never recorded reads as 0, so the report cannot
+  // silently contain NaN from a missing key.
+  const timing = (label: string): number => results[label] ?? 0;
   const averageTimes: Record<string, number> = {
-    'DB Initialization': results['DB Initialization'] / 1, // One-time operation
-    'Total Bulk Add': results['Total Bulk Add'] / Math.ceil(NUM_VECTORS / BULK_ADD_CHUNK_SIZE), // Average per batch
-    'Standard FindNearest': results['Standard FindNearest'] / 1, // Single operation
-    'Total HNSW Build': results['Total HNSW Build'] / (stats.partitions.loadedCount || 1), // Average per partition
-    'HNSW FindNearest': results['HNSW FindNearest'] / 1, // Single operation
-    'DB Save': results['DB Save'] / 1, // One-time operation
-    'DB Close': results['DB Close'] / 1, // One-time operation
-    'DB Re-Load': results['DB Re-Load'] / 1, // One-time operation
-    'HNSW FindNearest After Re-Load': results['HNSW FindNearest After Re-Load'] / 1, // Single operation
+    'DB Initialization': timing('DB Initialization'), // One-time operation
+    'Total Bulk Add': timing('Total Bulk Add') / Math.ceil(NUM_VECTORS / BULK_ADD_CHUNK_SIZE), // Average per batch
+    'Standard FindNearest': timing('Standard FindNearest'), // Single operation
+    'Total HNSW Build': timing('Total HNSW Build') / (stats.partitions.loadedCount || 1), // Average per partition
+    'HNSW FindNearest': timing('HNSW FindNearest'), // Single operation
+    'DB Save': timing('DB Save'), // One-time operation
+    'DB Close': timing('DB Close'), // One-time operation
+    'DB Re-Load': timing('DB Re-Load'), // One-time operation
+    'HNSW FindNearest After Re-Load': timing('HNSW FindNearest After Re-Load'), // Single operation
   };
 
   let markdown = `# PartitionedVectorDB Benchmark Results - Suite 1 - v${version}\n\n`;
@@ -269,7 +279,11 @@ async function generateMarkdownReport(
     markdown += `| HNSW Search (After Reload) | ${hnswReloadTime.toFixed(2)} | ${reloadSpeedupFactor.toFixed(2)}x |\n`;
   }
 
-  markdown += `\n**Note**: ${speedupFactor > 1 ? 'HNSW search is faster' : 'Standard search is faster'} by a factor of ${Math.abs(speedupFactor - 1).toFixed(2)}x.\n`;
+  // Report the ratio itself. This previously printed `speedupFactor - 1`, the
+  // amount by which HNSW exceeded 1.0 rather than how many times faster it was,
+  // so a real 2.73x speedup was written up as "faster by a factor of 1.73x" in
+  // every generated report.
+  markdown += `\n**Note**: ${speedupFactor > 1 ? 'HNSW search is faster' : 'Standard search is faster'} by a factor of ${speedupFactor.toFixed(2)}x.\n`;
 
   markdown += `\n## Database Stats\n\n`;
   markdown += `- Total partitions: ${stats.partitions.totalConfigured}\n`;

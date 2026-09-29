@@ -13,6 +13,9 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
+  // Benchmarks are typechecked too. They used to be excluded, which let them
+  // fall behind the strictness settings and stop compiling under ts-node while
+  // `npm run typecheck` stayed green.
   "include": ["src/**/*", "test/**/*"],
-  "exclude": ["node_modules", "dist/**/*", "test/benchmarks/**/*"]
+  "exclude": ["node_modules", "dist/**/*", "test/benchmarks/benchmark_db_data/**"]
 }
