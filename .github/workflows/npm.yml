@@ -19,11 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # Least privilege: the token is only needed to mint the OIDC attestation
-    # that `npm publish --provenance` requires. Without `id-token: write` the
-    # publish step fails with EUSAGE ("Provenance generation in GitHub Actions
-    # requires \"write\" access to the \"id-token\" permission"). Scoped to this
-    # job only, so the CI job does not carry it.
+    # `id-token: write` is what makes GitHub expose the OIDC token endpoint, and
+    # that endpoint is what Trusted Publishing uses to mint a short-lived,
+    # workflow-scoped npm credential. It is also what `--provenance` needs for
+    # its attestation. Scoped to this job so the CI job does not carry it.
     permissions:
       contents: read
       id-token: write
@@ -126,21 +125,32 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # `id-token: write` (granted on this job) is required for provenance.
-      # Under OIDC this is the only credential in play; under the token path the
-      # secret is passed through.
+      # Under OIDC the credential is the short-lived token the npm CLI derives
+      # from this job's OIDC token, and nothing is passed in from a secret.
+      #
+      # The `NODE_AUTH_TOKEN` expression matters: this repo still holds a
+      # revoked classic token in NPM_TOKEN, and exporting it unconditionally
+      # risks the CLI preferring a dead token over working OIDC. So the secret
+      # is only surfaced when the preflight actually selected the token path.
       - name: Publish to npm
         if: env.skip_publish != 'true'
         run: npm publish --access public --provenance
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ env.auth_mode == 'token' && secrets.NPM_TOKEN || '' }}
 
       - name: Verify the published package
         if: env.skip_publish != 'true'
         run: |
           set -euo pipefail
-          sleep 10
-          npm view @n2flowjs/nbase@${{ steps.check_version.outputs.version || 'latest' }} version
+          echo "Published using: ${{ env.auth_mode }}"
+          # The registry is eventually consistent right after a publish.
+          for attempt in 1 2 3 4 5 6; do
+            if npm view "@n2flowjs/nbase@$(node -p "require('./package.json').version")" version; then
+              break
+            fi
+            echo "Attempt $attempt: version not visible yet, retrying..."
+            sleep 10
+          done
           # Consumers import `dist/index.js`; confirm it resolves from a clean install.
           mkdir -p /tmp/verify && cd /tmp/verify
           npm init -y > /dev/null
