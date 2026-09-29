@@ -1,9 +1,24 @@
 name: Publish to npm
 
+# Releases are cut from tags, not from every commit pushed to main.
+#
+# Previously this ran on every push to main and attempted a publish each time.
+# Until npm Trusted Publishing is configured for @n2flowjs/nbase that attempt
+# always failed, so every ordinary code push left a red X on the repo and hid
+# the fact that CI itself was green.
+#
+# To release: enable the trusted publisher on npm, then
+#     git tag v0.2.0 && git push origin v0.2.0
+# or trigger this workflow by hand from the Actions tab.
 on:
   push:
-    branches: [main]
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and verify the tarball without publishing'
+        type: boolean
+        default: false
 
 # Serialise publishes: two rapid pushes could both pass the "version exists?"
 # check and race, with one failing on EPUBLISHCONFLICT.
@@ -67,15 +82,22 @@ jobs:
       - name: Check if version exists on npm
         id: check_version
         run: |
-          set -e
+          set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          if npm show @n2flowjs/nbase@$VERSION > /dev/null 2>&1; then
-            echo "Version $VERSION already exists. Skipping publish."
-            echo "skip_publish=true" >> $GITHUB_ENV
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "@n2flowjs/nbase@$VERSION" version > /dev/null 2>&1; then
+            echo "::notice::Version $VERSION is already published; nothing to do."
+            echo "skip_publish=true" >> "$GITHUB_ENV"
           else
-            echo "Version $VERSION does not exist. Proceeding with publish."
+            echo "Version $VERSION is not on npm yet; proceeding."
           fi
-        shell: /usr/bin/bash -e {0}
+
+      # `dry_run` stops after the build and tarball checks, so the release
+      # pipeline can be exercised before any registry write is attempted.
+      - name: Dry run complete
+        if: inputs.dry_run == true
+        run: |
+          echo "::notice::Dry run: build, tests and tarball checks passed. No publish attempted."
 
       # Decide how to authenticate, and fail with an actionable message if
       # neither path is usable.
@@ -90,14 +112,20 @@ jobs:
       # it under OIDC — authentication only happens during the publish itself —
       # so the check is deliberately skipped when OIDC is in play.
       - name: Check npm authentication
-        if: env.skip_publish != 'true'
+        if: env.skip_publish != 'true' && inputs.dry_run != true
         run: |
           set -euo pipefail
 
           if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "OIDC is available; using Trusted Publishing."
-            echo "If this fails, confirm the trusted publisher is configured at"
-            echo "https://www.npmjs.com/org/n2flowjs with workflow 'Publish to npm' and file 'npm.yml'."
+            echo "If the publish step below fails with ENEEDAUTH, npm has no trusted"
+            echo "publisher registered for this package. Add one at"
+            echo "https://www.npmjs.com/org/n2flowjs -> Trusted Publisher, with:"
+            echo "  package:      @n2flowjs/nbase"
+            echo "  workflow:     $(basename "$GITHUB_WORKFLOW")"
+            echo "  filename:     $GITHUB_WORKFLOW_PATH"
+            echo "  action:       npm publish"
+            echo "Then re-run this workflow; no code change is needed."
             echo "auth_mode=oidc" >> "$GITHUB_ENV"
             exit 0
           fi
@@ -133,19 +161,19 @@ jobs:
       # risks the CLI preferring a dead token over working OIDC. So the secret
       # is only surfaced when the preflight actually selected the token path.
       - name: Publish to npm
-        if: env.skip_publish != 'true'
+        if: env.skip_publish != 'true' && inputs.dry_run != true
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ env.auth_mode == 'token' && secrets.NPM_TOKEN || '' }}
 
       - name: Verify the published package
-        if: env.skip_publish != 'true'
+        if: env.skip_publish != 'true' && inputs.dry_run != true
         run: |
           set -euo pipefail
           echo "Published using: ${{ env.auth_mode }}"
           # The registry is eventually consistent right after a publish.
           for attempt in 1 2 3 4 5 6; do
-            if npm view "@n2flowjs/nbase@$(node -p "require('./package.json').version")" version; then
+            if npm view "@n2flowjs/nbase@${{ steps.check_version.outputs.version }}" version; then
               break
             fi
             echo "Attempt $attempt: version not visible yet, retrying..."
