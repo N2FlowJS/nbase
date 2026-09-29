@@ -19,6 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # Least privilege: the token is only needed to mint the OIDC attestation
+    # that `npm publish --provenance` requires. Without `id-token: write` the
+    # publish step fails with EUSAGE ("Provenance generation in GitHub Actions
+    # requires \"write\" access to the \"id-token\" permission"). Scoped to this
+    # job only, so the CI job does not carry it.
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - uses: actions/checkout@v4
 
