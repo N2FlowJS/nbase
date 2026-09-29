@@ -39,14 +39,19 @@ jobs:
       - name: Verify the published tarball actually contains the entry points
         run: |
           set -euo pipefail
-          npm pack --dry-run > /tmp/pack.txt
+          # `npm pack --dry-run` writes its file listing to **stderr**, not
+          # stdout. Redirecting stdout alone yields an empty file and every
+          # check below fails on a perfectly good tarball.
+          npm pack --dry-run > /tmp/pack.txt 2>&1
+          test -s /tmp/pack.txt || { echo "npm pack produced no output"; exit 1; }
           grep -q 'dist/index.js' /tmp/pack.txt || { echo "dist/index.js missing from tarball"; exit 1; }
           grep -q 'dist/index.d.ts' /tmp/pack.txt || { echo "dist/index.d.ts missing from tarball"; exit 1; }
           # Guard against re-introducing the 71MB tarball (logs, tests, .env).
-          if grep -qE '\.env$|daemon/.*\.log$|npm notice [0-9.]+kB test/' /tmp/pack.txt; then
+          if grep -qE '\.env$|daemon/.*\.log$|kB test/' /tmp/pack.txt; then
             echo "Unexpected file in tarball:"; grep -E '\.env$|daemon/.*\.log$|kB test/' /tmp/pack.txt
             exit 1
           fi
+          echo "Tarball contents verified."
 
       - name: Test
         run: npm test
