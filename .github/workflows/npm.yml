@@ -78,31 +78,57 @@ jobs:
           fi
         shell: /usr/bin/bash -e {0}
 
-      # Fail before publishing if the token is missing or lacks write access.
-      # npm reports both cases as `404 ... is not in this registry`, which reads
-      # like a packaging problem and sends you looking in the wrong place.
-      - name: Check npm credentials
+      # Decide how to authenticate, and fail with an actionable message if
+      # neither path is usable.
+      #
+      # Preferred path is Trusted Publishing (OIDC): the npm CLI detects the
+      # OIDC environment and exchanges a short-lived, workflow-scoped token
+      # automatically, so there is no long-lived secret to rotate. It is
+      # selected when this job holds `id-token: write`, which is what makes
+      # GitHub expose the token endpoint.
+      #
+      # The token path is the fallback. Note that `npm whoami` cannot validate
+      # it under OIDC — authentication only happens during the publish itself —
+      # so the check is deliberately skipped when OIDC is in play.
+      - name: Check npm authentication
         if: env.skip_publish != 'true'
         run: |
           set -euo pipefail
+
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "OIDC is available; using Trusted Publishing."
+            echo "If this fails, confirm the trusted publisher is configured at"
+            echo "https://www.npmjs.com/org/n2flowjs with workflow 'Publish to npm' and file 'npm.yml'."
+            echo "auth_mode=oidc" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN secret is not set on this repository."
-            echo "Create an npm automation token at https://www.npmjs.com/settings access-tokens"
-            echo "and add it under Settings -> Secrets and variables -> Actions -> NPM_TOKEN."
-            echo "Alternatively configure Trusted Publishing (OIDC) to publish with no secret at all."
+            echo "::error::No usable npm authentication."
+            echo "This job has no OIDC endpoint and NPM_TOKEN is not set."
+            echo "Either enable 'id-token: write' and configure a trusted publisher at"
+            echo "https://www.npmjs.com/org/n2flowjs, or add a granular access token"
+            echo "(Read and write) under Settings -> Secrets and variables -> Actions."
             exit 1
           fi
-          # `npm whoami` is the cheapest way to prove the token works and can
-          # write, before the tarball is uploaded.
+
+          echo "Falling back to the NPM_TOKEN secret."
           if ! npm whoami; then
-            echo "::error::NPM_TOKEN is set but npm rejected it."
-            echo "Check that the token is an automation token and has publish access to @n2flowjs."
+            echo "::error::NPM_TOKEN is set but npm rejected it (401)."
+            echo "npm permanently revoked all classic tokens on 2025-12-09; this secret"
+            echo "predates that and can no longer authenticate. Create a Granular Access"
+            echo "Token at https://www.npmjs.com/settings/~/tokens with Read and write"
+            echo "scope (max 90 days, so it needs rotation), or switch to Trusted"
+            echo "Publishing to avoid a secret entirely."
             exit 1
           fi
+          echo "auth_mode=token" >> "$GITHUB_ENV"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # `id-token: write` (granted on this job) is required for provenance.
+      # Under OIDC this is the only credential in play; under the token path the
+      # secret is passed through.
       - name: Publish to npm
         if: env.skip_publish != 'true'
         run: npm publish --access public --provenance
