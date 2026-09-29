@@ -78,7 +78,31 @@ jobs:
           fi
         shell: /usr/bin/bash -e {0}
 
-      # `id-token: write` is required for npm provenance attestations.
+      # Fail before publishing if the token is missing or lacks write access.
+      # npm reports both cases as `404 ... is not in this registry`, which reads
+      # like a packaging problem and sends you looking in the wrong place.
+      - name: Check npm credentials
+        if: env.skip_publish != 'true'
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is not set on this repository."
+            echo "Create an npm automation token at https://www.npmjs.com/settings access-tokens"
+            echo "and add it under Settings -> Secrets and variables -> Actions -> NPM_TOKEN."
+            echo "Alternatively configure Trusted Publishing (OIDC) to publish with no secret at all."
+            exit 1
+          fi
+          # `npm whoami` is the cheapest way to prove the token works and can
+          # write, before the tarball is uploaded.
+          if ! npm whoami; then
+            echo "::error::NPM_TOKEN is set but npm rejected it."
+            echo "Check that the token is an automation token and has publish access to @n2flowjs."
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # `id-token: write` (granted on this job) is required for provenance.
       - name: Publish to npm
         if: env.skip_publish != 'true'
         run: npm publish --access public --provenance
