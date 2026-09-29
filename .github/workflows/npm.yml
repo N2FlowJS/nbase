@@ -99,72 +99,55 @@ jobs:
         run: |
           echo "::notice::Dry run: build, tests and tarball checks passed. No publish attempted."
 
-      # Decide how to authenticate, and fail with an actionable message if
-      # neither path is usable.
+      # Publishing uses npm Trusted Publishing (OIDC) only.
       #
-      # Preferred path is Trusted Publishing (OIDC): the npm CLI detects the
-      # OIDC environment and exchanges a short-lived, workflow-scoped token
-      # automatically, so there is no long-lived secret to rotate. It is
-      # selected when this job holds `id-token: write`, which is what makes
-      # GitHub expose the token endpoint.
+      # The npm CLI detects the OIDC environment this job provides and exchanges
+      # GitHub's short-lived, workflow-scoped token for an equally short-lived
+      # publish credential. Nothing is stored in this repository: there is no
+      # long-lived secret to rotate, leak, or revoke.
       #
-      # The token path is the fallback. Note that `npm whoami` cannot validate
-      # it under OIDC — authentication only happens during the publish itself —
-      # so the check is deliberately skipped when OIDC is in play.
+      # A previous revision kept a token fallback. It was unreachable — this job
+      # always holds `id-token: write`, so the OIDC branch was always selected
+      # and `NODE_AUTH_TOKEN` was never populated — and it left a dead classic
+      # token in the repository that npm revoked on 2025-12-09. Removing it also
+      # removes the temptation to keep rotating a secret that adds nothing.
+      #
+      # The only prerequisite is a trusted publisher on npm; the check below
+      # prints the exact fields needed when it is missing.
       - name: Check npm authentication
         if: env.skip_publish != 'true' && inputs.dry_run != true
         run: |
           set -euo pipefail
 
-          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            echo "OIDC is available; using Trusted Publishing."
-            echo "If the publish step below fails with ENEEDAUTH, npm has no trusted"
-            echo "publisher registered for this package. Add one at"
-            echo "https://www.npmjs.com/org/n2flowjs -> Trusted Publisher, with:"
-            echo "  package:      @n2flowjs/nbase"
-            echo "  workflow:     $(basename "$GITHUB_WORKFLOW")"
-            echo "  filename:     $GITHUB_WORKFLOW_PATH"
-            echo "  action:       npm publish"
-            echo "Then re-run this workflow; no code change is needed."
-            echo "auth_mode=oidc" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::No usable npm authentication."
-            echo "This job has no OIDC endpoint and NPM_TOKEN is not set."
-            echo "Either enable 'id-token: write' and configure a trusted publisher at"
-            echo "https://www.npmjs.com/org/n2flowjs, or add a granular access token"
-            echo "(Read and write) under Settings -> Secrets and variables -> Actions."
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::This job has no OIDC endpoint."
+            echo "'id-token: write' is not in effect, so Trusted Publishing cannot"
+            echo "authenticate. That permission is declared on this job; if you see"
+            echo "this, the workflow file was changed or the runner is not GitHub-hosted."
             exit 1
           fi
 
-          echo "Falling back to the NPM_TOKEN secret."
-          if ! npm whoami; then
-            echo "::error::NPM_TOKEN is set but npm rejected it (401)."
-            echo "npm permanently revoked all classic tokens on 2025-12-09; this secret"
-            echo "predates that and can no longer authenticate. Create a Granular Access"
-            echo "Token at https://www.npmjs.com/settings/~/tokens with Read and write"
-            echo "scope (max 90 days, so it needs rotation), or switch to Trusted"
-            echo "Publishing to avoid a secret entirely."
-            exit 1
-          fi
-          echo "auth_mode=token" >> "$GITHUB_ENV"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          echo "Using Trusted Publishing (OIDC); no npm token is stored in this repository."
+          echo
+          echo "  If the publish step below fails with ENEEDAUTH, npm has no trusted"
+          echo "  publisher registered for this package yet. Add one at"
+          echo "  https://www.npmjs.com/org/n2flowjs -> Trusted Publisher, with:"
+          echo "    package:   @n2flowjs/nbase"
+          echo "    workflow:  $(basename "$GITHUB_WORKFLOW")"
+          echo "    filename:  $GITHUB_WORKFLOW_PATH"
+          echo "    action:    npm publish"
+          echo
+          echo "  Then re-run this workflow. No code change is needed."
+          echo "auth_mode=oidc" >> "$GITHUB_ENV"
 
-      # Under OIDC the credential is the short-lived token the npm CLI derives
-      # from this job's OIDC token, and nothing is passed in from a secret.
-      #
-      # The `NODE_AUTH_TOKEN` expression matters: this repo still holds a
-      # revoked classic token in NPM_TOKEN, and exporting it unconditionally
-      # risks the CLI preferring a dead token over working OIDC. So the secret
-      # is only surfaced when the preflight actually selected the token path.
+      # No NODE_AUTH_TOKEN is set here on purpose. The npm CLI picks up the OIDC
+      # environment this job provides and mints its own short-lived credential;
+      # exporting a repository secret alongside it risks the CLI preferring the
+      # secret, and would reintroduce the long-lived token this workflow is
+      # built to avoid.
       - name: Publish to npm
         if: env.skip_publish != 'true' && inputs.dry_run != true
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ env.auth_mode == 'token' && secrets.NPM_TOKEN || '' }}
 
       - name: Verify the published package
         if: env.skip_publish != 'true' && inputs.dry_run != true
