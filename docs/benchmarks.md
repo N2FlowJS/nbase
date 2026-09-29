@@ -11,8 +11,10 @@ NBase provides comprehensive benchmarking tools to measure and optimize performa
 test/benchmarks/
 ├── partitioned_vector_db1.benchmark.ts    # Large-scale operations
 ├── partitioned_vector_db2.benchmark.ts    # Operation latency
-├── benchmark_results_suite1_v0.1.3.md     # Suite 1 results
-└── benchmark_results_suite2_v0.1.3.md     # Suite 2 results
+├── benchmark_results_suite1_v0.1.10.md    # Suite 1 results (latest)
+├── benchmark_results_suite2_v0.1.10.md    # Suite 2 results (latest)
+├── benchmark_results_suite1_v0.1.3.md     # Suite 1 results (older)
+└── benchmark_results_suite2_v0.1.3.md     # Suite 2 results (older)
 ```
 
 ### Benchmark Categories
@@ -78,7 +80,8 @@ const benchmarkOptions = {
 | **Post-Restore HNSW Search** | 8.62 | 116,030 queries/sec | 200MB | 30% |
 
 **Key Insights:**
-- HNSW provides 2.86x faster search after index building
+- HNSW provides 3.21x faster search after index building (4.23x once the
+  index has been reloaded from disk)
 - Post-restore performance improves by 2.05x due to optimized loading
 - Memory usage peaks during index building but stabilizes during search
 - Bulk operations show 95% CPU utilization during processing
