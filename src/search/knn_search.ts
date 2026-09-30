@@ -1,10 +1,10 @@
 // --- START OF FILE knn_search_partitioned.ts ---
 
-import { createTimer } from "../utils/profiling";
+import { createTimer } from '../utils/profiling';
 
-import { PartitionedVectorDB } from "../vector/partitioned_vector_db"; // Import Partitioned DB
-import { Vector, SearchResult, SearchOptions, DistanceMetric, KNNOptionsPartitioned, KNNStatsPartitioned } from "../types";
-import { LRUCache } from "lru-cache"; // Still using cache for results
+import { PartitionedVectorDB } from '../vector/partitioned_vector_db'; // Import Partitioned DB
+import { Vector, SearchResult, SearchOptions, DistanceMetric, KNNOptionsPartitioned, KNNStatsPartitioned } from '../types';
+import { LRUCache } from 'lru-cache'; // Still using cache for results
 
 /**
  * KNNEngineSearch using PartitionedVectorDB.
@@ -12,25 +12,25 @@ import { LRUCache } from "lru-cache"; // Still using cache for results
  */
 /**
  * A class that performs K-nearest neighbors (KNN) search operations using a partitioned vector database.
- * 
+ *
  * KNNEngineSearch provides an efficient way to find similar vectors in a high-dimensional space
  * by using a partitioned database architecture. It supports different distance metrics, result caching,
  * and maintains performance statistics.
- * 
+ *
  * Features:
  * - Works with partitioned vector databases for scalable search operations
  * - Caches search results to improve performance for repeated queries
  * - Maintains statistics for performance monitoring
  * - Supports various distance metrics (euclidean by default)
- * 
+ *
  * @example
  * ```typescript
  * const db = new PartitionedVectorDB(...);
  * const knnSearch = new KNNEngineSearch(db, { metric: 'cosine' });
- * 
+ *
  * // Perform a search
  * const results = await knnSearch.findNearest(queryVector, 10, { filter: myFilter });
- * 
+ *
  * // Get performance stats
  * const stats = knnSearch.getStats();
  * ```
@@ -50,13 +50,13 @@ export class KNNEngineSearch {
 
   constructor(
     db: PartitionedVectorDB, // Accept PartitionedVectorDB
-    options: KNNOptionsPartitioned = {}
+    options: KNNOptionsPartitioned = {},
   ) {
     this.db = db;
 
     // Simplified default values
     const defaults = {
-      metric: "euclidean" as DistanceMetric, // Default metric
+      metric: 'euclidean' as DistanceMetric, // Default metric
       cacheResults: true,
     };
 
@@ -66,9 +66,7 @@ export class KNNEngineSearch {
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
     this.options = {
       ...defaults,
-      ...Object.fromEntries(
-        Object.entries(options).filter(([_, v]) => v !== undefined)
-      ),
+      ...Object.fromEntries(Object.entries(options).filter(([_, v]) => v !== undefined)),
     } as Required<KNNOptionsPartitioned>;
 
     // No longer caching normalized vectors
@@ -105,14 +103,13 @@ export class KNNEngineSearch {
   async findNearest(
     query: Vector,
     k: number = 10,
-    options: SearchOptions = {} // Options passed down to DB (filter, etc.)
+    options: SearchOptions = {}, // Options passed down to DB (filter, etc.)
   ): Promise<SearchResult[]> {
     const timer = this.timer;
-    timer.start("knn_partitioned_search");
+    timer.start('knn_partitioned_search');
     this.stats.calls++;
 
-    const typedQuery =
-      query instanceof Float32Array ? query : new Float32Array(query);
+    const typedQuery = query instanceof Float32Array ? query : new Float32Array(query);
 
     // Check result cache
     if (this.options.cacheResults) {
@@ -120,10 +117,10 @@ export class KNNEngineSearch {
       const cachedResults = this.resultCache.get(cacheKey);
       if (cachedResults) {
         this.stats.cacheHits++;
-        const searchTime = timer.getElapsed("knn_partitioned_search");
+        const searchTime = timer.getElapsed('knn_partitioned_search');
         this.stats.lastSearchTime = searchTime;
         this.stats.totalTime += searchTime;
-        timer.stop("knn_partitioned_search"); // Stop timer here for cache hit
+        timer.stop('knn_partitioned_search'); // Stop timer here for cache hit
         return [...cachedResults]; // Return a copy
       }
       this.stats.cacheMisses++;
@@ -140,8 +137,8 @@ export class KNNEngineSearch {
         // Other options in SearchOptions can also be passed if PartitionedDB supports them
       });
     } catch (error) {
-      console.error("Error during PartitionedDB findNearest:", error);
-      timer.stop("knn_partitioned_search"); // Stop timer on error
+      console.error('Error during PartitionedDB findNearest:', error);
+      timer.stop('knn_partitioned_search'); // Stop timer on error
       // May throw error or return empty array depending on requirements
       throw error;
     }
@@ -152,10 +149,10 @@ export class KNNEngineSearch {
       this.resultCache.set(cacheKey, [...results]); // Store a copy
     }
 
-    const searchTime = timer.getElapsed("knn_partitioned_search");
+    const searchTime = timer.getElapsed('knn_partitioned_search');
     this.stats.lastSearchTime = searchTime;
     this.stats.totalTime += searchTime;
-    timer.stop("knn_partitioned_search");
+    timer.stop('knn_partitioned_search');
 
     return results;
   }
@@ -164,17 +161,11 @@ export class KNNEngineSearch {
    * Create cache key (keeping original logic)
    * @private
    */
-  private _getCacheKey(
-    query: Vector,
-    k: number,
-    options: SearchOptions
-  ): string {
+  private _getCacheKey(query: Vector, k: number, options: SearchOptions): string {
     const queryHash = Array.from(query)
       .map((v) => v.toFixed(4))
-      .join(",");
-    const filterInfo = options.filter
-      ? `filterHash:${options.filter.toString().length}`
-      : "noFilter"; // Simplified filter hash
+      .join(',');
+    const filterInfo = options.filter ? `filterHash:${options.filter.toString().length}` : 'noFilter'; // Simplified filter hash
     return `${queryHash}_k${k}_${this.options.metric}_${filterInfo}}`;
   }
 
@@ -185,8 +176,7 @@ export class KNNEngineSearch {
     return {
       calls: this.stats.calls,
       totalTime: this.stats.totalTime,
-      avgTime:
-        this.stats.calls > 0 ? this.stats.totalTime / this.stats.calls : 0,
+      avgTime: this.stats.calls > 0 ? this.stats.totalTime / this.stats.calls : 0,
       lastSearchTime: this.stats.lastSearchTime,
       cacheHits: this.stats.cacheHits,
       cacheMisses: this.stats.cacheMisses,
@@ -203,7 +193,7 @@ export class KNNEngineSearch {
     // this.normalizedCache.clear();
     // this.vectorNorms.clear();
     this.resultCache.clear();
-    console.log("KNN result cache cleared.");
+    console.log('KNN result cache cleared.');
   }
 
   /**
@@ -212,7 +202,7 @@ export class KNNEngineSearch {
   close(): void {
     // No more workers to terminate
     this.clearCache();
-    console.log("KNNPartitioned closed (caches cleared).");
+    console.log('KNNPartitioned closed (caches cleared).');
     // Note: Don't call db.close() here, PartitionedDB management is external.
   }
 }

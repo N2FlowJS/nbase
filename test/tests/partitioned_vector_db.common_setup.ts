@@ -1,11 +1,6 @@
-import { before, beforeEach, after, afterEach } from "mocha";
-import { PartitionedVectorDB } from "../../src/vector/partitioned_vector_db";
-import {
-  PARTITIONS_DIR,
-  setupTestDirectory,
-  cleanupPartitionsDir,
-  cleanupTestDirectory,
-} from "../test-helpers/vector-db-test-utils";
+import { before, beforeEach, after, afterEach } from 'mocha';
+import { PartitionedVectorDB } from '../../src/vector/partitioned_vector_db';
+import { PARTITIONS_DIR, setupTestDirectory, cleanupPartitionsDir, cleanupTestDirectory } from '../test-helpers/vector-db-test-utils';
 
 export const VECTOR_SIZE = 10;
 

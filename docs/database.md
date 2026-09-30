@@ -10,7 +10,7 @@ NBase implements a sophisticated multi-layered database architecture designed fo
 
 The `Database` class provides the primary user interface, offering:
 
-- **Unified API**: Single entry point for all operations
+- **Single API**: One entry point for all operations
 - **Resource Management**: Automatic lifecycle management
 - **Caching**: LRU cache for search results
 - **Monitoring**: Performance metrics and system monitoring
@@ -70,7 +70,7 @@ The `VectorDB` handles fundamental vector operations:
          │                       │                       │
          │                       │                       │
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   UnifiedSearch │────│  ClusteredDB     │────│   VectorDB      │
+│     Search      │────│  ClusteredDB     │────│   VectorDB      │
 │   (Algorithms)  │    │   (Clustering)   │    │   (Storage)     │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
 ```

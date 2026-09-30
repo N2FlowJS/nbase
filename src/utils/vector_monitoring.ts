@@ -253,7 +253,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
       }
       this.lastCpuInfo = currentCpuInfo; // Update last info for next interval
       this._addMetricHistory('cpu', cpuUsage);
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error collecting system metrics:', error);
       this.emit('error', {
         message: 'System metrics collection failed',
@@ -321,7 +321,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
     const cacheHitRate = snapshot.metrics.cache?.hitRate !== null ? `${(snapshot.metrics.cache.hitRate * 100).toFixed(1)}%` : 'N/A'; // Added cache
 
     console.log(
-      `[${snapshot.timestamp}] Monitor: ` + `CPU=${cpu} | Mem=${mem} | Load1m=${load} | QPM=${qpm} | ` + `AvgTime=${avgT}ms | P95=${p95}ms | Vectors=${vecCount} | CacheHit=${cacheHitRate}` // Added cache
+      `[${snapshot.timestamp}] Monitor: ` + `CPU=${cpu} | Mem=${mem} | Load1m=${load} | QPM=${qpm} | ` + `AvgTime=${avgT}ms | P95=${p95}ms | Vectors=${vecCount} | CacheHit=${cacheHitRate}`, // Added cache
     );
   }
 
@@ -343,7 +343,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
   }
 
   /** Records a completed search operation. */
-  recordSearch(data: { duration: number; method: string; results: number; cacheUsed: number }): void {
+  recordSearch(data: { duration: number; method: string; results?: number; cacheUsed?: number }): void {
     if (!this.options.enableSearchMetrics || !data) return;
 
     const { duration, method } = data;
@@ -384,7 +384,7 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
   }
 
   /** Records a generic event. */
-  recordEvent(eventType: string, data: any): void {
+  recordEvent(eventType: string, data: unknown): void {
     const event: MonitorEvent = {
       type: eventType,
       timestamp: Date.now(),
@@ -394,20 +394,22 @@ export class VectorDBMonitor extends (EventEmitter as new () => TypedEventEmitte
     if (this.options.logToConsole) {
       console.log(
         `[${new Date(event.timestamp).toISOString()}] Monitor Event: ${eventType}`,
-        JSON.stringify(data) // Stringify data for cleaner logging potentially
+        JSON.stringify(data), // Stringify data for cleaner logging potentially
       );
     }
   }
 
   /** Records an error event. */
-  recordError(context: string, error: Error | unknown, extraData?: any): void {
+  recordError(context: string, error: Error | unknown, extraData?: unknown): void {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`[${new Date().toISOString()}] Monitor Error [${context}]: ${errorMessage}`, extraData ?? '');
     this.emit('error', {
       message: errorMessage,
       error: error instanceof Error ? error : undefined,
       context: context,
-      ...extraData, // Include extra data if provided
+      // Only an object can be spread into the payload; a primitive
+      // `extraData` used to be spread character by character.
+      ...(typeof extraData === 'object' && extraData !== null ? extraData : {}),
     });
   }
 

@@ -9,10 +9,7 @@ const svc = new Service({
   name,
   description,
   script: path.resolve(script), // Use absolute path
-  nodeOptions: [
-    '--harmony',
-    '--max_old_space_size=4096'
-  ]
+  nodeOptions: ['--harmony', '--max_old_space_size=4096'],
   //, workingDirectory: '...' // Optional: Set the working directory if needed
 });
 
@@ -45,7 +42,7 @@ svc.on('stop', () => {
   console.log(`${name} stopped.`);
 });
 
-svc.on('error', (err: any) => {
+svc.on('error', (err: Error) => {
   console.error(`${name} error: `, err);
 });
 

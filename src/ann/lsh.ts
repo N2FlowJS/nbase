@@ -1,14 +1,8 @@
-import { promises as fs } from "fs";
-import config from "../config";
-import {
-  BuildIndexOptions,
-  LoadIndexOptions,
-  LSHOptions,
-  SearchResult,
-  Vector,
-} from "../types";
-import { ClusteredVectorDB } from "../vector/clustered_vector_db";
-import { log } from "../utils/log";
+import { promises as fs } from 'fs';
+import config from '../config';
+import { BuildIndexOptions, LoadIndexOptions, LSHOptions, SearchResult, Vector } from '../types';
+import { ClusteredVectorDB } from '../vector/clustered_vector_db';
+import { log } from '../utils/log';
 
 /**
  * Locality-Sensitive Hashing (LSH) implementation
@@ -18,41 +12,41 @@ import { log } from "../utils/log";
  */
 /**
  * Locality-Sensitive Hashing (LSH) implementation for approximate nearest neighbor search.
- * 
+ *
  * LSH accelerates vector similarity search by hashing similar vectors into the same buckets.
  * This implementation uses random hyperplanes to partition the vector space, supporting:
  * - Multi-dimensional vectors (vectors of different sizes)
  * - Multi-probing to increase recall
  * - Automatic index building
  * - Serialization for persistence
- * 
+ *
  * @example
  * ```typescript
  * // Create a new LSH index
  * const lsh = new LSH(vectorDB, {
  *   dimensions: 1536,
- *   numberOfHashes: 8, 
+ *   numberOfHashes: 8,
  *   numberOfBuckets: 150
  * });
- * 
+ *
  * // Build the index
  * await lsh.buildIndex({
  *   progressCallback: (progress) => console.log(`Indexing: ${progress * 100}%`)
  * });
- * 
+ *
  * // Query for nearest neighbors
  * const results = lsh.findNearest(queryVector, 10);
  * ```
- * 
+ *
  * @remarks
  * The implementation uses random hyperplane hashing, where vectors are assigned to buckets
  * based on which side of random hyperplanes they fall. Vectors that are close to each other
  * in the original space have a higher probability of being assigned to the same bucket.
- * 
+ *
  * For improved recall, consider using multi-probing which checks neighboring buckets.
  * For higher precision, increase the number of hash functions (numberOfHashes).
  * For better performance but potentially lower recall, increase numberOfBuckets.
- * 
+ *
  * @see {@link BuildIndexOptions} for index building options
  * @see {@link LSHOptions} for constructor options
  */
@@ -73,15 +67,10 @@ class LSH {
     this.db = db;
 
     // Set default parameters
-    this.defaultDimensions =
-      options.dimensions ||
-      this.db.vectorSize() ||
-      config.defaults.vectorSize ||
-      1024;
+    this.defaultDimensions = options.dimensions || this.db.vectorSize() || config.defaults.vectorSize || 1024;
     this.numberOfHashes = options.numberOfHashes || 10;
     this.numberOfBuckets = options.numberOfBuckets || 100;
-    this.allowMismatchedDimensions =
-      options.allowMismatchedDimensions !== false;
+    this.allowMismatchedDimensions = options.allowMismatchedDimensions !== false;
 
     // Initialize data structures for multi-dimensional support
     this.hashFunctions = new Map<number, Float32Array[][]>();
@@ -250,7 +239,7 @@ class LSH {
     const totalVectors = ids.length;
 
     if (totalVectors === 0) {
-      console.log("No vectors to index");
+      console.log('No vectors to index');
       return;
     }
 
@@ -301,7 +290,7 @@ class LSH {
     if (useDimensionGroups) {
       for (const [dimension, idSet] of this.dimensionGroups.entries()) {
         const idsInDimension = Array.from(idSet);
-        log('info' , `dimension: ${dimension} in ids`)
+        log('info', `dimension: ${dimension} in ids`);
 
         for (let i = 0; i < idsInDimension.length; i++) {
           const id = idsInDimension[i];
@@ -349,11 +338,7 @@ class LSH {
    * @param options - Query options
    * @returns Array of candidate IDs
    */
-  query(
-    vector: Vector,
-    multiProbe: number = 0,
-    options: { exactDimensions?: boolean } = {}
-  ): (number | string)[] {
+  query(vector: Vector, multiProbe: number = 0, options: { exactDimensions?: boolean } = {}): (number | string)[] {
     const { dimension, hashes } = this._hashVector(vector);
     const exactDimensions = options.exactDimensions || false;
     const candidateIds = new Set<number | string>();
@@ -384,23 +369,16 @@ class LSH {
         if (multiProbe > 0) {
           for (let j = 1; j <= multiProbe; j++) {
             const probeBucket1 = (hash + j) % this.numberOfBuckets;
-            const probeBucket2 =
-              (hash - j + this.numberOfBuckets) % this.numberOfBuckets;
+            const probeBucket2 = (hash - j + this.numberOfBuckets) % this.numberOfBuckets;
 
             if (bucket.has(probeBucket1)) {
-              for (const id of bucket.get(probeBucket1) as (
-                | number
-                | string
-              )[]) {
+              for (const id of bucket.get(probeBucket1) as (number | string)[]) {
                 candidateIds.add(id);
               }
             }
 
             if (bucket.has(probeBucket2)) {
-              for (const id of bucket.get(probeBucket2) as (
-                | number
-                | string
-              )[]) {
+              for (const id of bucket.get(probeBucket2) as (number | string)[]) {
                 candidateIds.add(id);
               }
             }
@@ -409,9 +387,7 @@ class LSH {
       }
     } else {
       // Query all dimensions or matching dimension based on allowMismatchedDimensions
-      const dimensionsToQuery = this.allowMismatchedDimensions
-        ? Array.from(this.buckets.keys())
-        : [dimension];
+      const dimensionsToQuery = this.allowMismatchedDimensions ? Array.from(this.buckets.keys()) : [dimension];
 
       for (const dim of dimensionsToQuery) {
         // If no buckets for this dimension, skip
@@ -421,11 +397,7 @@ class LSH {
 
         // Use the hash of the query vector for the default dimension
         // This is a simplification - ideally we'd recompute hashes for each dimension
-        for (
-          let i = 0;
-          i < Math.min(hashes.length, dimensionBuckets.length);
-          i++
-        ) {
+        for (let i = 0; i < Math.min(hashes.length, dimensionBuckets.length); i++) {
           // Adapt hash to the current dimension's bucket count
           const rawHash = hashes[i];
           if (rawHash === undefined) continue;
@@ -445,23 +417,16 @@ class LSH {
           if (multiProbe > 0) {
             for (let j = 1; j <= multiProbe; j++) {
               const probeBucket1 = (hash + j) % this.numberOfBuckets;
-              const probeBucket2 =
-                (hash - j + this.numberOfBuckets) % this.numberOfBuckets;
+              const probeBucket2 = (hash - j + this.numberOfBuckets) % this.numberOfBuckets;
 
               if (bucket.has(probeBucket1)) {
-                for (const id of bucket.get(probeBucket1) as (
-                  | number
-                  | string
-                )[]) {
+                for (const id of bucket.get(probeBucket1) as (number | string)[]) {
                   candidateIds.add(id);
                 }
               }
 
               if (bucket.has(probeBucket2)) {
-                for (const id of bucket.get(probeBucket2) as (
-                  | number
-                  | string
-                )[]) {
+                for (const id of bucket.get(probeBucket2) as (number | string)[]) {
                   candidateIds.add(id);
                 }
               }
@@ -488,10 +453,9 @@ class LSH {
     options: {
       filter?: (id: number | string) => boolean;
       exactDimensions?: boolean;
-    } = {}
+    } = {},
   ): SearchResult[] {
-    const typedQuery =
-      query instanceof Float32Array ? query : new Float32Array(query);
+    const typedQuery = query instanceof Float32Array ? query : new Float32Array(query);
     const filter = options.filter || (() => true);
     const exactDimensions = options.exactDimensions || false;
 
@@ -573,7 +537,7 @@ class LSH {
     options: {
       filter?: (id: number | string) => boolean;
       exactDimensions?: boolean;
-    }
+    },
   ): SearchResult[] {
     const results: SearchResult[] = [];
     const filter = options.filter || (() => true);
@@ -599,7 +563,7 @@ class LSH {
    * Get index statistics
    * @returns Statistics about the LSH index
    */
-  getStats(): Record<string, any> {
+  getStats(): Record<string, unknown> {
     const stats = {
       numberOfHashes: this.numberOfHashes,
       numberOfBuckets: this.numberOfBuckets,
@@ -650,8 +614,7 @@ class LSH {
     }
 
     // Calculate average bucket size
-    stats.avgBucketSize =
-      stats.bucketsUsed > 0 ? stats.totalItems / stats.bucketsUsed : 0;
+    stats.avgBucketSize = stats.bucketsUsed > 0 ? stats.totalItems / stats.bucketsUsed : 0;
 
     return stats;
   }
@@ -663,19 +626,12 @@ class LSH {
   serialize(): string {
     // Convert Maps to serializable objects
     const hashFunctionsData: Record<number, number[][][]> = {};
-    const bucketsData: Record<
-      number,
-      Record<number, Record<number, (number | string)[]>>
-    > = {};
-    const vectorDimensionsData: [string | number, number][] = Array.from(
-      this.vectorDimensions.entries()
-    );
+    const bucketsData: Record<number, Record<number, Record<number, (number | string)[]>>> = {};
+    const vectorDimensionsData: [string | number, number][] = Array.from(this.vectorDimensions.entries());
 
     // Convert hash functions
     for (const [dimension, functions] of this.hashFunctions.entries()) {
-      hashFunctionsData[dimension] = functions.map((table) =>
-        table.map((hyperplane) => Array.from(hyperplane))
-      );
+      hashFunctionsData[dimension] = functions.map((table) => table.map((hyperplane) => Array.from(hyperplane)));
     }
 
     // Convert buckets
@@ -713,7 +669,7 @@ class LSH {
    */
   async saveIndex(filePath: string): Promise<void> {
     const data = this.serialize();
-    await fs.writeFile(filePath, data, "utf8");
+    await fs.writeFile(filePath, data, 'utf8');
   }
 
   /**
@@ -734,9 +690,7 @@ class LSH {
     });
 
     // Restore hash functions
-    for (const [dimensionStr, functions] of Object.entries(
-      data.hashFunctions
-    )) {
+    for (const [dimensionStr, functions] of Object.entries(data.hashFunctions)) {
       const dimension = parseInt(dimensionStr, 10);
       const typedFunctions: Float32Array[][] = [];
 
@@ -759,9 +713,7 @@ class LSH {
       const dimension = parseInt(dimensionStr, 10);
       const dimensionBuckets: Array<Map<number, Array<number | string>>> = [];
 
-      for (const [tableIndexStr, hashTable] of Object.entries(
-        tables as Record<string, Record<string, (number | string)[]>>
-      )) {
+      for (const [tableIndexStr, hashTable] of Object.entries(tables as Record<string, Record<string, (number | string)[]>>)) {
         const tableIndex = parseInt(tableIndexStr, 10);
         const bucketMap = new Map<number, Array<number | string>>();
 
@@ -804,12 +756,8 @@ class LSH {
    * @param options - Load options
    * @returns LSH instance
    */
-  static async loadIndex(
-    filePath: string,
-    db: ClusteredVectorDB,
-    options: LoadIndexOptions = {}
-  ): Promise<LSH> {
-    const data = await fs.readFile(filePath, "utf8");
+  static async loadIndex(filePath: string, db: ClusteredVectorDB, options: LoadIndexOptions = {}): Promise<LSH> {
+    const data = await fs.readFile(filePath, 'utf8');
     const lsh = LSH.deserialize(data, db);
 
     // Apply options

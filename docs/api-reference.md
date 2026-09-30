@@ -132,7 +132,7 @@ Updates metadata for an existing vector.
 ```typescript
 async search(
   query: number[] | Float32Array,
-  options?: UnifiedSearchOptions
+  options?: SearchOptions
 ): Promise<SearchResult[]>
 ```
 
@@ -319,10 +319,10 @@ Extracts communities (clusters) of closely related vectors.
 
 ## Search Options
 
-### UnifiedSearchOptions
+### SearchOptions
 
 ```typescript
-interface UnifiedSearchOptions {
+interface SearchOptions {
   // Result control
   k?: number;                          // Number of results to return
   includeMetadata?: boolean;           // Include metadata in results
@@ -448,7 +448,7 @@ interface SearchResult {
 ```typescript
 interface DatabaseStats {
   database: PartitionedDBStats;         // Database-level statistics
-  search: UnifiedSearchPartitionedStats; // Search statistics
+  search: SearchStats;                  // Search statistics
   searchCache: {                       // Cache statistics
     size: number;
     capacity: number;

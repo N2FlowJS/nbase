@@ -100,7 +100,7 @@ nbase/
 │   │   ├── hybrid_search.ts
 │   │   ├── knn_search.ts
 │   │   ├── reranking.ts
-│   │   └── unified_search.ts
+│   │   └── search.ts
 │   ├── server/                  # REST API server
 │   │   ├── index.ts
 │   │   ├── middleware/
@@ -336,7 +336,7 @@ export class LSHSearch {
 // src/search/index.ts
 export { HNSWSearch } from './hnsw_search';
 export { LSHSearch } from './lsh_search';
-export { UnifiedSearch } from './unified_search';
+export { Search } from './search';
 
 // ❌ Bad: Don't put everything in one file
 // src/everything.ts - Contains HNSW, LSH, KNN, and more

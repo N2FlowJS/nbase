@@ -13,7 +13,7 @@ export function createConfig(userConfig: Partial<SystemConfiguration> = {}): Sys
 /**
  * Deep merges two objects
  */
-function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>): T {
+function deepMerge<T extends object>(target: T, source: Partial<T>): T {
   // ... (implementation không đổi)
   // `satisfies` cannot be used here: the result is a fresh object widened to
   // T, and the merge below mutates it. The assertion is load-bearing.
@@ -26,9 +26,10 @@ function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>)
       if (isObject(source[k])) {
         if (!(key in target) || !isObject(target[k])) {
           // Sửa lỗi merge nếu target[k] không phải object
-          output[k] = deepMerge({}, source[k] as Record<string, any>) as any; // Merge vào object rỗng nếu target không có hoặc không phải object
+          // Merge vào object rỗng nếu target không có hoặc không phải object
+          output[k] = deepMerge({}, source[k] as object) as T[Extract<keyof T, string>];
         } else {
-          output[k] = deepMerge(target[k] as Record<string, any>, source[k] as Record<string, any>) as any;
+          output[k] = deepMerge(target[k] as object, source[k] as object) as T[Extract<keyof T, string>];
         }
       } else if (source[k] !== undefined) {
         // Chỉ gán nếu source[k] không phải undefined
@@ -40,7 +41,7 @@ function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>)
   return output;
 }
 
-function isObject(item: any): item is Record<string, any> {
+function isObject(item: unknown): item is Record<string, unknown> {
   // ... (implementation không đổi)
-  return item && typeof item === 'object' && !Array.isArray(item);
+  return item != null && typeof item === 'object' && !Array.isArray(item);
 }

@@ -1,27 +1,24 @@
-import { expect } from "chai";
-import { describe, it } from "mocha";
-import { PartitionedVectorDB } from "../../src";
-import {
-  PARTITIONS_DIR,
-  createTestVectors,
-} from "../../test/test-helpers/vector-db-test-utils";
-import { setupPersistenceTests, VECTOR_SIZE } from "./partitioned_vector_db.common_setup";
+import { expect } from 'chai';
+import { describe, it } from 'mocha';
+import { PartitionedVectorDB } from '../../src';
+import { PARTITIONS_DIR, createTestVectors } from '../../test/test-helpers/vector-db-test-utils';
+import { setupPersistenceTests, VECTOR_SIZE } from './partitioned_vector_db.common_setup';
 
-describe("PartitionedVectorDB - HNSW Persistence", () => {
+describe('PartitionedVectorDB - HNSW Persistence', () => {
   const { getDB } = setupPersistenceTests();
 
-  it("should save and load HNSW indices", async () => {
+  it('should save and load HNSW indices', async () => {
     const db = getDB();
-    
-    await db.createPartition("hnsw-test", "HNSW Test", { setActive: true });
+
+    await db.createPartition('hnsw-test', 'HNSW Test', { setActive: true });
     const vectors = createTestVectors(50, VECTOR_SIZE);
     await db.bulkAdd(vectors);
 
     // Build HNSW index
-    await db.buildIndexHNSW("hnsw-test");
+    await db.buildIndexHNSW('hnsw-test');
 
     // Save HNSW indices
-    await db.saveHNSWIndices("hnsw-test");
+    await db.saveHNSWIndices('hnsw-test');
 
     // Close and reopen
     await db.close();
@@ -35,13 +32,13 @@ describe("PartitionedVectorDB - HNSW Persistence", () => {
     await newDB.initializationPromise;
 
     // Load partition and HNSW index
-    await newDB.getPartition("hnsw-test");
-    await newDB.loadHNSWIndices("hnsw-test");
+    await newDB.getPartition('hnsw-test');
+    await newDB.loadHNSWIndices('hnsw-test');
 
     // Verify HNSW is loaded by checking stats
-    const stats = newDB.getHNSWStats("hnsw-test");
+    const stats = newDB.getHNSWStats('hnsw-test');
     expect(stats).to.not.be.null;
-    
+
     // Clean up
     await newDB.close();
   });

@@ -1,16 +1,11 @@
-import { expect } from "chai";
-import sinon from "sinon";
-import { BatchEngineSearch } from "../src/search/batch_search";
-import { describe, it, beforeEach } from "mocha";
+import { expect } from 'chai';
+import sinon from 'sinon';
+import { BatchEngineSearch } from '../src/search/batch_search';
+import { describe, it, beforeEach } from 'mocha';
 
-import {
-  PartitionedVectorDBInterface,
-  BatchSearchConfiguration,
-  BatchSearchQuery,
-  SearchResult,
-} from "../src/types";
+import { PartitionedVectorDBInterface, BatchSearchConfiguration, BatchSearchQuery, SearchResult } from '../src/types';
 
-describe("BatchEngineSearch", () => {
+describe('BatchEngineSearch', () => {
   let mockSearchEngine: sinon.SinonStubbedInstance<PartitionedVectorDBInterface>;
   let batchEngineSearch: BatchEngineSearch;
 
@@ -32,16 +27,13 @@ describe("BatchEngineSearch", () => {
     sinon.restore();
   });
 
-  it("should process a batch of queries using findNearest", async () => {
+  it('should process a batch of queries using findNearest', async () => {
     const queries: BatchSearchQuery[] = [
       { query: [1, 2, 3], k: 5, options: {} },
       { query: [4, 5, 6], k: 3, options: {} },
     ];
 
-    const mockResults: SearchResult[][] = [
-      [{ id: "a", dist: 0.1 }],
-      [{ id: "b", dist: 0.1 }],
-    ];
+    const mockResults: SearchResult[][] = [[{ id: 'a', dist: 0.1 }], [{ id: 'b', dist: 0.1 }]];
 
     mockSearchEngine.findNearest.resolves(mockResults[0]);
 
@@ -51,16 +43,13 @@ describe("BatchEngineSearch", () => {
     expect(mockSearchEngine.findNearest.callCount).to.equal(2);
   });
 
-  it("should process a batch of queries using findNearestHNSW when useHNSW is true", async () => {
+  it('should process a batch of queries using findNearestHNSW when useHNSW is true', async () => {
     const queries: BatchSearchQuery[] = [
       { query: [1, 2, 3], k: 5, options: { useHNSW: true } },
       { query: [4, 5, 6], k: 3, options: { useHNSW: true } },
     ];
 
-    const mockResults: SearchResult[][] = [
-      [{ id: "a", dist: 0.1 }],
-      [{ id: "b", dist: 0.1 }],
-    ];
+    const mockResults: SearchResult[][] = [[{ id: 'a', dist: 0.1 }], [{ id: 'b', dist: 0.1 }]];
 
     mockSearchEngine.findNearestHNSW.resolves(mockResults[0]);
 
@@ -70,18 +59,14 @@ describe("BatchEngineSearch", () => {
     expect(mockSearchEngine.findNearestHNSW.callCount).to.equal(2);
   });
 
-  it("should split large batches into smaller chunks", async () => {
+  it('should split large batches into smaller chunks', async () => {
     const queries: BatchSearchQuery[] = [
       { query: [1, 2, 3], k: 5, options: {} },
       { query: [4, 5, 6], k: 3, options: {} },
       { query: [7, 8, 9], k: 2, options: {} },
     ];
 
-    const mockResults: SearchResult[][] = [
-      [{ id: "a", dist: 0.1 }],
-      [{ id: "b", dist: 0.1 }],
-      [{ id: "c", dist: 0.1 }],
-    ];
+    const mockResults: SearchResult[][] = [[{ id: 'a', dist: 0.1 }], [{ id: 'b', dist: 0.1 }], [{ id: 'c', dist: 0.1 }]];
 
     mockSearchEngine.findNearest.onCall(0).resolves(mockResults[0]);
     mockSearchEngine.findNearest.onCall(1).resolves(mockResults[1]);
@@ -93,18 +78,17 @@ describe("BatchEngineSearch", () => {
     expect(mockSearchEngine.findNearest.callCount).to.equal(3);
   });
 
-  it("should handle query timeouts gracefully", async function() { // Sử dụng function để có 'this'
+  it('should handle query timeouts gracefully', async function () {
+    // Sử dụng function để có 'this'
     // Tăng timeout của Mocha đủ lớn để chứa timeout nội bộ + buffer
     this.timeout(6000); // 5000ms timeout + 1000ms buffer
 
-    const queries: BatchSearchQuery[] = [
-        { query: [1, 2, 3], k: 5, options: {} },
-    ];
+    const queries: BatchSearchQuery[] = [{ query: [1, 2, 3], k: 5, options: {} }];
 
     // Mock search engine để trả về một promise KHÔNG BAO GIỜ resolve
     // Điều này đảm bảo rằng timeout nội bộ của BatchEngineSearch sẽ luôn thắng cuộc đua.
     mockSearchEngine.findNearest.callsFake(
-        () => new Promise(() => {}) // Promise này sẽ mãi mãi ở trạng thái pending
+      () => new Promise(() => {}), // Promise này sẽ mãi mãi ở trạng thái pending
     );
 
     // Gọi hàm cần test
@@ -121,18 +105,15 @@ describe("BatchEngineSearch", () => {
 
     // Có thể thêm một log nhỏ ở đây để xác nhận test đã đi đến cuối cùng
     // console.log("Timeout test finished assertions.");
-});
+  });
 
-  it("should prioritize order in results", async () => {
+  it('should prioritize order in results', async () => {
     const queries: BatchSearchQuery[] = [
       { query: [1, 2, 3], k: 5, options: {} },
       { query: [4, 5, 6], k: 3, options: {} },
     ];
 
-    const mockResults: SearchResult[][] = [
-      [{ id: "b", dist: 0.1 }],
-      [{ id: "a", dist: 0.1 }],
-    ];
+    const mockResults: SearchResult[][] = [[{ id: 'b', dist: 0.1 }], [{ id: 'a', dist: 0.1 }]];
 
     mockSearchEngine.findNearest.onCall(0).resolves(mockResults[1]);
     mockSearchEngine.findNearest.onCall(1).resolves(mockResults[0]);
@@ -143,12 +124,10 @@ describe("BatchEngineSearch", () => {
     expect(mockSearchEngine.findNearest.callCount).to.equal(2);
   });
 
-  it("should handle errors during query processing", async () => {
-    const queries: BatchSearchQuery[] = [
-      { query: [1, 2, 3], k: 5, options: {} },
-    ];
+  it('should handle errors during query processing', async () => {
+    const queries: BatchSearchQuery[] = [{ query: [1, 2, 3], k: 5, options: {} }];
 
-    mockSearchEngine.findNearest.rejects(new Error("Search failed"));
+    mockSearchEngine.findNearest.rejects(new Error('Search failed'));
 
     const results = await batchEngineSearch.searchBatch(queries);
 
@@ -156,10 +135,9 @@ describe("BatchEngineSearch", () => {
     expect(mockSearchEngine.findNearest.callCount).to.equal(1);
   });
 
-  it("should shutdown gracefully", () => {
-    const consoleSpy = sinon.spy(console, "log");
+  it('should shutdown gracefully', () => {
+    const consoleSpy = sinon.spy(console, 'log');
     batchEngineSearch.shutdown();
-    expect(consoleSpy.calledWith("PartitionedBatchSearch shutdown.")).to.be
-      .true;
+    expect(consoleSpy.calledWith('PartitionedBatchSearch shutdown.')).to.be.true;
   });
 });

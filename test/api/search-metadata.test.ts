@@ -25,7 +25,7 @@ describe('Search Metadata Endpoint', () => {
   const mockRequest = (body: any): Request =>
     ({
       body,
-    } as unknown as Request);
+    }) as unknown as Request;
 
   const mockResponse = (): { status: sinon.SinonStub; json: sinon.SinonStub } => {
     return {
@@ -102,7 +102,7 @@ describe('Search Metadata Endpoint', () => {
         results: sampleMetadataResults,
         count: 3,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -121,7 +121,7 @@ describe('Search Metadata Endpoint', () => {
         results: sampleMetadataResults,
         count: 3,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -140,7 +140,7 @@ describe('Search Metadata Endpoint', () => {
         results: sampleMetadataResults,
         count: 3,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -159,7 +159,7 @@ describe('Search Metadata Endpoint', () => {
         results: sampleMetadataResults,
         count: 3,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -179,7 +179,7 @@ describe('Search Metadata Endpoint', () => {
         results: sampleMetadataResults,
         count: 3,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -270,7 +270,7 @@ describe('Search Metadata Endpoint', () => {
         results: [],
         count: 0,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -290,7 +290,7 @@ describe('Search Metadata Endpoint', () => {
         results: sampleMetadataResults,
         count: 3,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -309,7 +309,7 @@ describe('Search Metadata Endpoint', () => {
         results: sampleMetadataResults,
         count: 3,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 
@@ -337,7 +337,7 @@ describe('Search Metadata Endpoint', () => {
         results: [sampleMetadataResults[0]],
         count: 1,
         duration: 42,
-      })
+      }),
     ).to.be.true;
   });
 

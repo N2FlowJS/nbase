@@ -4,6 +4,31 @@ import { LoadModelOptions, PQOptions, TrainingOptions, Vector } from '../types';
 import { KMeans } from './kmeans';
 
 /**
+ * A centroid table as it appears in the serialized model: a plain nested array
+ * of numbers, ready for `JSON.stringify` / `JSON.parse`.
+ */
+interface SerializedPQModel {
+  version: number;
+  defaultVectorSize: number;
+  subvectorSize: number;
+  numSubvectors: number;
+  numClusters: number;
+  trained: boolean;
+  dynamicDimensions: boolean;
+  minSubquantizers: number;
+  /** Only present once the model has been trained. */
+  centroids?: number[][][];
+  dimensionModels?: Record<string, SerializedPQSubModel>;
+}
+
+/** A trained (or partially trained) sub-quantizer set for one dimension. */
+interface SerializedPQSubModel {
+  numSubvectors: number;
+  centroids: number[][][];
+  trained: boolean;
+}
+
+/**
  * Product Quantization implementation for vector compression
  * Supports dynamic vector dimensions for improved flexibility
  */
@@ -317,7 +342,7 @@ export class ProductQuantization {
    * @returns Serialized model
    */
   serialize(): string {
-    const data: any = {
+    const data: SerializedPQModel = {
       defaultVectorSize: this.defaultVectorSize,
       subvectorSize: this.subvectorSize,
       numSubvectors: this.numSubvectors,
@@ -364,20 +389,20 @@ export class ProductQuantization {
    * @returns ProductQuantization instance
    */
   static async loadModel(json: string, options: LoadModelOptions = {}): Promise<ProductQuantization> {
-    let data: any;
+    let data: SerializedPQModel;
 
     // Check if json is a file path
     if (json.endsWith('.json')) {
       try {
         const fileContent = await fs.readFile(json, 'utf8');
-        data = JSON.parse(fileContent);
+        data = JSON.parse(fileContent) as SerializedPQModel;
       } catch (error: unknown) {
         throw new Error(`Failed to load PQ model from file: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } else {
       // Parse JSON string directly
       try {
-        data = JSON.parse(json);
+        data = JSON.parse(json) as SerializedPQModel;
       } catch (error: unknown) {
         throw new Error(`Failed to parse PQ model JSON: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
@@ -408,7 +433,7 @@ export class ProductQuantization {
     if (data.dimensionModels) {
       for (const [dimStr, modelData] of Object.entries(data.dimensionModels)) {
         const dim = parseInt(dimStr, 10);
-        const model = modelData as any;
+        const model = modelData;
 
         if (model.trained && model.centroids) {
           pq.dimensionModels.set(dim, {
@@ -726,7 +751,7 @@ export class ProductQuantization {
    * Get statistics about the product quantization
    * @returns Object with PQ statistics
    */
-  getStats(): Record<string, any> {
+  getStats(): Record<string, unknown> {
     // Count vectors per dimension
     const vectorsPerDimension: Record<number, number> = {};
     for (const dim of this.vectorDimensions.values()) {
@@ -734,7 +759,7 @@ export class ProductQuantization {
     }
 
     // Count models per dimension
-    const modelsPerDimension: Record<number, any> = {};
+    const modelsPerDimension: Record<number, unknown> = {};
     for (const [dim, model] of this.dimensionModels.entries()) {
       if (model.trained) {
         const { subvectorSize } = this._calculateSubvectorParams(dim);

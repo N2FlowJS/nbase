@@ -55,12 +55,12 @@ import { createTimer } from '../utils/profiling';
  * searchEngine.close();
  * ```
  *
- * @fires HybridEngineSearch#indexing:start - When index building starts
- * @fires HybridEngineSearch#indexing:progress - During index building with progress updates
- * @fires HybridEngineSearch#indexing:complete - When index building completes
- * @fires HybridEngineSearch#indexing:error - If an error occurs during indexing
- * @fires HybridEngineSearch#search:complete - When a search operation completes
- * @fires HybridEngineSearch#search:error - If an error occurs during search
+ * @event indexing:start - When index building starts
+ * @event indexing:progress - During index building with progress updates
+ * @event indexing:complete - When index building completes
+ * @event indexing:error - If an error occurs during indexing
+ * @event search:complete - When a search operation completes
+ * @event search:error - If an error occurs during search
  */
 export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmitter<HybridSearchEvents>) {
   private db: PartitionedVectorDBInterface;
@@ -74,7 +74,7 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
     options: {
       defaultK?: number;
       defaultDistanceMetric?: DistanceMetric;
-    } = {}
+    } = {},
   ) {
     super();
     this.db = db;
@@ -88,41 +88,29 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
 
   // Use arrow function class properties to automatically bind `this`
   private handleIndexProgress = (data: IndexProgressPayload) => {
-    // Check the received data type if needed
-    const progressValue = typeof data === 'object' && data !== null && typeof (data as any).progress === 'number' ? (data as any).progress : 0;
-    const partitionId = typeof data === 'object' && data !== null ? (data as any).id : undefined;
-
+    // The DB reports progress as a 0-1 fraction; the public event is a percentage.
     this.emit('indexing:progress', {
       method: 'hnsw', // Or determine from data if possible
-      partitionId: partitionId,
-      percentage: progressValue * 100,
+      partitionId: data.id,
+      percentage: data.progress * 100,
     });
   };
 
   private handleIndexComplete = (data: IndexedPayload) => {
-    // Check the received data type if needed
-    const partitionId = typeof data === 'object' && data !== null ? (data as any).id : undefined;
-    const indexType = typeof data === 'object' && data !== null ? (data as any).indexType : 'hnsw';
-    const timeMs = typeof data === 'object' && data !== null ? (data as any).timeMs : undefined;
-
     this.emit('indexing:complete', {
-      method: indexType,
-      partitionId: partitionId,
-      timeMs: timeMs,
+      method: data.indexType,
+      partitionId: data.id,
     });
   };
 
   private handlePartitionError = (data: PartitionErrorPayload) => {
-    // Check the received data type if needed
-    const operation = typeof data === 'object' && data !== null ? (data as any).operation : '';
-    const partitionId = typeof data === 'object' && data !== null ? (data as any).id : undefined;
-    const error = typeof data === 'object' && data !== null ? (data as any).error : new Error('Unknown partition error');
-
-    if (operation?.toLowerCase().includes('index')) {
+    if (data.operation.toLowerCase().includes('index')) {
       this.emit('indexing:error', {
         method: 'unknown', // Or try to infer from operation/error
-        partitionId: partitionId,
-        error: error,
+        // `id` is optional on the source event, and an optional key may not
+        // be set to `undefined` explicitly.
+        ...(data.id !== undefined ? { partitionId: data.id } : {}),
+        error: data.error,
       });
     }
     // Handle other errors if needed
@@ -131,9 +119,10 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
   // --- Setup and Teardown ---
 
   private _setupEventForwarding(): void {
-    if (typeof (this.db as any).on === 'function') {
-      const dbEmitter = this.db as any as TypedEventEmitter<PartitionedDBEventData>;
-
+    // `PartitionedVectorDBInterface` describes the query surface only, so the
+    // emitter is reached through a view of the instance.
+    const dbEmitter = this.db as unknown as TypedEventEmitter<PartitionedDBEventData>;
+    if (typeof dbEmitter.on === 'function') {
       // Use the handler methods defined
       dbEmitter.on('partition:indexProgress', this.handleIndexProgress);
       dbEmitter.on('partition:indexed', this.handleIndexComplete);
@@ -143,9 +132,8 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
 
   public close(): void {
     console.log('Closing HybridEngineSearch and removing listeners...');
-    if (typeof (this.db as any).off === 'function') {
-      const dbEmitter = this.db as any as TypedEventEmitter<PartitionedDBEventData>;
-
+    const dbEmitter = this.db as unknown as TypedEventEmitter<PartitionedDBEventData>;
+    if (typeof dbEmitter.off === 'function') {
       // Remove listeners using the exact handler methods registered
       dbEmitter.off('partition:indexProgress', this.handleIndexProgress);
       dbEmitter.off('partition:indexed', this.handleIndexComplete);
@@ -233,7 +221,6 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
         results = await this.db.findNearestHNSW(query, k, dbSearchOptions);
         this.timer.stop(dbMethodUsed);
       } else if (typeof this.db.findNearest === 'function') {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- stripped on purpose
         const { efSearch: _efSearch, ...clusteredOptions } = dbSearchOptions;
         dbMethodUsed = 'PartitionedDB.findNearest';
         this.timer.start(dbMethodUsed);
@@ -269,7 +256,7 @@ export class HybridEngineSearch extends (EventEmitter as new () => TypedEventEmi
     }
   }
 
-  async getStats(): Promise<Record<string, any>> {
+  async getStats(): Promise<Record<string, unknown>> {
     if (this.db && typeof this.db.getStats === 'function') {
       try {
         return await this.db.getStats();

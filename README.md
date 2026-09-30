@@ -150,11 +150,11 @@ NBase follows a layered architecture designed for scalability and performance:
 
 ### Core Components
 
-1. **Database**: High-level interface providing unified API for all operations
+1. **Database**: High-level interface providing a single API for all operations
 2. **PartitionedVectorDB**: Manages multiple partitions for horizontal scaling
 3. **ClusteredVectorDB**: Handles vector clustering within each partition
 4. **VectorDB**: Core vector storage and basic operations
-5. **UnifiedSearch**: Orchestrates search across different algorithms and partitions
+5. **Search**: Orchestrates search across different algorithms and partitions
 
 ### Data Flow
 
@@ -166,7 +166,7 @@ NBase follows a layered architecture designed for scalability and performance:
          │                       │                       │
          │                       │                       │
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   UnifiedSearch │────│  ClusteredDB     │────│   VectorDB      │
+│     Search      │────│  ClusteredDB     │────│   VectorDB      │
 │   (Algorithms)  │    │   (Clustering)   │    │   (Storage)     │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
 ```
@@ -264,7 +264,7 @@ await db.updateMetadata(id: string | number, metadata: object): Promise<void>
 await db.search(query: number[], options?: SearchOptions): Promise<SearchResult[]>
 
 // Advanced search with options
-await db.findNearest(query: number[], k?: number, options?: UnifiedSearchOptions): Promise<SearchResult[]>
+await db.findNearest(query: number[], k?: number, options?: SearchOptions): Promise<SearchResult[]>
 
 // Batch search
 await db.batchSearch(queries: BatchQuery[], options?: BatchSearchOptions): Promise<SearchResult[][]>
@@ -484,7 +484,7 @@ nbase/
 │   │   ├── hnsw.ts        # HNSW implementation
 │   │   └── lsh.ts         # LSH implementation
 │   ├── search/            # Search engines
-│   │   ├── unified_search.ts     # Unified search interface
+│   │   ├── search.ts              # Search interface
 │   │   ├── knn_search.ts         # KNN search
 │   │   └── hybrid_search.ts      # Hybrid search
 │   ├── compression/       # Vector compression

@@ -9,9 +9,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
  * status, until the socket times out). Express 5 handles this natively, but this
  * package targets Express 4.
  */
-export function asyncHandler(
-  handler: (req: Request, res: Response, next: NextFunction) => unknown | Promise<unknown>
-): RequestHandler {
+export function asyncHandler(handler: (req: Request, res: Response, next: NextFunction) => unknown | Promise<unknown>): RequestHandler {
   // Express ignores the returned value, so returning it is safe — and it lets
   // direct callers (tests) await the handler instead of racing it.
   const wrapped = (req: Request, res: Response, next: NextFunction): Promise<unknown> | unknown => {

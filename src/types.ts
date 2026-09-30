@@ -10,7 +10,7 @@ import { ClusteredVectorDB } from './vector';
 export interface VectorData {
   id: number | string;
   vector: Vector;
-  metadata?: Record<string, any> | undefined;
+  metadata?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -19,25 +19,15 @@ export interface VectorData {
 export interface RerankingOptions {
   method?: RerankingMethod | undefined;
   k?: number | undefined;
-  metadata?: Map<string | number, any> | undefined;
+  metadata?: Map<string | number, Record<string, unknown>> | undefined;
   vectors?: Map<string | number, Vector>;
   weights?: Record<string, number> | undefined;
 }
 
 /**
- * Common search options interface
- */
-export interface SearchOptions extends UnifiedSearchOptions {
-  // Backward compatibility
-  limit?: number; // Alias for k
-  offset?: number; // For pagination
-  stopEarly?: boolean; // Alias for earlyStoppingThreshold
-}
-
-/**
  * Hybrid search options interface
  */
-export interface HybridSearchOptions extends UnifiedSearchOptions {
+export interface HybridSearchOptions extends SearchOptions {
   // Additional hybrid-specific options
   buildIndexes?: boolean;
   methods?: string[];
@@ -75,7 +65,7 @@ export interface BackupOptions {
  */
 export interface WorkerMessage {
   type: string;
-  data: any;
+  data?: unknown;
 }
 
 /**
@@ -83,7 +73,7 @@ export interface WorkerMessage {
  */
 export interface WorkerResult {
   error?: string;
-  data?: any;
+  data?: unknown;
 }
 
 /**
@@ -102,7 +92,7 @@ export interface StreamingResult<T> {
 export interface BatchOperation {
   id: string;
   type: 'add' | 'delete' | 'update';
-  data?: any;
+  data?: unknown;
 }
 
 /**
@@ -112,7 +102,7 @@ export interface SearchResult {
   id: IDVector;
   dist: number;
   /** Optional metadata, populated when the search was issued with `includeMetadata`. */
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   /** Optional vector, populated when the search was issued with `includeVectors`. */
   vector?: Vector;
   /** Vector length, derived by the API layer when a vector is present. */
@@ -160,7 +150,7 @@ export type IDVector = number | string;
 export interface VectorDataForSave {
   id: IDVector;
   vector: number[];
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 // Interface voor de data structuren van de events
@@ -168,8 +158,8 @@ export interface VectorDBEventData {
   'vector:add': { id: IDVector; dimensions: number };
   'vectors:bulkAdd': { count: number; ids: IDVector[] };
   'vector:delete': { id: number | string };
-  'metadata:add': { id: number | string; metadata: Record<string, any> };
-  'metadata:update': { id: number | string; metadata: Record<string, any> };
+  'metadata:add': { id: number | string; metadata: Record<string, unknown> };
+  'metadata:update': { id: number | string; metadata: Record<string, unknown> };
   'db:save': { path: string; count: number };
   'db:load': { path: string; count: number };
   'db:close': EmptyPayload; // Geen data nodig voor close event
@@ -187,7 +177,7 @@ export type BulkAddResult = Record<string, never>;
 // Dit zorgt ervoor dat je alleen gedefinieerde events kunt emitten/listenen
 // en dat de argumenten overeenkomen.
 
-export interface TypedEventEmitter<Events extends Record<string, any>> {
+export interface TypedEventEmitter<Events extends object> {
   on<E extends keyof Events>(event: E, listener: (payload: Events[E]) => void): this;
   once<E extends keyof Events>(event: E, listener: (payload: Events[E]) => void): this;
   off<E extends keyof Events>(event: E, listener: (payload: Events[E]) => void): this;
@@ -208,7 +198,7 @@ export interface IndexProgressEvent {
 export interface IndexBuiltEvent {
   type: IndexType;
   timeMs: number;
-  stats: any; // Stats specific to the index type
+  stats?: unknown; // Stats specific to the index type
 }
 
 export interface IndexActionEvent {
@@ -218,7 +208,7 @@ export interface IndexActionEvent {
 
 export interface IndexErrorEvent {
   type?: IndexType; // Optional: General error might not have a type
-  error: any; // The actual error object or message
+  error: Error | unknown; // The actual error object or message
   timeMs?: number; // Optional: Duration if error occurred during timed operation
 }
 
@@ -233,10 +223,10 @@ export interface IndexManagerEventData {
   'index:progress': IndexProgressEvent;
   'indexes:saving': void;
   'indexes:saved': { timeMs: number };
-  'indexes:savingError': { error: any };
+  'indexes:savingError': { error: Error | unknown };
   'indexes:loading': void;
   'indexes:loaded': { timeMs: number; loadedTypes: IndexType[] };
-  'indexes:loadingError': { error: any; timeMs?: number };
+  'indexes:loadingError': { error: Error | unknown; timeMs?: number };
   reset: void; // Event when indexes are reset
 }
 
@@ -281,7 +271,7 @@ export interface IndexStats {
   lastLoadTimeMs?: number;
   dbVectorsAtLastBuild: number; // Track DB size when indexes were last built
   // Specific index stats (consider more detailed types per index)
-  indexes: Partial<Record<IndexType, any>>; // Use Partial as not all indexes might exist or have stats
+  indexes: Partial<Record<IndexType, unknown>>; // Use Partial as not all indexes might exist or have stats
 }
 
 export interface TimerData {
@@ -486,14 +476,14 @@ export interface MetricsSnapshot {
 export interface MonitorEvent {
   type: string;
   timestamp: number; // Milliseconds epoch
-  data: any;
+  data?: unknown;
 }
 
 // Event structure for search events
 export interface SearchEventData {
   timestamp: number; // Milliseconds epoch
   duration: number; // Milliseconds
-  method: string; // e.g., 'hnsw', 'flat', 'unified'
+  method: string; // e.g., 'hnsw', 'flat', 'clustered'
   // Add k, filter presence, etc. if needed for deeper analysis
 }
 
@@ -501,7 +491,7 @@ export interface SearchEventData {
 export interface MonitorEvents {
   metrics: MetricsSnapshot;
   event: MonitorEvent;
-  error: { message: string; error?: Error; context?: string };
+  error: { message: string; error?: Error | unknown; context?: string };
   'cache:hit': void;
   'cache:miss': void;
 }
@@ -544,9 +534,19 @@ export interface PartitionConfig {
   active: boolean;
   vectorCount: number; // Renamed from size for clarity
   description?: string | undefined;
-  properties?: Record<string, any> | undefined;
+  properties?: Record<string, unknown> | undefined;
   clusterSize?: number | undefined; // Specific cluster setting for this partition
   // Add other relevant metadata if needed
+}
+
+/** Options accepted by `PartitionedVectorDB.createPartition`. */
+export interface CreatePartitionOptions {
+  description?: string;
+  properties?: Record<string, unknown>;
+  setActive?: boolean;
+  clusterSize?: number;
+  /** Internal flag: skip the initialization check during bootstrap. */
+  skipInitializationCheck?: boolean;
 }
 
 export interface PartitionedVectorDBOptions {
@@ -593,7 +593,7 @@ export interface PartitionedDBEventData {
   'vector:add': {
     partitionId: string;
     vectorId: number | string;
-    metadata?: Record<string, any> | undefined;
+    metadata?: Record<string, unknown> | undefined;
   };
   'vector:delete': { partitionId: string; vectorId: number | string };
   'db:close': void;
@@ -615,7 +615,7 @@ export interface PartitionedDBEventData {
   'partition:indexProgress': {
     /** Partition the index build refers to. */
     id: string;
-    /** Progress percentage, 0-100. */
+    /** Progress as a fraction, 0-1. */
     progress: number;
     /** Which build operation is reporting progress. */
     operation: string;
@@ -680,13 +680,13 @@ export interface StorageManager {
   /**
    * Add vector(s) to the database
    */
-  addVector(vector: Vector, metadata?: Record<string, any>): Promise<number | string>;
+  addVector(vector: Vector, metadata?: Record<string, unknown>): Promise<number | string>;
   bulkAdd(vectors: VectorData[]): Promise<{ count: number }>;
 
   /**
    * Search for vectors
    */
-  search(query: Vector, k?: number, options?: any): Promise<SearchResult[]>;
+  search(query: Vector, k?: number, options?: SearchOptions): Promise<SearchResult[]>;
 
   /**
    * Close the storage manager and underlying databases
@@ -699,7 +699,7 @@ export interface StorageManager {
  */
 export interface PartitionedVectorDBInterface {
   // Core methods for vector operations
-  addVector(id: number | string | undefined, vector: Vector, metadata?: Record<string, any>): Promise<{ partitionId: string; vectorId: number | string }>;
+  addVector(id: number | string | undefined, vector: Vector, metadata?: Record<string, unknown>): Promise<{ partitionId: string; vectorId: number | string }>;
 
   bulkAdd(vectors: VectorData[]): Promise<{ count: number; partitionIds: string[] }>;
 
@@ -707,66 +707,33 @@ export interface PartitionedVectorDBInterface {
 
   deleteVector(id: number | string): Promise<boolean>;
 
-  findNearest(query: Vector, k?: number, options?: any): Promise<SearchResult[]>;
+  findNearest(query: Vector, k?: number, options?: SearchOptions): Promise<SearchResult[]>;
 
   // Partition management
-  createPartition(id: string, name: string, options?: any): Promise<string>;
+  createPartition(id: string, name: string, options?: CreatePartitionOptions): Promise<string>;
   setActivePartition(id: string): Promise<void>;
   getPartition(id: string): Promise<ClusteredVectorDB | null>;
-  getActivePartition(): Promise<any>;
-  getPartitionConfigs(): any[];
+  getActivePartition(): Promise<ClusteredVectorDB | null>;
+  getPartitionConfigs(): PartitionConfig[];
 
   // Database management
   getStats(): Promise<PartitionedDBStats>;
   savePartitionConfigs(): Promise<void>;
   close(): Promise<void>;
   buildIndexHNSW(partitionId?: string, options?: BuildIndexHNSWOptions): Promise<void>;
-  findNearestHNSW(
-    query: Vector,
-    k: number,
-    options: VectorStoreSearchOptions
-  ): Promise<SearchResult[]>;
-  getMetadata(id: number | string): Promise<{ partitionId: string; metadata: Record<string, any> } | null>;
+  findNearestHNSW(query: Vector, k: number, options: VectorStoreSearchOptions): Promise<SearchResult[]>;
+  getMetadata(id: number | string): Promise<{ partitionId: string; metadata: Record<string, unknown> } | null>;
   saveHNSWIndices(partitionId?: string): Promise<void>;
   loadHNSWIndices(partitionId?: string): Promise<void>;
   save(): Promise<void>;
   IsReady(): boolean;
   initializationPromise: Promise<void>;
-  getMetadataWithFieldAcrossPartitions(criteria: string | string[] | Record<string, any>, values?: any | any[], option?: { limit: number }): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, any> }>>;
+  getMetadataWithFieldAcrossPartitions(criteria: string | string[] | Record<string, unknown>, values?: unknown, option?: { limit: number }): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }>>;
   extractRelationships(
     threshold: number,
-    options: { metric?: DistanceMetric; partitionIds?: string[]; includeMetadata?: boolean }
-  ): Promise<Array<{ vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> }; vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> }; distance: number }>>;
-  extractCommunities(threshold: number, options: { metric?: DistanceMetric; partitionIds?: string[]; includeMetadata?: boolean }): Promise<Array<Array<{ id: number | string; partitionId: string; metadata?: Record<string, any> }>>>;
-}
-
-/**
- * Interface for UnifiedSearch stats
- */
-export interface UnifiedSearchStats {
-  search: {
-    calls: number;
-    totalTime: number;
-    avgTime: number;
-    methodCounts: Record<string, number>;
-    lastSearchTime: number;
-    errors: number;
-    lastError?: Error;
-    lastSearchTimestamp?: Date | undefined;
-    methods: {
-      knn: { available: boolean; stats?: KNNStats };
-      hnsw: { available: boolean; stats?: HNSWStats };
-      hybrid: { available: boolean; stats?: HybridSearchStats };
-    };
-    reranker: { available: boolean };
-  };
-  database: {
-    vectorCount: number;
-    dimensions: {
-      counts: Record<number, number>;
-      unique: number;
-    };
-  };
+    options: { metric?: DistanceMetric; partitionIds?: string[]; includeMetadata?: boolean },
+  ): Promise<Array<{ vector1: { id: number | string; partitionId: string; metadata?: Record<string, unknown> }; vector2: { id: number | string; partitionId: string; metadata?: Record<string, unknown> }; distance: number }>>;
+  extractCommunities(threshold: number, options: { metric?: DistanceMetric; partitionIds?: string[]; includeMetadata?: boolean }): Promise<Array<Array<{ id: number | string; partitionId: string; metadata?: Record<string, unknown> }>>>;
 }
 
 /**
@@ -871,11 +838,11 @@ export interface StorageOptions {
 export interface BatchQuery {
   query: Vector;
   k: number;
-  options?: UnifiedSearchOptions;
+  options?: SearchOptions;
 }
 
 export interface BatchSearchOptions {
-  filter?: (id: number | string, meta: any) => boolean;
+  filter?: (id: number | string, meta?: Record<string, unknown> | null) => boolean;
   maxBatchSize?: number | undefined;
   maxWorkers?: number | undefined;
   useWorkers?: boolean | undefined;
@@ -900,7 +867,7 @@ export interface BatchSearchResult {
  */
 export interface HybridSearchStats {
   options: HybridSearchOptions; // Giữ lại options cấu hình
-  dbStats: Record<string, any>; // Lấy toàn bộ stats từ Partitioned DB
+  dbStats: Record<string, unknown>; // Lấy toàn bộ stats từ Partitioned DB
   // Có thể thêm các thống kê riêng của HybridSearch nếu cần
 }
 
@@ -927,7 +894,7 @@ export interface VectorProvider {
    * filter is invoked without metadata and implementations must degrade
    * accordingly.
    */
-  getMetadata?(id: number | string): Record<string, any> | undefined | null;
+  getMetadata?(id: number | string): Record<string, unknown> | undefined | null;
 }
 
 /**
@@ -939,7 +906,7 @@ export interface VectorProvider {
  */
 export interface VectorStoreSearchOptions {
   /** Predicate evaluated per candidate id. */
-  filter?: ((id: number | string, metadata?: Record<string, any> | null) => boolean) | undefined;
+  filter?: ((id: number | string, metadata?: Record<string, unknown> | null) => boolean) | undefined;
   includeMetadata?: boolean | undefined;
   includeVectors?: boolean | undefined;
   /** Distance metric override for this call. */
@@ -980,13 +947,13 @@ export type Vector = Float32Array | number[];
 export interface VectorData {
   id: number | string;
   vector: Vector;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface SearchResult {
   id: number | string;
   dist: number;
-  metadata?: Record<string, any>; // Thêm metadata trực tiếp nếu thường xuyên include
+  metadata?: Record<string, unknown>; // Thêm metadata trực tiếp nếu thường xuyên include
 }
 
 export type DistanceMetric = 'euclidean' | 'cosine';
@@ -1044,7 +1011,7 @@ export interface PartitionConfig {
   active: boolean;
   vectorCount: number;
   description?: string;
-  properties?: Record<string, any>;
+  properties?: Record<string, unknown>;
   // Allow overriding global clustering config per partition
   clustering?: Partial<ClusteringConfiguration>;
 }
@@ -1159,7 +1126,7 @@ export interface IndexingConfiguration {
 
 export interface BaseSearchOptions {
   k?: number | undefined;
-  filter?: ((id: number | string, metadata?: Record<string, any> | null) => boolean) | undefined;
+  filter?: ((id: number | string, metadata?: Record<string, unknown> | null) => boolean) | undefined;
   includeMetadata?: boolean | undefined;
   includeVectors?: boolean | undefined;
   distanceMetric?: DistanceMetric | undefined; // Overrides default if specified
@@ -1172,8 +1139,8 @@ export interface SearchExecutionOptions {
   efSearch?: number | undefined; // Overrides HNSW efSearch config for this query
 }
 
-// Options passed to unified search methods
-export interface UnifiedSearchOptions extends BaseSearchOptions, SearchExecutionOptions {
+// Common search options interface
+export interface SearchOptions extends BaseSearchOptions, SearchExecutionOptions {
   useHNSW?: boolean; // Prefer HNSW if available?
   rerank?: boolean; // Apply reranking?
   rerankingMethod?: RerankingMethod;
@@ -1182,6 +1149,10 @@ export interface UnifiedSearchOptions extends BaseSearchOptions, SearchExecution
   rerankLambda?: number; // Lambda for reranking (if applicable)
   skipCache?: boolean; // Skip cache for this search
   searchMethod?: string; // e.g., 'hnsw', 'lsh', 'hybrid'
+  // Backward compatibility
+  limit?: number; // Alias for k
+  offset?: number; // For pagination
+  stopEarly?: boolean; // Alias for earlyStoppingThreshold
 }
 
 // --- Batch Search Types ---
@@ -1208,7 +1179,7 @@ export interface RerankingOptions {
   method?: RerankingMethod;
   k?: number; // Target number of results after reranking
   // Data needed for specific methods
-  metadataMap?: Map<string | number, any>; // For weighted
+  metadataMap?: Map<string | number, Record<string, unknown>>; // For weighted
   /** Original query vector; used by the diversity (MMR) reranker. */
   queryVector?: Vector;
   /** Vectors for the candidate results; used by the diversity reranker. */
@@ -1313,10 +1284,10 @@ export type PartitionedDBStats = {
 };
 
 /**
- * Statistics structure for UnifiedSearch when operating with PartitionedVectorDB.
+ * Statistics structure for Search when operating with PartitionedVectorDB.
  */
-export interface UnifiedSearchPartitionedStats {
-  /** Statistics related to the search calls made through UnifiedSearch */
+export interface SearchStats {
+  /** Statistics related to the search calls made through Search */
   search: {
     calls: number;
     totalTime: number; // Tổng thời gian (ms) của các lệnh gọi search()
@@ -1335,7 +1306,7 @@ export interface UnifiedSearchPartitionedStats {
     // Có thể thêm stats của reranker nếu có
   };
   // Có thể thêm các mục thống kê khác nếu cần, ví dụ:
-  // cache?: CacheMetricsSnapshotData; // Nếu UnifiedSearch có cache riêng
+  // cache?: CacheMetricsSnapshotData; // Nếu Search có cache riêng
 }
 
 /**
@@ -1437,24 +1408,24 @@ export type DatabaseEvents = {
   'index:error': { partitionId?: string; error: Error | unknown }; // Simplified error event
   'search:start': EmptyPayload;
 
-  // --- Forwarded Search Events (from UnifiedSearch) ---
+  // --- Forwarded Search Events (from Search) ---
   /** Emitted when a search operation (via findNearest/search) completes successfully. */
   'search:complete': {
-    // Define payload based on UnifiedSearch 'search:complete'
+    // Define payload based on Search 'search:complete'
     methodUsed: string;
     searchOnlyTime: number; // Time spent in DB search
     rerankTime: number; // Time spent reranking
     totalTime: number; // Total time for the search call
     resultCount: number;
     kRequested: number;
-    optionsUsed: UnifiedSearchOptions;
+    optionsUsed: SearchOptions;
   };
   /** Emitted when a search operation fails. */
   'search:error': {
-    // Define payload based on UnifiedSearch 'search:error'
+    // Define payload based on Search 'search:error'
     error: Error | unknown;
     method: string;
-    options: UnifiedSearchOptions;
+    options: SearchOptions;
     totalTime: number;
   };
 
@@ -1464,7 +1435,7 @@ export type DatabaseEvents = {
   /** Emitted when the simplified backup (saving configs/indices) completes. */
   'backup:complete': { type: 'config_index' };
   'search:cacheHit': {
-    options: Record<string, any>;
+    options: Record<string, unknown>;
     k: number;
   };
   initializing: void;
@@ -1487,12 +1458,32 @@ export type ISystem = {
 /**
  * Structure containing comprehensive statistics for the DatabasePartitioned instance.
  */
+/**
+ * Payload of the `search:complete` event emitted by the `Search` engine.
+ *
+ * `Database` re-emits it to its own listeners and feeds it to the monitor, so
+ * the engine and the database agree on one shape instead of two.
+ */
+export interface SearchCompleteEvent {
+  /** Method that served the query, e.g. `partitioned-hnsw`. */
+  method: string;
+  /** Time spent inside the database, in ms. */
+  searchOnlyTime: number;
+  /** Time spent reranking, in ms. */
+  rerankTime: number;
+  /** Total time, in ms. */
+  totalTime: number;
+  resultCount: number;
+  kRequested: number;
+  optionsUsed: SearchOptions;
+}
+
 export interface DatabaseStats {
   /** Statistics obtained directly from the underlying PartitionedVectorDB instance. */
   database: PartitionedDBStats | null;
 
   /** Statistics related to search operations performed via this instance. */
-  search: UnifiedSearchPartitionedStats['search'] | null; // Use the search part of UnifiedSearch stats
+  search: SearchStats['search'] | null; // Use the search part of Search stats
 
   /** Statistics for the search result cache managed by DatabasePartitioned. */
   searchCache: {
@@ -1541,7 +1532,7 @@ export interface DatabaseStats {
 export interface AddVectorRequest {
   id?: number | string;
   vector: Vector;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface BulkAddRequest {
@@ -1555,8 +1546,8 @@ export interface SearchRequest {
   query: Vector;
   k?: number;
   method?: string;
-  filters?: Record<string, any>;
-  options?: Record<string, any>;
+  filters?: Record<string, unknown>;
+  options?: Record<string, unknown>;
   includeMetadata?: boolean;
   includeVectors?: boolean;
   useParallel?: boolean;
@@ -1566,31 +1557,31 @@ export interface BatchSearchRequest {
   queries: {
     query: Vector;
     k?: number;
-    filters?: Record<string, any>;
+    filters?: Record<string, unknown>;
   }[];
-  options?: Record<string, any>;
+  options?: Record<string, unknown>;
 }
 
 export interface UpdateMetadataRequest {
   id: number | string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
   operation?: 'replace' | 'merge';
 }
 
 export interface TrainIndexRequest {
   indexType: string;
-  options?: Record<string, any>;
+  options?: Record<string, unknown>;
 }
 
 export interface FilterConfig {
   field: string;
   operator: '$eq' | '$ne' | '$gt' | '$gte' | '$lt' | '$lte' | '$in' | '$nin' | '$exists' | '$regex';
-  value: any;
+  value?: unknown;
 }
 
 export interface SaveLoadDatabaseRequest {
   path: string;
-  options?: Record<string, any>;
+  options?: Record<string, unknown>;
 }
 
 export type IServerOptions = {
@@ -1638,7 +1629,7 @@ export interface ApiContext {
    * timestamp — every response then reported the other request's duration.
    */
   createTimer: () => Timer;
-  createFilterFunction: (filters: Record<string, any> | FilterConfig[]) => (id: number | string, metadata?: Record<string, any> | null) => boolean;
+  createFilterFunction: (filters: Record<string, unknown> | FilterConfig[]) => (id: number | string, metadata?: Record<string, unknown> | null) => boolean;
   database: Database;
   /** Upper bound on vectors a single graph-extraction request may scan. */
   maxGraphExtractionVectors: number;

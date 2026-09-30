@@ -6,6 +6,7 @@ import { promises as fsPromises, existsSync } from 'node:fs';
 import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import { log } from '../utils/log';
+import { errorCode } from '../utils/errors';
 import type { CloseOptions, SaveOptions, VectorStoreSearchOptions } from '../types';
 
 const gzip = promisify(zlib.gzip);
@@ -60,21 +61,21 @@ function deserializeVector(buffer: Buffer, dimension: number): Float32Array {
  * await db.save();
  * ```
  *
- * @fires vector:add - When a vector is added
- * @fires vectors:bulkAdd - When multiple vectors are added
- * @fires vector:delete - When a vector is deleted
- * @fires metadata:add - When metadata is added to a vector
- * @fires metadata:update - When vector metadata is updated
- * @fires db:save - When the database is saved to disk
- * @fires db:load - When the database is loaded from disk
- * @fires db:close - When the database is closed
+ * @event vector:add - When a vector is added
+ * @event vectors:bulkAdd - When multiple vectors are added
+ * @event vector:delete - When a vector is deleted
+ * @event metadata:add - When metadata is added to a vector
+ * @event metadata:update - When vector metadata is updated
+ * @event db:save - When the database is saved to disk
+ * @event db:load - When the database is loaded from disk
+ * @event db:close - When the database is closed
  *
  * @extends EventEmitter
  */
 export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<VectorDBEventData>) {
   public defaultVectorSize: number | null = null;
   public memoryStorage: Map<number | string, Float32Array>;
-  protected metadata: Map<number | string, Record<string, any>>;
+  protected metadata: Map<number | string, Record<string, unknown>>;
   protected vectorDimensions: Map<number | string, number>; // Keep track of individual dimensions
   protected idCounter: number;
   protected dbPath: string | null; // Base path (without extension)
@@ -153,7 +154,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
   addVector(
     id: number | string | undefined,
     vector: Vector,
-    metadata?: Record<string, any> // Allow adding metadata directly
+    metadata?: Record<string, unknown>, // Allow adding metadata directly
   ): number | string {
     const vectorId = id !== undefined ? id : this.idCounter++;
 
@@ -254,7 +255,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     return true;
   }
 
-  addMetadata(id: number | string, data: Record<string, any>): void {
+  addMetadata(id: number | string, data: Record<string, unknown>): void {
     if (!this.memoryStorage.has(id)) {
       // Use hasVector for consistency?
       throw new Error(`Vector with ID ${id} not found`);
@@ -263,20 +264,20 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
     this.emit('metadata:add', { id, metadata: data });
   }
 
-  getMetadata(id: number | string): Record<string, any> | null {
+  getMetadata(id: number | string): Record<string, unknown> | null {
     // Keep existing logic
     return this.metadata.get(id) ?? null;
     // Consider removing automatic type conversion
   }
 
-  updateMetadata(id: number | string, data: Record<string, any> | ((current: Record<string, any> | null) => Record<string, any>)): boolean {
+  updateMetadata(id: number | string, data: Record<string, unknown> | ((current: Record<string, unknown> | null) => Record<string, unknown>)): boolean {
     // Keep existing logic
     if (!this.memoryStorage.has(id)) {
       log('warn', `Attempted to update metadata for non-existent vector ID: ${id}`);
       return false; // Or throw error
     }
     const current = this.metadata.get(id) || null;
-    let updated: Record<string, any>;
+    let updated: Record<string, unknown>;
     if (typeof data === 'function') {
       updated = data(current);
     } else {
@@ -364,18 +365,14 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
   // --- Search (Linear Scan - Base Implementation) ---
 
-  findNearest(
-    query: Vector,
-    k: number = 10,
-    options: VectorStoreSearchOptions = {}
-  ): SearchResult[] {
+  findNearest(query: Vector, k: number = 10, options: VectorStoreSearchOptions = {}): SearchResult[] {
     const typedQuery = query instanceof Float32Array ? query : new Float32Array(query);
     const metric = options.metric ?? 'euclidean'; // Default metric
 
     return this._linearSearch(typedQuery, k, metric, options.filter);
   }
 
-  protected _linearSearch(query: Float32Array, k: number, metric: DistanceMetric, filter?: (id: number | string, metadata?: Record<string, any>) => boolean): SearchResult[] {
+  protected _linearSearch(query: Float32Array, k: number, metric: DistanceMetric, filter?: (id: number | string, metadata?: Record<string, unknown>) => boolean): SearchResult[] {
     const results: SearchResult[] = [];
     const queryDim = query.length;
 
@@ -448,7 +445,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         log('info', '[VectorDB] Meta file path:', metaFilePath);
         log('info', '[VectorDB] Vector file path:', vectorFilePath);
 
-        const metaData: Record<string, any> = {};
+        const metaData: Record<string, unknown> = {};
         this.metadata.forEach((value, key) => {
           // Ensure keys are strings for JSON compatibility
           metaData[String(key)] = value;
@@ -613,8 +610,8 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         count: this.memoryStorage.size,
       });
       log('info', `[VectorDB] Loaded ${this.memoryStorage.size} vectors from ${this.dbPath}`);
-    } catch (error: any) {
-      if (error.code === 'ENOENT') {
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') {
         // Files not found is expected for a new DB, don't throw
         log('info', `Database files not found at ${this.dbPath}. Starting new database.`);
         return; // Don't re-throw ENOENT
@@ -665,11 +662,6 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
       clusters: { count: 0, avgSize: 0, distribution: [], dimensions: {} },
     };
 
-    // Compatibility check for older DBStats type if needed
-    if (!(baseStats.clusters as any).dimensions) {
-      (baseStats.clusters as any).dimensions = {};
-    }
-
     return baseStats;
   }
 
@@ -716,15 +708,15 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
    * ```
    */
   getMetadataWithField(
-    criteria: string | string[] | Record<string, any>,
-    values?: any | any[],
-    options?: { limit?: number } // Optional limit for results
-  ): Array<{ id: number | string; metadata: Record<string, any> }> {
-    const results: Array<{ id: number | string; metadata: Record<string, any> }> = [];
+    criteria: string | string[] | Record<string, unknown>,
+    values?: unknown,
+    options?: { limit?: number }, // Optional limit for results
+  ): Array<{ id: number | string; metadata: Record<string, unknown> }> {
+    const results: Array<{ id: number | string; metadata: Record<string, unknown> }> = [];
 
     // Handle object criteria format (new format)
     if (criteria !== null && typeof criteria === 'object' && !Array.isArray(criteria)) {
-      const criteriaObj = criteria as Record<string, any>;
+      const criteriaObj = criteria as Record<string, unknown>;
       const fields = Object.keys(criteriaObj);
 
       this.metadata.forEach((meta, id) => {
@@ -761,9 +753,7 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
       let match = true;
 
       // Check all fields exist and match values if provided
-      for (let i = 0; i < fieldArray.length; i++) {
-        const field = fieldArray[i];
-
+      for (const [i, field] of fieldArray.entries()) {
         if (!(field in meta)) {
           match = false;
           break;
@@ -797,20 +787,20 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
    */
   extractRelationships(
     threshold: number,
-    metric: DistanceMetric = 'euclidean'
-  ): Array<{ 
-    vector1: number | string; 
-    vector2: number | string; 
+    metric: DistanceMetric = 'euclidean',
+  ): Array<{
+    vector1: number | string;
+    vector2: number | string;
     distance: number;
-    metadata1?: Record<string, any>;
-    metadata2?: Record<string, any>;
+    metadata1?: Record<string, unknown>;
+    metadata2?: Record<string, unknown>;
   }> {
-    const relationships: Array<{ 
-      vector1: number | string; 
-      vector2: number | string; 
+    const relationships: Array<{
+      vector1: number | string;
+      vector2: number | string;
       distance: number;
-      metadata1?: Record<string, any>;
-      metadata2?: Record<string, any>;
+      metadata1?: Record<string, unknown>;
+      metadata2?: Record<string, unknown>;
     }> = [];
 
     // Iterate over all vectors
@@ -839,10 +829,10 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
           // Get metadata for both vectors if available
           const metadata1 = this.metadata.get(id1);
           const metadata2 = this.metadata.get(id2);
-          
-          relationships.push({ 
-            vector1: id1, 
-            vector2: id2, 
+
+          relationships.push({
+            vector1: id1,
+            vector2: id2,
             distance,
             // Omit the keys entirely rather than assigning undefined, so the
             // result objects match the declared optional shape.
@@ -860,30 +850,32 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
   /**
    * Extract communities of related vectors based on distance threshold.
    * A community is a group of vectors where each vector is related to at least one other vector in the group.
-   * 
+   *
    * @param threshold - The maximum distance between vectors to consider them related
    * @param metric - Distance metric to use (e.g., 'cosine', 'euclidean')
    * @returns Array of communities, where each community is an array of related vector information
    */
   extractCommunities(
     threshold: number,
-    metric: DistanceMetric = 'euclidean'
-  ): Array<Array<{
-    id: number | string;
-    metadata?: Record<string, any>;
-  }>> {
+    metric: DistanceMetric = 'euclidean',
+  ): Array<
+    Array<{
+      id: number | string;
+      metadata?: Record<string, unknown>;
+    }>
+  > {
     log('info', `[VectorDB] Extracting vector communities with threshold ${threshold}...`);
-    
+
     // First build a graph representation where each vector is a node
     // and edges exist between vectors with distance <= threshold
     const graph = new Map<number | string, Set<number | string>>();
     const vectorEntries = Array.from(this.memoryStorage.entries());
-    
+
     // Initialize the graph with empty adjacency lists
     for (const [id] of vectorEntries) {
       graph.set(id, new Set());
     }
-    
+
     // Build edges
     for (let i = 0; i < vectorEntries.length; i++) {
       const entry = vectorEntries[i];
@@ -899,10 +891,10 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         if (vector1.length !== vector2.length) {
           continue;
         }
-        
+
         // Calculate distance
         const distance = this._calculateDistance(vector1, vector2, metric);
-        
+
         // Add edge if distance is within threshold
         if (distance <= threshold) {
           graph.get(id1)?.add(id2);
@@ -910,21 +902,23 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
         }
       }
     }
-    
+
     // Use depth-first search to find connected components (communities)
     const visited = new Set<number | string>();
-    const communities: Array<Array<{
-      id: number | string;
-      metadata?: Record<string, any>;
-    }>> = [];
-    
+    const communities: Array<
+      Array<{
+        id: number | string;
+        metadata?: Record<string, unknown>;
+      }>
+    > = [];
+
     for (const [id] of graph.entries()) {
       if (!visited.has(id)) {
         const community: Array<{
           id: number | string;
-          metadata?: Record<string, any>;
+          metadata?: Record<string, unknown>;
         }> = [];
-        
+
         // Iterative DFS. Recursion over a dense component overflowed the call
         // stack (RangeError) for large graphs.
         const stack: Array<number | string> = [id];
@@ -946,14 +940,14 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
             }
           }
         }
-        
+
         // Only include communities with at least 2 vectors
         if (community.length > 1) {
           communities.push(community);
         }
       }
     }
-    
+
     log('info', `[VectorDB] Found ${communities.length} communities`);
     return communities;
   }

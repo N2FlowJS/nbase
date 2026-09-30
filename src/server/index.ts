@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
+import type { Express } from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import net from 'net';
@@ -39,7 +40,7 @@ async function isPortInUse(port: number): Promise<boolean> {
       server.close(() => resolve(inUse));
     };
     server
-      .once('error', (err: any) => {
+      .once('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
           settle(true);
         } else {
@@ -52,7 +53,6 @@ async function isPortInUse(port: number): Promise<boolean> {
       .listen(port);
   });
 }
-
 
 /**
  * Creates and configures an Express server instance with the provided options.
@@ -98,7 +98,7 @@ function createServer(options: IServerOptions = {}): IServerInstance {
   const serverOptions: Required<IServerOptions> = {
     port: options.port || configDefaults.server.port,
     host: options.host || configDefaults.server.host,
-    
+
     database: {
       ...{
         clustering: configDefaults.clustering,
@@ -199,7 +199,7 @@ function createServer(options: IServerOptions = {}): IServerInstance {
   };
 
   // For backward compatibility with tests - attach gracefulShutdown to app
-  (app as any).gracefulShutdown = gracefulShutdown;
+  (app as Express & { gracefulShutdown?: () => Promise<void> }).gracefulShutdown = gracefulShutdown;
 
   // Return both for new code that expects the new format
   // but also make app the default export for backward compatibility

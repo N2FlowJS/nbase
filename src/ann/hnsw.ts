@@ -81,7 +81,7 @@ class HNSW {
       let sum = 0;
       const len = Math.min(a.length, b.length);
       let i = 0;
-      
+
       // Unroll by 8.
       // The `?? 0` fallbacks are unreachable: every index below is < len and
       // len <= min(a.length, b.length). They are required because
@@ -98,12 +98,12 @@ class HNSW {
         const d7 = (a[i + 7] ?? 0) - (b[i + 7] ?? 0);
         sum += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4 + d5 * d5 + d6 * d6 + d7 * d7;
       }
-      
+
       for (; i < len; i++) {
         const diff = (a[i] ?? 0) - (b[i] ?? 0);
         sum += diff * diff;
       }
-      
+
       // Dimension penalty - only if dimensionAware
       if (this.dimensionAware) {
         const dimDiff = Math.abs(a.length - b.length);
@@ -673,7 +673,7 @@ class HNSW {
   private _withEffectiveFilter(options: VectorStoreSearchOptions): VectorStoreSearchOptions {
     const baseFilter = options.filter;
 
-    const filter = (id: number | string, _metadata?: Record<string, any> | null): boolean => {
+    const filter = (id: number | string, _metadata?: Record<string, unknown> | null): boolean => {
       if (this.deletedNodes.has(id)) return false;
       if (!baseFilter) return true;
       // Resolve metadata here: the graph only stores ids.
@@ -687,7 +687,7 @@ class HNSW {
    * Resolves metadata for an id, tolerating providers that do not implement it.
    * @private
    */
-  private _resolveMetadata(id: number | string): Record<string, any> | null {
+  private _resolveMetadata(id: number | string): Record<string, unknown> | null {
     if (typeof this.db.getMetadata !== 'function') return null;
     try {
       return this.db.getMetadata(id) ?? null;
@@ -797,7 +797,7 @@ class HNSW {
     // If dimension-aware, process each dimension group separately to avoid cross-dimension connections
     if (dimensionAware) {
       for (const [dimension, ids] of this.dimensionGroups.entries()) {
-        log('info', `${dimension} in ids`)
+        log('info', `${dimension} in ids`);
         // Optimized Map iteration
         const dimensionIds = Array.from(ids);
 
@@ -1227,7 +1227,7 @@ class HNSW {
             ([level, connections]) => ({
               level,
               connections: Array.from(connections), // Optimized Set to Array conversion
-            })
+            }),
           ),
         })) || [],
     };
@@ -1376,25 +1376,22 @@ class HNSW {
       // Path to the worker file (adjust based on build output)
       const workerPath = path.resolve(__dirname, 'hnsw_worker.js');
       // If running via ts-node, we might need to use the .ts file and register ts-node
-      const isTsNode = process.env['TS_NODE_DEV'] || process.argv.some(arg => arg.includes('ts-node')) || __filename.endsWith('.ts');
+      const isTsNode = process.env['TS_NODE_DEV'] || process.argv.some((arg) => arg.includes('ts-node')) || __filename.endsWith('.ts');
 
-      const worker = new Worker(
-        isTsNode ? path.resolve(__dirname, 'hnsw_worker.ts') : workerPath,
-        {
-          workerData: {
-            vectorMap,
-            options: {
-              M: this.M,
-              efConstruction: this.efConstruction,
-              efSearch: this.efSearch,
-              maxLevel: this.maxLevel,
-              levelProbability: this.levelProbability,
-              dimensionAware: options.dimensionAware !== false,
-            },
+      const worker = new Worker(isTsNode ? path.resolve(__dirname, 'hnsw_worker.ts') : workerPath, {
+        workerData: {
+          vectorMap,
+          options: {
+            M: this.M,
+            efConstruction: this.efConstruction,
+            efSearch: this.efSearch,
+            maxLevel: this.maxLevel,
+            levelProbability: this.levelProbability,
+            dimensionAware: options.dimensionAware !== false,
           },
-          execArgv: isTsNode ? ['-r', 'ts-node/register'] : [],
-        }
-      );
+        },
+        execArgv: isTsNode ? ['-r', 'ts-node/register'] : [],
+      });
 
       let settled = false;
       let terminating = false;
@@ -1429,18 +1426,16 @@ class HNSW {
             // structuredClone has already revived the Maps/Sets, so these
             // assignments are plain state swaps (not a TS-visibility workaround).
             const result = HNSW.deserialize(message.result, this.db);
-            (this as any).nodes = (result as any).nodes;
-            (this as any).nodeToLevel = (result as any).nodeToLevel;
-            (this as any).nodeDimensions = (result as any).nodeDimensions;
-            (this as any).dimensionGroups = (result as any).dimensionGroups;
-            (this as any).dimensionEntryPoints = (result as any).dimensionEntryPoints;
-            (this as any).entryPointId = (result as any).entryPointId;
-            (this as any).initialized = true;
+            this.nodes = result.nodes;
+            this.nodeToLevel = result.nodeToLevel;
+            this.nodeDimensions = result.nodeDimensions;
+            this.dimensionGroups = result.dimensionGroups;
+            this.dimensionEntryPoints = result.dimensionEntryPoints;
+            this.entryPointId = result.entryPointId;
+            this.initialized = true;
             void shutdown().finally(() => resolve());
           } catch (error) {
-            void shutdown().finally(() =>
-              reject(error instanceof Error ? error : new Error(String(error)))
-            );
+            void shutdown().finally(() => reject(error instanceof Error ? error : new Error(String(error))));
           }
         } else if (message.type === 'error') {
           fail(new Error(message.error));

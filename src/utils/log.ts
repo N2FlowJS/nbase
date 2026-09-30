@@ -6,9 +6,7 @@ import * as path from 'node:path';
  */
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
-const LOG_DIR = process.env['NBASE_LOG_DIR']
-  ? path.resolve(process.env['NBASE_LOG_DIR'])
-  : path.resolve(__dirname, '../../logs');
+const LOG_DIR = process.env['NBASE_LOG_DIR'] ? path.resolve(process.env['NBASE_LOG_DIR']) : path.resolve(__dirname, '../../logs');
 const MAX_LINES = 1000;
 
 /**
@@ -59,7 +57,7 @@ function writeLogLine(line: string): void {
   currentLineCount++;
 }
 
-export const log = (level: LogLevel, message: string, ...args: any[]): void => {
+export const log = (level: LogLevel, message: string, ...args: unknown[]): void => {
   // Always emit to the console; a library should not go silent in a host app.
   const color = colors[level];
   switch (level) {
@@ -79,9 +77,7 @@ export const log = (level: LogLevel, message: string, ...args: any[]): void => {
 
   if (logToFile) {
     const timestamp = new Date().toISOString();
-    const logLine =
-      `[${timestamp}] [${level.toUpperCase()}] ${message}` +
-      (args.length ? ' ' + args.map((a) => JSON.stringify(a)).join(' ') : '');
+    const logLine = `[${timestamp}] [${level.toUpperCase()}] ${message}` + (args.length ? ' ' + args.map((a) => JSON.stringify(a)).join(' ') : '');
     writeLogLine(logLine);
   }
 };

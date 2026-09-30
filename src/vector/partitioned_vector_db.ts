@@ -7,9 +7,29 @@ import { LRUCache } from 'lru-cache'; // Using a robust LRU cache library
 import path from 'path';
 import HNSW from '../ann/hnsw'; // Assuming HNSW is a class for the clustering algorithm
 import { log } from '../utils/log';
+import { errorCode, errorMessage } from '../utils/errors';
 
 import defaultSystemConfiguration from '../config';
-import { BuildIndexHNSWOptions, CloseOptions, ClusteredVectorDBOptions, DBStats, DistanceMetric, HNSWStats, PartitionConfig, PartitionedDBEventData, PartitionedDBStats, PartitionedVectorDBInterface, PartitionedVectorDBOptions, SaveOptions, SearchOptions, SearchResult, TypedEventEmitter, Vector, VectorData, VectorStoreSearchOptions } from '../types'; // Adjust path as needed
+import {
+  BuildIndexHNSWOptions,
+  CloseOptions,
+  ClusteredVectorDBOptions,
+  DBStats,
+  DistanceMetric,
+  HNSWStats,
+  PartitionConfig,
+  PartitionedDBEventData,
+  PartitionedDBStats,
+  PartitionedVectorDBInterface,
+  PartitionedVectorDBOptions,
+  SaveOptions,
+  SearchOptions,
+  SearchResult,
+  TypedEventEmitter,
+  Vector,
+  VectorData,
+  VectorStoreSearchOptions,
+} from '../types'; // Adjust path as needed
 import { ClusteredVectorDB } from './clustered_vector_db';
 
 // --- Types ---
@@ -166,7 +186,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     this.autoLoadHNSW = options.autoLoadHNSW ?? true; // Default true
     this.runKMeansOnLoad = options.runKMeansOnLoad ?? defaultSystemConfiguration.indexing.runKMeansOnLoad ?? false;
 
-    log('info', `[PartitionedVectorDB] Configuration:
+    log(
+      'info',
+      `[PartitionedVectorDB] Configuration:
       - partitionsDir: ${this.partitionsDir}
       - partitionCapacity: ${this.partitionCapacity}
       - maxActivePartitions: ${this.maxActivePartitions}
@@ -174,7 +196,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       - vectorSize: ${this.vectorSize ?? 'not specified'}
       - useCompression: ${this.useCompression}
       - autoLoadHNSW: ${this.autoLoadHNSW}
-      - runKMeansOnLoad: ${this.runKMeansOnLoad}`);
+      - runKMeansOnLoad: ${this.runKMeansOnLoad}`,
+    );
 
     this.partitionConfigs = new Map();
     this.hnswIndices = new Map();
@@ -205,7 +228,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           // on the eviction path.
           await dbInstance.close({ save: false });
           this.emit('partition:unloaded', { id: partitionId });
-        } catch (error: any) {
+        } catch (error) {
           log('error', `[PartitionedVectorDB] Error closing partition ${partitionId} during dispose:`, error);
           this.emit('partition:error', {
             id: partitionId,
@@ -221,9 +244,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       if (!existsSync(this.partitionsDir)) {
         mkdirSync(this.partitionsDir, { recursive: true });
       }
-    } catch (err: any) {
+    } catch (err) {
       // Fatal if we cannot ensure the base directory exists
-      throw new Error(`FATAL: Could not create or access partitions directory: ${this.partitionsDir} - ${err.message}`);
+      throw new Error(`FATAL: Could not create or access partitions directory: ${this.partitionsDir} - ${errorMessage(err)}`);
     }
 
     // Defer actual loading to an async method
@@ -283,7 +306,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         loadedCount: this.loadedPartitions.size,
         activeId: this.activePartitionId,
       });
-    } catch (err: any) {
+    } catch (err) {
       log('error', `[PartitionedVectorDB] FATAL: Error during initialization:`, err);
       this.emit('partition:error', { error: err, operation: 'initialize' });
       // Potentially set a flag indicating failed initialization?
@@ -333,7 +356,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
             } else {
               log('warn', `[PartitionedVectorDB] Invalid partition config format or mismatched ID/DirName: ${configPath}`);
             }
-          } catch (e: any) {
+          } catch (e) {
             log('warn', `[PartitionedVectorDB] Error reading/parsing partition config ${configPath}:`, e);
           }
         } else {
@@ -369,8 +392,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         count: this.partitionConfigs.size,
         active: this.activePartitionId,
       });
-    } catch (error: any) {
-      if (error.code === 'ENOENT' && !existsSync(this.partitionsDir)) {
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT' && !existsSync(this.partitionsDir)) {
         log('warn', `[PartitionedVectorDB] Partitions directory ${this.partitionsDir} not found. It will be created when needed.`);
         // If autoCreate is on, the first partition creation will handle it.
       } else {
@@ -392,7 +415,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    */
   private async _loadPartition(
     partitionId: string,
-    loadHNSW: boolean = this.autoLoadHNSW // Use instance default
+    loadHNSW: boolean = this.autoLoadHNSW, // Use instance default
   ): Promise<ClusteredVectorDB | null> {
     if (this.isClosing) return null; // Prevent loading during close
 
@@ -419,10 +442,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     return loadPromise;
   }
 
-  private async _loadPartitionInternal(
-    partitionId: string,
-    loadHNSW: boolean = this.autoLoadHNSW
-  ): Promise<ClusteredVectorDB | null> {
+  private async _loadPartitionInternal(partitionId: string, loadHNSW: boolean = this.autoLoadHNSW): Promise<ClusteredVectorDB | null> {
     if (this.isClosing) return null;
 
     const config = this.partitionConfigs.get(partitionId);
@@ -489,7 +509,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       const vectorDB = new ClusteredVectorDB(
         this.vectorSize, // Pass the suggested vector size
         dbBasePath, // Pass the base path for data files
-        clusterDbOptions
+        clusterDbOptions,
       );
       // The constructor already kicked off a load; await that one rather than
       // starting a second full read of the same files.
@@ -529,7 +549,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       }
 
       return vectorDB;
-    } catch (error: any) {
+    } catch (error) {
       log('error', `[PartitionedVectorDB] Error loading partition DB ${partitionId} from ${dbBasePath}:`, error);
       // Clean up potentially partially loaded state? Remove from cache if added?
       this.loadedPartitions.delete(partitionId);
@@ -574,8 +594,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           path: indexPath,
         });
         return true;
-      } catch (error: any) {
-        log('error', `[PartitionedVectorDB] Error loading HNSW index for partition ${partitionId} from ${indexPath}:`, error.message || error);
+      } catch (error) {
+        log('error', `[PartitionedVectorDB] Error loading HNSW index for partition ${partitionId} from ${indexPath}:`, errorMessage(error));
         this.emit('partition:error', {
           id: partitionId,
           error,
@@ -627,7 +647,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         path: indexPath,
       });
       return true;
-    } catch (error: any) {
+    } catch (error) {
       log('error', `[PartitionedVectorDB] Error saving HNSW index for partition ${partitionId} to ${indexPath}:`, error);
       this.emit('partition:error', {
         id: partitionId,
@@ -671,8 +691,9 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   /**
    * Explicitly save the entire state: configs, loaded partition data, and loaded HNSW indices.
    *
-   * @param options.force Bypasses the `isClosing` guard so `close()` can perform
-   *   its final flush. Without it, `close()` was guaranteed to save nothing.
+   * @param options `force` bypasses the `isClosing` guard so `close()` can
+   *   perform its final flush. Without it, `close()` was guaranteed to save
+   *   nothing.
    */
   async save(options: SaveOptions = {}): Promise<void> {
     await this._ensureInitialized(false, options.force === true);
@@ -804,7 +825,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         });
         log('info', `[PartitionedVectorDB] HNSW index built successfully for partition ${id}.`);
         this.emit('partition:indexed', { id, indexType: 'hnsw' });
-      } catch (error: any) {
+      } catch (error) {
         log('error', `[PartitionedVectorDB] Error building HNSW index for partition ${id}:`, error);
         this.emit('partition:error', {
           id,
@@ -829,11 +850,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    * Find nearest neighbors using HNSW indices across specified or all *loaded* partitions.
    * Optimized for parallel search. Loads partitions/indices if needed.
    */
-  async findNearestHNSW(
-    query: Vector,
-    k: number = 10,
-    options: VectorStoreSearchOptions = {}
-  ): Promise<SearchResult[]> {
+  async findNearestHNSW(query: Vector, k: number = 10, options: VectorStoreSearchOptions = {}): Promise<SearchResult[]> {
     await this._ensureInitialized();
 
     const queryVector = query instanceof Float32Array ? query : new Float32Array(query);
@@ -899,7 +916,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           });
           return []; // Return empty results for this partition on error
         }
-      })
+      }),
     );
 
     // Flatten results, sort by distance, and take top k
@@ -1038,7 +1055,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           await Promise.all(savePromises);
           log('info', `[PartitionedVectorDB] Saved ${configsToSave.length} partition configurations.`);
           this.emit('config:saved', undefined);
-        } catch (error: any) {
+        } catch (error) {
           log('error', '[PartitionedVectorDB] Error saving one or more partition configs:', error);
           // Surface the failure instead of reporting a successful save.
           this.emit('partition:error', { error, operation: 'savePartitionConfigs' });
@@ -1076,7 +1093,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         await fs.mkdir(partitionDir, { recursive: true });
       }
       await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
-    } catch (error: any) {
+    } catch (error) {
       log('error', `[PartitionedVectorDB] Error saving config ${config.id} to ${configPath}:`, error);
       this.emit('partition:error', {
         id: config.id,
@@ -1094,11 +1111,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     name: string,
     options: {
       description?: string;
-      properties?: Record<string, any>;
+      properties?: Record<string, unknown>;
       setActive?: boolean;
       clusterSize?: number;
       skipInitializationCheck?: boolean; // Internal flag
-    } = {}
+    } = {},
   ): Promise<string> {
     // Allow skipping check only for internal calls during initial setup
     if (!options.skipInitializationCheck) {
@@ -1125,7 +1142,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       if (!existsSync(partitionDataDirData)) {
         await fs.mkdir(partitionDataDirData, { recursive: true });
       }
-    } catch (error: any) {
+    } catch (error) {
       log('error', `[PartitionedVectorDB] Failed to create directory for new partition ${id}: ${partitionDataDir}`, error);
       this.emit('partition:error', {
         id,
@@ -1133,7 +1150,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         operation: 'createDir',
         path: partitionDataDir,
       });
-      throw new Error(`Failed to create directory for partition ${id}: ${error.message}`);
+      throw new Error(`Failed to create directory for partition ${id}: ${errorMessage(error)}`);
     }
 
     const newConfig: PartitionConfig = {
@@ -1172,7 +1189,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       const vectorDB = new ClusteredVectorDB(
         this.vectorSize,
         path.join(partitionDataDir, 'data'), // Base path for data files
-        clusterDbOptions
+        clusterDbOptions,
       );
 
       // Save the initial state of the database
@@ -1319,7 +1336,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   }
 
   /** Add a single vector */
-  async addVector(id: number | string | undefined, vector: Vector, metadata?: Record<string, any>): Promise<{ partitionId: string; vectorId: number | string }> {
+  async addVector(id: number | string | undefined, vector: Vector, metadata?: Record<string, unknown>): Promise<{ partitionId: string; vectorId: number | string }> {
     await this._ensureInitialized();
 
     const partition = await this._ensureActivePartitionHasCapacity(1);
@@ -1383,9 +1400,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         // rotate. Retrying here spun forever with neither `remainingVectors`
         // nor the active partition changing, so the loop never terminated.
         // Surface it as an error instead.
-        throw new Error(
-          `Partition ${partitionId} reported no available capacity (${config.vectorCount}/${this.partitionCapacity}) and did not rotate to a new partition, with ${remainingVectors.length} vectors still pending.`
-        );
+        throw new Error(`Partition ${partitionId} reported no available capacity (${config.vectorCount}/${this.partitionCapacity}) and did not rotate to a new partition, with ${remainingVectors.length} vectors still pending.`);
       }
 
       const batchToAdd = remainingVectors.slice(0, batchSize);
@@ -1405,7 +1420,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         for (const item of batchToAdd.slice(0, countInBatch)) {
           // Process only successfully added items
           const actualId = item.id ?? null; // How to get the real ID if it was auto-generated? This is a limitation.
-          const vectorData = partition.getVector(actualId as any); // Re-fetch vector data - INEFFICIENT
+          // Re-fetch vector data - INEFFICIENT
+          const vectorData = actualId !== null ? partition.getVector(actualId) : null;
           if (vectorData && actualId !== null) {
             vectorsForIndex.push({ vector: vectorData, id: actualId });
           } else if (!item.id) {
@@ -1479,7 +1495,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   }
 
   /** Get metadata by ID. Searches loaded partitions only. */
-  async getMetadata(id: number | string): Promise<{ partitionId: string; metadata: Record<string, any> } | null> {
+  async getMetadata(id: number | string): Promise<{ partitionId: string; metadata: Record<string, unknown> } | null> {
     await this._ensureInitialized();
     for (const partitionId of this.loadedPartitions.keys()) {
       const partition = this.loadedPartitions.peek(partitionId);
@@ -1552,7 +1568,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   }
 
   /** Update metadata for a vector by ID. Searches loaded partitions only. */
-  async updateMetadata(id: number | string, data: Record<string, any> | ((current: Record<string, any> | null) => Record<string, any>)): Promise<boolean> {
+  async updateMetadata(id: number | string, data: Record<string, unknown> | ((current: Record<string, unknown> | null) => Record<string, unknown>)): Promise<boolean> {
     await this._ensureInitialized();
 
     for (const partitionId of this.loadedPartitions.keys()) {
@@ -1600,7 +1616,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   async findNearest(
     query: Vector,
     k: number = 10,
-    options: SearchOptions = {} // Uses SearchOptions now
+    options: SearchOptions = {}, // Uses SearchOptions now
   ): Promise<SearchResult[]> {
     await this._ensureInitialized();
 
@@ -1751,15 +1767,15 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
    * ```
    */
   async getMetadataWithFieldAcrossPartitions(
-    criteria: string | string[] | Record<string, any>,
-    values?: any | any[],
+    criteria: string | string[] | Record<string, unknown>,
+    values?: unknown,
     option?: {
       limit: number;
-    }
-  ): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, any> }>> {
+    },
+  ): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }>> {
     await this._ensureInitialized();
 
-    const results: Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, any> }> = [];
+    const results: Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }> = [];
 
     // Search across all loaded partitions
     for (const partitionId of this.loadedPartitions.keys()) {
@@ -1806,13 +1822,13 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       metric?: DistanceMetric;
       partitionIds?: string[];
       includeMetadata?: boolean;
-    } = {}
+    } = {},
   ): Promise<
     Array<
       Array<{
         id: number | string;
         partitionId: string;
-        metadata?: Record<string, any>;
+        metadata?: Record<string, unknown>;
       }>
     >
   > {
@@ -1836,7 +1852,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       Array<
         Array<{
           id: number | string;
-          metadata?: Record<string, any>;
+          metadata?: Record<string, unknown>;
         }>
       >
     > = new Map();
@@ -1917,7 +1933,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       Array<{
         id: number | string;
         partitionId: string;
-        metadata?: Record<string, any>;
+        metadata?: Record<string, unknown>;
       }>
     > = [];
 
@@ -1928,7 +1944,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
         const community: Array<{
           id: number | string;
           partitionId: string;
-          metadata?: Record<string, any>;
+          metadata?: Record<string, unknown>;
         }> = [];
 
         // Iterative DFS to find connected components. The recursive version
@@ -1947,7 +1963,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           const localId = entry ? entry.id : rest.join(':');
 
           // Find metadata if requested
-          let metadata: Record<string, any> | null = null;
+          let metadata: Record<string, unknown> | null = null;
           if (options.includeMetadata !== false) {
             const partition = this.loadedPartitions.peek(partId);
             if (partition) {
@@ -1995,11 +2011,11 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
       metric?: DistanceMetric;
       partitionIds?: string[];
       includeMetadata?: boolean;
-    } = {}
+    } = {},
   ): Promise<
     Array<{
-      vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
-      vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      vector1: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
+      vector2: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
       distance: number;
     }>
   > {
@@ -2016,8 +2032,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     log('info', `[PartitionedVectorDB] Extracting vector relationships with threshold ${threshold} from ${partitionIds.length} partitions...`);
 
     const relationships: Array<{
-      vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
-      vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      vector1: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
+      vector2: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
       distance: number;
     }> = [];
 
@@ -2039,8 +2055,8 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
           // Seeding the field with `undefined as ...` made the object a
           // different shape than the declared optional one.
           const relationship: {
-            vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
-            vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+            vector1: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
+            vector2: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
             distance: number;
           } = {
             vector1: { id: rel.vector1, partitionId },

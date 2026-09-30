@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { ApiContext, SearchResult, UnifiedSearchOptions } from '../../types';
+import { ApiContext, SearchResult, SearchOptions } from '../../types';
 import { asyncHandler } from '../utils/async_handler';
 
 /**
@@ -140,79 +140,82 @@ export function searchRoutes(context: ApiContext) {
    *     }
    *
    */
-  router.post('/', asyncHandler(async function (req: Request, res: Response) {
-    const timer = createTimer();
-    timer.start('search');
+  router.post(
+    '/',
+    asyncHandler(async function (req: Request, res: Response) {
+      const timer = createTimer();
+      timer.start('search');
 
-    const { query, k, method, partitionIds, efSearch, distanceMetric, rerank, rerankingMethod, rerankLambda, filters = {}, includeMetadata, includeVectors, skipCache, searchTimeoutMs } = req.body;
+      const { query, k, method, partitionIds, efSearch, distanceMetric, rerank, rerankingMethod, rerankLambda, filters = {}, includeMetadata, includeVectors, skipCache, searchTimeoutMs } = req.body;
 
-    if (!query || !Array.isArray(query)) {
-      res.status(400).json({
-        error: 'Invalid request: query vector array is required',
-      });
-      return;
-    }
+      if (!query || !Array.isArray(query)) {
+        res.status(400).json({
+          error: 'Invalid request: query vector array is required',
+        });
+        return;
+      }
 
-    try {
-      const hasFilters = Array.isArray(filters) ? filters.length > 0 : Object.keys(filters).length > 0;
+      try {
+        const hasFilters = Array.isArray(filters) ? filters.length > 0 : Object.keys(filters).length > 0;
 
-      // Build comprehensive search options
-      const searchOptions: UnifiedSearchOptions = {
-        k,
-        useHNSW: method === 'hnsw',
-        // Only include filter if filters are present
-        filter: hasFilters ? createFilterFunction(filters) : undefined,
-        includeMetadata,
-        includeVectors,
-        skipCache,
-        partitionIds,
-        efSearch,
-        distanceMetric,
-        rerank,
-        rerankingMethod,
-        rerankLambda,
-        searchTimeoutMs,
-      };
-
-      // Remove undefined options to avoid overriding defaults
-      Object.keys(searchOptions).forEach((key) => {
-        if (searchOptions[key as keyof UnifiedSearchOptions] === undefined) {
-          delete searchOptions[key as keyof UnifiedSearchOptions];
-        }
-      });
-
-      const results: SearchResult[] = await database.findNearest(query, k, searchOptions);
-
-      const duration = timer.stop('search').total;
-
-      // Return enhanced response with details
-      res.json({
-        results,
-        count: results.length,
-        duration,
-        searchOptions: {
+        // Build comprehensive search options
+        const searchOptions: SearchOptions = {
           k,
-          method: method === 'hnsw' ? 'hnsw' : 'clustered',
-          partitionsSearched: partitionIds?.length || 'all',
-          rerankApplied: rerank,
-          cacheUsed: !skipCache,
-          filtersApplied: hasFilters,
-        },
-      });
-      return;
-    } catch (error) {
-      const duration = timer.stop('search').total;
-      console.error('Search error:', error);
+          useHNSW: method === 'hnsw',
+          // Only include filter if filters are present
+          filter: hasFilters ? createFilterFunction(filters) : undefined,
+          includeMetadata,
+          includeVectors,
+          skipCache,
+          partitionIds,
+          efSearch,
+          distanceMetric,
+          rerank,
+          rerankingMethod,
+          rerankLambda,
+          searchTimeoutMs,
+        };
 
-      // Provide detailed error response
-      res.status(500).json({
-        error: (error as Error).message,
-        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
-        duration,
-      });
-      return;
-    }
-  }));
+        // Remove undefined options to avoid overriding defaults
+        Object.keys(searchOptions).forEach((key) => {
+          if (searchOptions[key as keyof SearchOptions] === undefined) {
+            delete searchOptions[key as keyof SearchOptions];
+          }
+        });
+
+        const results: SearchResult[] = await database.findNearest(query, k, searchOptions);
+
+        const duration = timer.stop('search').total;
+
+        // Return enhanced response with details
+        res.json({
+          results,
+          count: results.length,
+          duration,
+          searchOptions: {
+            k,
+            method: method === 'hnsw' ? 'hnsw' : 'clustered',
+            partitionsSearched: partitionIds?.length || 'all',
+            rerankApplied: rerank,
+            cacheUsed: !skipCache,
+            filtersApplied: hasFilters,
+          },
+        });
+        return;
+      } catch (error) {
+        const duration = timer.stop('search').total;
+        console.error('Search error:', error);
+
+        // Provide detailed error response
+        res.status(500).json({
+          error: (error as Error).message,
+          stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
+          duration,
+        });
+        return;
+      }
+    }),
+  );
   /**
    * Metadata search endpoint
    *
@@ -265,62 +268,65 @@ export function searchRoutes(context: ApiContext) {
    * }
    * @returns Array of metadata entries matching the criteria with partition and vector IDs
    */
-  router.post('/metadata', asyncHandler(async function (req: Request, res: Response) {
-    const timer = createTimer();
-    timer.start('metadata_search');
+  router.post(
+    '/metadata',
+    asyncHandler(async function (req: Request, res: Response) {
+      const timer = createTimer();
+      timer.start('metadata_search');
 
-    const { criteria, values, includeVectors = false, limit } = req.body;
+      const { criteria, values, includeVectors = false, limit } = req.body;
 
-    // Validate that criteria is provided and is of the right type
-    if (criteria === undefined || (typeof criteria !== 'string' && !Array.isArray(criteria) && (typeof criteria !== 'object' || criteria === null))) {
-      res.status(400).json({
-        error: 'Invalid request: criteria must be a string, array of strings, or object with field-value pairs',
-      });
-      return;
-    }
-
-    try {
-      // Call the database method to get metadata with matching fields
-      const results = await database.getMetadataWithField(criteria, values, { limit });
-
-      // If includeVectors is true, fetch vectors for each result
-      if (includeVectors) {
-        const resultsWithVectors = await Promise.all(
-          results.map(async (item: { partitionId: string; vectorId: number | string; metadata: Record<string, any> }) => {
-            const vectorData = await database.getVector(item.vectorId);
-            return {
-              ...item,
-              vector: vectorData ? vectorData.vector : null,
-            };
-          })
-        );
-
-        const duration = timer.stop('metadata_search').total;
-        res.json({
-          results: resultsWithVectors,
-          count: resultsWithVectors.length,
-          duration,
+      // Validate that criteria is provided and is of the right type
+      if (criteria === undefined || (typeof criteria !== 'string' && !Array.isArray(criteria) && (typeof criteria !== 'object' || criteria === null))) {
+        res.status(400).json({
+          error: 'Invalid request: criteria must be a string, array of strings, or object with field-value pairs',
         });
         return;
       }
 
-      const duration = timer.stop('metadata_search').total;
-      res.json({
-        results,
-        count: results.length,
-        duration,
-      });
-    } catch (error) {
-      const duration = timer.stop('metadata_search').total;
-      console.error('Metadata search error:', error);
+      try {
+        // Call the database method to get metadata with matching fields
+        const results = await database.getMetadataWithField(criteria, values, { limit });
 
-      res.status(500).json({
-        error: (error as Error).message,
-        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
-        duration,
-      });
-    }
-  }));
+        // If includeVectors is true, fetch vectors for each result
+        if (includeVectors) {
+          const resultsWithVectors = await Promise.all(
+            results.map(async (item: { partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }) => {
+              const vectorData = await database.getVector(item.vectorId);
+              return {
+                ...item,
+                vector: vectorData ? vectorData.vector : null,
+              };
+            }),
+          );
+
+          const duration = timer.stop('metadata_search').total;
+          res.json({
+            results: resultsWithVectors,
+            count: resultsWithVectors.length,
+            duration,
+          });
+          return;
+        }
+
+        const duration = timer.stop('metadata_search').total;
+        res.json({
+          results,
+          count: results.length,
+          duration,
+        });
+      } catch (error) {
+        const duration = timer.stop('metadata_search').total;
+        console.error('Metadata search error:', error);
+
+        res.status(500).json({
+          error: (error as Error).message,
+          stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
+          duration,
+        });
+      }
+    }),
+  );
 
   /**
    * Vector relationships extraction endpoint
@@ -364,57 +370,58 @@ export function searchRoutes(context: ApiContext) {
    * }
    * ```
    */
-  router.post('/relationships', asyncHandler(async function (req: Request, res: Response) {
-    const timer = createTimer();
-    timer.start('extract_relationships');
+  router.post(
+    '/relationships',
+    asyncHandler(async function (req: Request, res: Response) {
+      const timer = createTimer();
+      timer.start('extract_relationships');
 
-    const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
+      const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
 
-    if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
-      res.status(400).json({
-        error: 'Invalid request: threshold must be a positive number',
-      });
-      return;
-    }
+      if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
+        res.status(400).json({
+          error: 'Invalid request: threshold must be a positive number',
+        });
+        return;
+      }
 
-    // Both graph endpoints compare every pair of vectors (O(n^2)). Reject a
-    // request that would exceed the configured scan budget rather than letting
-    // a single HTTP call stall the event loop for minutes.
-    const totalVectors = (await database.getStats()).database?.vectors.totalInMemory ?? 0;
-    if (totalVectors > maxGraphExtractionVectors) {
-      res.status(413).json({
-        error:
-          `Request would scan ${totalVectors} vectors, above the limit of ${maxGraphExtractionVectors}. ` +
-          `Narrow it with 'partitionIds' or raise the server's maxGraphExtractionVectors.`,
-      });
-      return;
-    }
+      // Both graph endpoints compare every pair of vectors (O(n^2)). Reject a
+      // request that would exceed the configured scan budget rather than letting
+      // a single HTTP call stall the event loop for minutes.
+      const totalVectors = (await database.getStats()).database?.vectors.totalInMemory ?? 0;
+      if (totalVectors > maxGraphExtractionVectors) {
+        res.status(413).json({
+          error: `Request would scan ${totalVectors} vectors, above the limit of ${maxGraphExtractionVectors}. ` + `Narrow it with 'partitionIds' or raise the server's maxGraphExtractionVectors.`,
+        });
+        return;
+      }
 
-    try {
-      const relationships = await database.extractRelationships(threshold, {
-        metric,
-        partitionIds,
-        includeMetadata,
-      });
+      try {
+        const relationships = await database.extractRelationships(threshold, {
+          metric,
+          partitionIds,
+          includeMetadata,
+        });
 
-      const duration = timer.stop('extract_relationships').total;
+        const duration = timer.stop('extract_relationships').total;
 
-      res.json({
-        relationships,
-        count: relationships.length,
-        duration,
-      });
-    } catch (error) {
-      const duration = timer.stop('extract_relationships').total;
-      console.error('Relationship extraction error:', error);
+        res.json({
+          relationships,
+          count: relationships.length,
+          duration,
+        });
+      } catch (error) {
+        const duration = timer.stop('extract_relationships').total;
+        console.error('Relationship extraction error:', error);
 
-      res.status(500).json({
-        error: (error as Error).message,
-        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
-        duration,
-      });
-    }
-  }));
+        res.status(500).json({
+          error: (error as Error).message,
+          stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
+          duration,
+        });
+      }
+    }),
+  );
 
   /**
    * Vector communities extraction endpoint
@@ -459,58 +466,59 @@ export function searchRoutes(context: ApiContext) {
    * }
    * ```
    */
-  router.post('/communities', asyncHandler(async function (req: Request, res: Response) {
-    const timer = createTimer();
-    timer.start('extract_communities');
+  router.post(
+    '/communities',
+    asyncHandler(async function (req: Request, res: Response) {
+      const timer = createTimer();
+      timer.start('extract_communities');
 
-    const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
+      const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
 
-    if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
-      res.status(400).json({
-        error: 'Invalid request: threshold must be a positive number',
-      });
-      return;
-    }
+      if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
+        res.status(400).json({
+          error: 'Invalid request: threshold must be a positive number',
+        });
+        return;
+      }
 
-    // Both graph endpoints compare every pair of vectors (O(n^2)). Reject a
-    // request that would exceed the configured scan budget rather than letting
-    // a single HTTP call stall the event loop for minutes.
-    const totalVectors = (await database.getStats()).database?.vectors.totalInMemory ?? 0;
-    if (totalVectors > maxGraphExtractionVectors) {
-      res.status(413).json({
-        error:
-          `Request would scan ${totalVectors} vectors, above the limit of ${maxGraphExtractionVectors}. ` +
-          `Narrow it with 'partitionIds' or raise the server's maxGraphExtractionVectors.`,
-      });
-      return;
-    }
+      // Both graph endpoints compare every pair of vectors (O(n^2)). Reject a
+      // request that would exceed the configured scan budget rather than letting
+      // a single HTTP call stall the event loop for minutes.
+      const totalVectors = (await database.getStats()).database?.vectors.totalInMemory ?? 0;
+      if (totalVectors > maxGraphExtractionVectors) {
+        res.status(413).json({
+          error: `Request would scan ${totalVectors} vectors, above the limit of ${maxGraphExtractionVectors}. ` + `Narrow it with 'partitionIds' or raise the server's maxGraphExtractionVectors.`,
+        });
+        return;
+      }
 
-    try {
-      const communities = await database.extractCommunities(threshold, {
-        metric,
-        partitionIds,
-        includeMetadata,
-      });
+      try {
+        const communities = await database.extractCommunities(threshold, {
+          metric,
+          partitionIds,
+          includeMetadata,
+        });
 
-      const duration = timer.stop('extract_communities').total;
+        const duration = timer.stop('extract_communities').total;
 
-      res.json({
-        communities,
-        count: communities.length,
-        totalVectors: communities.reduce((sum, community) => sum + community.length, 0),
-        duration,
-      });
-    } catch (error) {
-      const duration = timer.stop('extract_communities').total;
-      console.error('Community extraction error:', error);
+        res.json({
+          communities,
+          count: communities.length,
+          totalVectors: communities.reduce((sum, community) => sum + community.length, 0),
+          duration,
+        });
+      } catch (error) {
+        const duration = timer.stop('extract_communities').total;
+        console.error('Community extraction error:', error);
 
-      res.status(500).json({
-        error: (error as Error).message,
-        stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
-        duration,
-      });
-    }
-  }));
+        res.status(500).json({
+          error: (error as Error).message,
+          stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
+          duration,
+        });
+      }
+    }),
+  );
 
   return router;
 }

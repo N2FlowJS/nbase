@@ -8,7 +8,7 @@ import LSH from './ann/lsh';
 import { ClusteredVectorDB } from './vector/clustered_vector_db';
 import { BatchEngineSearch } from './search/batch_search';
 import SearchReranker from './search/reranking';
-import { UnifiedSearch } from './search/unified_search';
+import { Search } from './search/search';
 
 import { ProductQuantization, KMeans } from './compression';
 
@@ -32,7 +32,7 @@ export {
   LSH,
   BatchEngineSearch,
   SearchReranker,
-  UnifiedSearch,
+  Search,
 
   // Compression
   ProductQuantization,

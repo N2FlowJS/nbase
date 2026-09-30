@@ -1,7 +1,7 @@
-// --- START OF FILE unified_search.ts ---
+// --- START OF FILE search.ts ---
 
 import { EventEmitter } from 'node:events';
-import { Vector, SearchResult, PartitionedVectorDBInterface, UnifiedSearchOptions, BaseSearchOptions, SearchExecutionOptions, RerankingOptions, UnifiedSearchPartitionedStats, PartitionedDBStats } from '../types';
+import { Vector, SearchResult, PartitionedVectorDBInterface, SearchOptions, BaseSearchOptions, SearchExecutionOptions, RerankingOptions, SearchCompleteEvent, SearchStats, PartitionedDBStats } from '../types';
 import { SearchReranker } from './reranking';
 import { createTimer } from '../utils/profiling';
 
@@ -28,16 +28,16 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 }
 
 /**
- * UnifiedSearch provides a consistent search interface, now leveraging PartitionedVectorDB
+ * Search provides a consistent search interface, now leveraging PartitionedVectorDB
  * for scalability with large datasets, using refined type definitions.
  */
 /**
- * A unified search interface that provides search capabilities across partitioned vector databases.
+ * A search interface that provides search capabilities across partitioned vector databases.
  *
- * @class UnifiedSearch
+ * @class Search
  * @extends {EventEmitter}
- * @description
- * UnifiedSearch wraps a partitioned vector database to provide a unified search API
+ *
+ * Search wraps a partitioned vector database to provide a single search API
  * with advanced features like search method selection (HNSW/clustered), reranking,
  * metadata fetching, and performance tracking.
  *
@@ -48,16 +48,16 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
  * - Metadata fetching and inclusion in results
  * - Performance metrics and statistics
  *
- * @fires UnifiedSearch#search:complete - Emitted when a search completes successfully
- * @fires UnifiedSearch#search:error - Emitted when a search encounters an error
- * @fires UnifiedSearch#search:closed - Emitted when the search engine is closed
+ * @event search:complete - Emitted when a search completes successfully
+ * @event search:error - Emitted when a search encounters an error
+ * @event search:closed - Emitted when the search engine is closed
  *
  * @example
  * ```typescript
- * // Create a UnifiedSearch instance with a partitioned vector database
- * const search = new UnifiedSearch(vectorDb, { debug: true });
+ * // Create a Search instance with a partitioned vector database
+ * const search = new Search(vectorDb, { debug: true });
  *
- * // Perform a search with unified options
+ * // Perform a search with advanced options
  * const results = await search.search(queryVector, {
  *   k: 20,
  *   rerank: true,
@@ -66,15 +66,15 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
  * });
  * ```
  */
-export class UnifiedSearch extends EventEmitter {
+export class Search extends EventEmitter {
   private db: PartitionedVectorDBInterface;
   public reranker: SearchReranker | null = null;
   private debug: boolean = false;
-  private searchStats: UnifiedSearchPartitionedStats['search'];
+  private searchStats: SearchStats['search'];
 
   constructor(
     db: PartitionedVectorDBInterface, // Nhận instance DB đã được cấu hình
-    options: { debug?: boolean } = {}
+    options: { debug?: boolean } = {},
   ) {
     super();
     this.db = db;
@@ -105,7 +105,7 @@ export class UnifiedSearch extends EventEmitter {
     // }
   }
 
-  // Helper function in UnifiedSearch
+  // Helper function in Search
   private async _getVectorsForResults(ids: (number | string)[]): Promise<Map<number | string, Float32Array>> {
     const vectorsMap = new Map<number | string, Float32Array>();
     if (ids.length === 0 || typeof this.db.getVector !== 'function') {
@@ -128,20 +128,20 @@ export class UnifiedSearch extends EventEmitter {
     return vectorsMap;
   }
   /**
-   * Search for nearest neighbors using PartitionedVectorDB with unified options.
+   * Search for nearest neighbors using PartitionedVectorDB with the common search options.
    */
   async search(
     query: Vector,
-    // Sử dụng UnifiedSearchOptions đã được tối ưu
-    options: UnifiedSearchOptions = {}
+    // Sử dụng SearchOptions đã được tối ưu
+    options: SearchOptions = {},
   ): Promise<SearchResult[]> {
     // A fresh timer per invocation. The class-level (and previously
     // module-level) timer was shared, so two concurrent searches overwrote each
     // other's start timestamps and every reported duration was wrong.
     const operationTimer = createTimer();
-    operationTimer.start('unified_search_total');
+    operationTimer.start('search_total');
 
-    // Destructure options with defaults, separating base, execution, and unified options
+    // Destructure options with defaults, separating base, execution, and search options
     const {
       // BaseSearchOptions
       k = 10, // TODO: Consider getting default K from DB/config if possible
@@ -153,7 +153,7 @@ export class UnifiedSearch extends EventEmitter {
       partitionIds,
       efSearch, // For HNSW search
 
-      // UnifiedSearchOptions specific
+      // SearchOptions specific
       useHNSW = true, // Default preference for HNSW
       rerank = false,
       rerankingMethod = 'diversity',
@@ -161,7 +161,7 @@ export class UnifiedSearch extends EventEmitter {
     } = options;
 
     if (this.debug) {
-      console.log('UnifiedSearch options received:', options);
+      console.log('Search options received:', options);
     }
 
     let results: SearchResult[] = [];
@@ -222,7 +222,7 @@ export class UnifiedSearch extends EventEmitter {
 
       // Fetch metadata *before* reranking only if needed for weighted rerank or final output
       const needMetadataForRerankOrOutput = includeMetadata || (rerank && rerankingMethod === 'weighted');
-      let metadataMap: Map<number | string, any> | undefined;
+      let metadataMap: Map<number | string, Record<string, unknown>> | undefined;
 
       if (rerank && this.reranker && results.length > 1) {
         operationTimer.start('fetch_vectors_for_rerank');
@@ -236,7 +236,10 @@ export class UnifiedSearch extends EventEmitter {
         operationTimer.start('rerank');
         if (needMetadataForRerankOrOutput) {
           if (this.debug) console.log('Fetching metadata for reranking/output...');
-          metadataMap = await this._getMetadataForResults(results.map((r) => r.id), operationTimer);
+          metadataMap = await this._getMetadataForResults(
+            results.map((r) => r.id),
+            operationTimer,
+          );
           if (this.debug) console.log(`Fetched metadata for ${metadataMap.size} IDs.`);
         }
 
@@ -245,7 +248,7 @@ export class UnifiedSearch extends EventEmitter {
           k: k,
           queryVector: query, // Pass the original query vector
           vectorsMap: vectorsMap, // Pass the fetched vectors
-          lambda: options.rerankLambda ?? 0.7, // Get lambda from UnifiedSearchOptions or default
+          lambda: options.rerankLambda ?? 0.7, // Get lambda from SearchOptions or default
           distanceMetric: distanceMetric ?? 'euclidean', // Use the query's distance metric
           // metadataMap: metadataMap, // If weighted rerank also considered
         };
@@ -265,7 +268,12 @@ export class UnifiedSearch extends EventEmitter {
           operationTimer.start('fetch_metadata');
           if (this.debug) console.log('Fetching metadata for final output...');
           // Fetch metadata only if it wasn't already fetched for reranking
-          const finalMetadataMap = metadataMap ?? (await this._getMetadataForResults(finalResults.map((r) => r.id), operationTimer));
+          const finalMetadataMap =
+            metadataMap ??
+            (await this._getMetadataForResults(
+              finalResults.map((r) => r.id),
+              operationTimer,
+            ));
           if (this.debug) console.log(`Fetched metadata for ${finalMetadataMap.size} IDs.`);
 
           for (const result of finalResults) {
@@ -281,7 +289,7 @@ export class UnifiedSearch extends EventEmitter {
       }
 
       // --- 4. Finalize Stats and Emit Event ---
-      const totalSearchTime = operationTimer.stop('unified_search_total').total ?? 0;
+      const totalSearchTime = operationTimer.stop('search_total').total ?? 0;
 
       this.searchStats.calls++;
       this.searchStats.methodCounts[methodUsed] = (this.searchStats.methodCounts[methodUsed] || 0) + 1;
@@ -290,7 +298,7 @@ export class UnifiedSearch extends EventEmitter {
       this.searchStats.lastSearchTime = totalSearchTime;
       this.searchStats.lastSearchTimestamp = new Date();
 
-      this.emit('search:complete', {
+      const completion: SearchCompleteEvent = {
         method: methodUsed,
         searchOnlyTime: dbSearchTime,
         rerankTime,
@@ -298,17 +306,18 @@ export class UnifiedSearch extends EventEmitter {
         resultCount: finalResults.length,
         kRequested: k,
         optionsUsed: options, // Include original options for context
-      });
+      };
+      this.emit('search:complete', completion);
 
       if (this.debug) {
-        console.log(`UnifiedSearch completed in ${totalSearchTime}ms (DB: ${dbSearchTime}ms, Rerank: ${rerankTime}ms). Method: ${methodUsed}. Returning ${finalResults.length} results.`);
+        console.log(`Search completed in ${totalSearchTime}ms (DB: ${dbSearchTime}ms, Rerank: ${rerankTime}ms). Method: ${methodUsed}. Returning ${finalResults.length} results.`);
       }
 
       return finalResults;
     } catch (error: unknown) {
-      const totalSearchTimeOnError = operationTimer.stop('unified_search_total').total ?? Date.now() - searchStartTime; // Ensure timer stops
+      const totalSearchTimeOnError = operationTimer.stop('search_total').total ?? Date.now() - searchStartTime; // Ensure timer stops
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`UnifiedSearch error after ${totalSearchTimeOnError}ms using method ${methodUsed}:`, errorMessage, error);
+      console.error(`Search error after ${totalSearchTimeOnError}ms using method ${methodUsed}:`, errorMessage, error);
 
       this.searchStats.errors++;
       this.searchStats.lastError = error instanceof Error ? error : new Error(errorMessage);
@@ -330,8 +339,8 @@ export class UnifiedSearch extends EventEmitter {
    * Assumes `this.db` has a `getMetadata(id)` method adhering to the interface.
    * @private
    */
-  private async _getMetadataForResults(ids: (number | string)[], operationTimer: ReturnType<typeof createTimer>): Promise<Map<number | string, any>> {
-    const metadataMap = new Map<number | string, any>();
+  private async _getMetadataForResults(ids: (number | string)[], operationTimer: ReturnType<typeof createTimer>): Promise<Map<number | string, Record<string, unknown>>> {
+    const metadataMap = new Map<number | string, Record<string, unknown>>();
     if (ids.length === 0 || typeof this.db.getMetadata !== 'function') {
       return metadataMap;
     }
@@ -342,7 +351,7 @@ export class UnifiedSearch extends EventEmitter {
     // Fetch metadata concurrently
     const promises = ids.map(async (id) => {
       try {
-        // Assumes getMetadata returns { partitionId: string; metadata: Record<string, any> } | null
+        // Assumes getMetadata returns { partitionId: string; metadata: Record<string, unknown> } | null
         const result = await this.db.getMetadata(id);
         if (result?.metadata !== undefined) {
           // Check if metadata exists in the result
@@ -364,9 +373,9 @@ export class UnifiedSearch extends EventEmitter {
 
   /**
    * Get search engine statistics, including stats from PartitionedVectorDB.
-   * @returns Object containing search statistics according to UnifiedSearchPartitionedStats
+   * @returns Object containing search statistics according to SearchStats
    */
-  async getStats(): Promise<UnifiedSearchPartitionedStats> {
+  async getStats(): Promise<SearchStats> {
     // Placeholder until getStats() resolves; the try/catch below replaces it.
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
     let dbStats = {} as PartitionedDBStats;
@@ -381,13 +390,13 @@ export class UnifiedSearch extends EventEmitter {
     }
 
     // Construct the stats object based on the defined interface
-    const stats: UnifiedSearchPartitionedStats = {
+    const stats: SearchStats = {
       search: { ...this.searchStats }, // Copy current search stats
       database: dbStats, // Embed the stats received from the DB
       reranker: {
         available: this.reranker !== null,
       },
-      // Add other sections if UnifiedSearchPartitionedStats defines them
+      // Add other sections if SearchStats defines them
     };
     return stats;
   }
@@ -396,7 +405,7 @@ export class UnifiedSearch extends EventEmitter {
    * Close and clean up resources, including closing the PartitionedVectorDB.
    */
   async close(): Promise<void> {
-    if (this.debug) console.log('Closing UnifiedSearch...');
+    if (this.debug) console.log('Closing Search...');
 
     // Close the underlying database instance
     if (typeof this.db.close === 'function') {
@@ -406,9 +415,8 @@ export class UnifiedSearch extends EventEmitter {
     }
 
     this.emit('search:closed');
-    if (this.debug) console.log('UnifiedSearch closed.');
+    if (this.debug) console.log('Search closed.');
   }
 }
 
-
-// --- END OF FILE unified_search.ts ---
+// --- END OF FILE search.ts ---

@@ -1,16 +1,9 @@
-import { expect } from "chai";
-import { describe, it, before, beforeEach, after, afterEach } from "mocha";
-import { PartitionedVectorDB } from "../src/vector/partitioned_vector_db";
-import {
-  PARTITIONS_DIR,
-  generateRandomVector,
-  createTestVectors,
-  setupTestDirectory,
-  cleanupPartitionsDir,
-  cleanupTestDirectory,
-} from "./test-helpers/vector-db-test-utils";
+import { expect } from 'chai';
+import { describe, it, before, beforeEach, after, afterEach } from 'mocha';
+import { PartitionedVectorDB } from '../src/vector/partitioned_vector_db';
+import { PARTITIONS_DIR, generateRandomVector, createTestVectors, setupTestDirectory, cleanupPartitionsDir, cleanupTestDirectory } from './test-helpers/vector-db-test-utils';
 
-describe("PartitionedVectorDB - Multiple Partitions", () => {
+describe('PartitionedVectorDB - Multiple Partitions', () => {
   const VECTOR_SIZE = 10;
   let db: PartitionedVectorDB;
 
@@ -40,9 +33,9 @@ describe("PartitionedVectorDB - Multiple Partitions", () => {
     await cleanupTestDirectory();
   });
 
-  it("should automatically create new partitions when needed", async () => {
+  it('should automatically create new partitions when needed', async () => {
     // Create first partition
-    await db.createPartition("auto-part-1", "Auto Partition 1", {
+    await db.createPartition('auto-part-1', 'Auto Partition 1', {
       setActive: true,
     });
 
@@ -61,15 +54,15 @@ describe("PartitionedVectorDB - Multiple Partitions", () => {
     expect(stats.vectors.totalConfigured).to.equal(100);
   });
 
-  it("should search across multiple partitions", async () => {
+  it('should search across multiple partitions', async () => {
     // Create two partitions with different vectors
-    await db.createPartition("search-part-1", "Search Part 1", {
+    await db.createPartition('search-part-1', 'Search Part 1', {
       setActive: true,
     });
     const vectors1 = createTestVectors(30, VECTOR_SIZE);
     await db.bulkAdd(vectors1);
 
-    await db.createPartition("search-part-2", "Search Part 2", {
+    await db.createPartition('search-part-2', 'Search Part 2', {
       setActive: true,
     });
     const vectors2 = createTestVectors(30, VECTOR_SIZE);
@@ -82,14 +75,14 @@ describe("PartitionedVectorDB - Multiple Partitions", () => {
 
     // Search with specific partition IDs
     const specificResults = await db.findNearest(queryVector, 5, {
-      partitionIds: ["search-part-1"],
+      partitionIds: ['search-part-1'],
     });
     console.log(`[TEST] Specific Results: ${JSON.stringify(specificResults)}`);
 
     expect(specificResults.length).to.greaterThan(0);
   });
 
-  it("should handle LRU eviction correctly", async () => {
+  it('should handle LRU eviction correctly', async () => {
     // Create more partitions than the maxActivePartitions
     for (let i = 0; i < 5; i++) {
       await db.createPartition(`lru-part-${i}`, `LRU Part ${i}`, {
@@ -106,10 +99,10 @@ describe("PartitionedVectorDB - Multiple Partitions", () => {
     expect(stats.partitions.loadedCount).to.be.at.most(3);
 
     // Access an older partition to bring it into LRU cache
-    await db.getPartition("lru-part-0");
+    await db.getPartition('lru-part-0');
 
     // This partition should now be in the loaded partitions
     const newStats = await db.getStats();
-    expect(newStats.partitions.loadedIds).to.include("lru-part-0");
+    expect(newStats.partitions.loadedIds).to.include('lru-part-0');
   });
 });

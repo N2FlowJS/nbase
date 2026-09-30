@@ -211,11 +211,7 @@ async function runBenchmarks() {
 }
 
 // Generate markdown report
-async function generateMarkdownReport(
-  results: Record<string, number>,
-  stats: any,
-  totalTime: number
-): Promise<void> {
+async function generateMarkdownReport(results: Record<string, number>, stats: any, totalTime: number): Promise<void> {
   // Extract version from package.json
   const packageJsonPath = path.join(__dirname, '../../package.json');
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { LRUCache } from 'lru-cache';
 import path from 'path'; // Import path for directory handling
 import configDefaults from '../config'; // Import the default config object
-import { UnifiedSearch } from '../search/unified_search';
+import { Search } from '../search/search';
 import {
   BuildIndexHNSWOptions,
   DatabaseEvents,
@@ -14,21 +14,23 @@ import {
   PartitionedDBStats,
   PartitionedVectorDBInterface,
   PerformanceMetrics,
+  SearchCompleteEvent,
   SearchResult,
   TypedEventEmitter,
-  UnifiedSearchOptions,
-  UnifiedSearchPartitionedStats,
+  SearchOptions,
+  SearchStats,
   Vector,
   VectorData,
 } from '../types';
 import { createTimer, Timer } from '../utils/profiling';
+import { errorMessage } from '../utils/errors';
 import { log } from '../utils/log';
 import { VectorDBMonitor } from '../utils/vector_monitoring';
 import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
 
 /**
  * High-level Database class using PartitionedVectorDB for scalable vector storage and search.
- * Provides unified search, caching, auto-save, monitoring, and a simplified API.
+ * Provides search, caching, auto-save, monitoring, and a simplified API.
  *
  * NOTE: File system backup of the partitions directory is recommended as an external process.
  */
@@ -36,12 +38,12 @@ import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
  * The `Database` class provides a high-level interface for managing a partitioned vector database
  * with support for vector addition, deletion, metadata management, nearest neighbor search,
  * and background tasks such as auto-saving and monitoring. It integrates with `PartitionedVectorDB`
- * and `UnifiedSearch` for efficient vector storage and search operations.
+ * and `Search` for efficient vector storage and search operations.
  *
  * ### Features:
  * - Asynchronous initialization with event-based readiness notifications.
  * - Partitioned vector storage with configurable options for clustering, indexing, and persistence.
- * - Unified search engine for nearest neighbor queries with caching and concurrency control.
+ * - Search engine for nearest neighbor queries with caching and concurrency control.
  * - Background tasks for auto-saving and monitoring database performance.
  * - Event-driven architecture for tracking database operations and errors.
  *
@@ -87,7 +89,7 @@ import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
 export class Database extends (EventEmitter as new () => TypedEventEmitter<DatabaseEvents>) {
   // Core Components
   private vectorDB!: PartitionedVectorDBInterface; // Definite assignment assertion
-  private unifiedSearch!: UnifiedSearch; // Definite assignment assertion
+  private searchEngine!: Search; // Definite assignment assertion
 
   // Caching & Monitoring
   private readonly searchCache: LRUCache<string, SearchResult[]>;
@@ -112,7 +114,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   private autoSaveTimer: NodeJS.Timeout | null = null;
 
   // Concurrency Control
-  private readonly activeSearchPromises: Set<Promise<any>> = new Set();
+  private readonly activeSearchPromises: Set<Promise<unknown>> = new Set();
 
   // Performance Metrics (Simplified - detailed metrics come from components)
   private metrics: PerformanceMetrics = {
@@ -203,12 +205,12 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
 
       await this.initializeStorage();
       await this.initializeVectorDB();
-      await this.initializeUnifiedSearch();
+      await this.initializeSearch();
       await this.handleInitialIndexing();
       this.startBackgroundTasks();
 
       await this.markAsReady();
-    } catch (error: any) {
+    } catch (error) {
       await this.handleInitializationError(error);
       throw error;
     }
@@ -218,10 +220,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    * Ensures base directory exists for storage
    */
   private async initializeStorage(): Promise<void> {
-    const baseDir = path.join(
-      process.cwd(),
-      this.options.persistence.dbPath || Database.DEFAULT_DB_PATH
-    );
+    const baseDir = path.join(process.cwd(), this.options.persistence.dbPath || Database.DEFAULT_DB_PATH);
 
     this.ensureDirectoryExists(baseDir, Database.PARTITIONS_DIR_NAME);
   }
@@ -232,10 +231,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   private async initializeVectorDB(): Promise<void> {
     console.log('[Database] Initializing PartitionedVectorDB...');
 
-    const baseDir = path.join(
-      process.cwd(),
-      this.options.persistence.dbPath || Database.DEFAULT_DB_PATH
-    );
+    const baseDir = path.join(process.cwd(), this.options.persistence.dbPath || Database.DEFAULT_DB_PATH);
 
     this.vectorDB = new PartitionedVectorDB({
       partitionsDir: path.join(baseDir, Database.PARTITIONS_DIR_NAME),
@@ -259,18 +255,16 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /**
-   * Initializes the UnifiedSearch instance
+   * Initializes the Search instance
    */
-  private async initializeUnifiedSearch(): Promise<void> {
-    console.log('[Database] Initializing UnifiedSearch...');
+  private async initializeSearch(): Promise<void> {
+    console.log('[Database] Initializing Search...');
 
-    this.unifiedSearch = new UnifiedSearch(this.vectorDB, {
-      ...(this.options.monitoring.logToConsole !== undefined
-        ? { debug: this.options.monitoring.logToConsole }
-        : {}),
+    this.searchEngine = new Search(this.vectorDB, {
+      ...(this.options.monitoring.logToConsole !== undefined ? { debug: this.options.monitoring.logToConsole } : {}),
     });
 
-    this.setupUnifiedSearchListeners();
+    this.setupSearchListeners();
   }
 
   /**
@@ -306,10 +300,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
         dimensionAware: true,
         progressCallback,
       });
-    } catch (error: any) {
-      console.warn(`[Database] Initial indexing issue: ${error.message}`);
+    } catch (error) {
+      console.warn(`[Database] Initial indexing issue: ${errorMessage(error)}`);
       this.emit('warn', {
-        message: `Initial index handling issue: ${error.message}`,
+        message: `Initial index handling issue: ${errorMessage(error)}`,
         context: 'handleInitialIndexing',
         error,
       });
@@ -334,8 +328,8 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     try {
       const initialStats = await this.getStats();
       console.log(`[Database] Initial State: ${initialStats.database?.partitions?.totalConfigured} partitions configured, ${initialStats.database?.partitions?.loadedCount} loaded`);
-    } catch (error: any) {
-      console.warn('[Database] Could not retrieve initial stats:', error.message);
+    } catch (error) {
+      console.warn('[Database] Could not retrieve initial stats:', errorMessage(error));
     }
 
     this.emit('ready', undefined);
@@ -344,13 +338,13 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   /**
    * Handles initialization errors
    */
-  private async handleInitializationError(error: any): Promise<void> {
+  private async handleInitializationError(error: unknown): Promise<void> {
     console.error('[Database] FATAL: Database initialization failed:', error);
     this.isClosed = true;
     this.monitor?.stop();
 
     this.emit('error', {
-      message: `[Database] Database initialization failed: ${error.message}`,
+      message: `[Database] Database initialization failed: ${errorMessage(error)}`,
       error,
       context: 'initialize',
     });
@@ -365,22 +359,20 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
         mkdirSync(dirPath, { recursive: true });
         console.log(`[Database] Created ${purpose} directory: ${dirPath}`);
       }
-    } catch (error: any) {
-      throw new Error(`[Database] Failed to create ${purpose} directory at ${dirPath}: ${error.message}`);
+    } catch (error) {
+      throw new Error(`[Database] Failed to create ${purpose} directory at ${dirPath}: ${errorMessage(error)}`);
     }
   }
 
   /** Sets up internal event listeners for PartitionedVectorDB events. */
   private setupEventListeners(): void {
-    if (!this.vectorDB || typeof (this.vectorDB as any).on !== 'function') return;
-
-    const dbEmitter = this.vectorDB as any as TypedEventEmitter<PartitionedDBEventData>;
+    // `PartitionedVectorDBInterface` describes the query surface only, so the
+    // emitter is reached through a view of the instance.
+    const dbEmitter = this.vectorDB as unknown as TypedEventEmitter<PartitionedDBEventData>;
+    if (typeof dbEmitter.on !== 'function') return;
 
     // Generic handler to forward events, clear cache, and update monitor
-    const handleDbEvent = <E extends keyof PartitionedDBEventData>(
-      eventName: E,
-      data: PartitionedDBEventData[E]
-    ) => {
+    const handleDbEvent = <E extends keyof PartitionedDBEventData>(eventName: E, data: PartitionedDBEventData[E]) => {
       if (this.isClosed) return;
 
       this.handleCacheInvalidation(eventName);
@@ -398,7 +390,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    * Handles cache invalidation based on event type
    */
   private handleCacheInvalidation(eventName: string): void {
-    if (Database.CACHE_EVENTS.includes(eventName as any)) {
+    if (Database.CACHE_EVENTS.includes(eventName)) {
       this.searchCache.clear();
     }
   }
@@ -406,8 +398,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   /**
    * Forwards events to external listeners
    */
-  private forwardEvent(eventName: string, data: any): void {
-    this.emit(eventName as keyof DatabaseEvents, data as any);
+  private forwardEvent(eventName: string, data: unknown): void {
+    // The event name and payload are only known at runtime here; the union of
+    // every declared payload is the most specific type `emit` accepts for it.
+    this.emit(eventName as keyof DatabaseEvents, data as DatabaseEvents[keyof DatabaseEvents]);
   }
 
   /**
@@ -422,7 +416,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    * @private
    */
   private updateMetrics(eventName: string): void {
-    if (Database.METRICS_EVENTS.includes(eventName as any)) {
+    if (Database.METRICS_EVENTS.includes(eventName)) {
       this._monitorMetricsDirty = true;
       this._scheduleMonitorDbMetrics();
     }
@@ -447,7 +441,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   /**
    * Records events in the monitor if available
    */
-  private recordEventInMonitor(eventName: string, data: any): void {
+  private recordEventInMonitor(eventName: string, data: unknown): void {
     if (!this.monitor) return;
 
     if (['vector:add', 'vector:delete', 'partition:created'].includes(eventName)) {
@@ -461,28 +455,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   /**
    * Registers database operation event listeners
    */
-  private registerDatabaseEventListeners(
-    dbEmitter: TypedEventEmitter<PartitionedDBEventData>,
-    handler: <E extends keyof PartitionedDBEventData>(
-      eventName: E,
-      data: PartitionedDBEventData[E]
-    ) => void
-  ): void {
-    const events: (keyof PartitionedDBEventData)[] = [
-      'vector:add',
-      'vector:delete',
-      'vectors:bulkAdd',
-      'partition:created',
-      'partition:loaded',
-      'partition:unloaded',
-      'partition:activated',
-      'partition:error',
-      'config:saved',
-      'db:saved',
-      'db:loaded',
-    ];
+  private registerDatabaseEventListeners(dbEmitter: TypedEventEmitter<PartitionedDBEventData>, handler: <E extends keyof PartitionedDBEventData>(eventName: E, data: PartitionedDBEventData[E]) => void): void {
+    const events: (keyof PartitionedDBEventData)[] = ['vector:add', 'vector:delete', 'vectors:bulkAdd', 'partition:created', 'partition:loaded', 'partition:unloaded', 'partition:activated', 'partition:error', 'config:saved', 'db:saved', 'db:loaded'];
 
-    events.forEach(event => {
+    events.forEach((event) => {
       dbEmitter.on(event, (data) => handler(event, data));
     });
   }
@@ -504,17 +480,17 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     });
   }
 
-  /** Sets up listeners for UnifiedSearch events. */
-  private setupUnifiedSearchListeners(): void {
-    if (!this.unifiedSearch) return;
+  /** Sets up listeners for Search events. */
+  private setupSearchListeners(): void {
+    if (!this.searchEngine) return;
 
     // Forward search start events
-    this.unifiedSearch.on('search:start', (data) => {
+    this.searchEngine.on('search:start', (data) => {
       this.emit('search:start', data);
     });
 
     // Handle search completion events
-    this.unifiedSearch.on('search:complete', (data) => {
+    this.searchEngine.on('search:complete', (data) => {
       this.updateSearchMetrics(data);
       this.emit('search:complete', data);
     });
@@ -523,13 +499,14 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   /**
    * Updates search performance metrics
    */
-  private updateSearchMetrics(data: any): void {
+  private updateSearchMetrics(data: SearchCompleteEvent): void {
     if (this.monitor) {
       this.monitor.recordSearch({
         duration: data.totalTime,
-        method: data.dbMethodUsed,
+        // The engine reports the method as `method`; it used to be read as
+        // `dbMethodUsed`, so every methodUsage entry was keyed `undefined`.
+        method: data.method,
         results: data.resultCount,
-        cacheUsed: data.cacheUsed,
       });
     }
 
@@ -577,10 +554,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
         // Delegate saving entirely to PartitionedVectorDB
         await this.vectorDB.save();
         console.log('Auto-save completed successfully.');
-      } catch (error: any) {
+      } catch (error) {
         console.error('Auto-save failed:', error);
         this.emit('error', {
-          message: `Auto-save failed: ${error.message}`,
+          message: `Auto-save failed: ${errorMessage(error)}`,
           error: error,
           context: 'AutoSave',
         });
@@ -590,7 +567,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /** Generates a cache key for search results. */
-  private _getCacheKey(query: Vector, k: number, options: UnifiedSearchOptions): string {
+  private _getCacheKey(query: Vector, k: number, options: SearchOptions): string {
     const vectorHash = this._hashVector(query);
     // Include every option that can change the result set.
     //
@@ -692,7 +669,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    * Adds a vector to the appropriate partition.
    * @returns An object containing the partitionId and the vectorId.
    */
-  async addVector(id: number | string | undefined, vector: Vector, metadata?: Record<string, any>): Promise<{ partitionId: string; vectorId: number | string }> {
+  async addVector(id: number | string | undefined, vector: Vector, metadata?: Record<string, unknown>): Promise<{ partitionId: string; vectorId: number | string }> {
     console.log(`Adding vector with ID ${id ?? 'auto'}...`);
 
     await this._assertReady('addVector');
@@ -704,11 +681,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
 
       console.log(`Vector added successfully with ID ${result.vectorId}.`);
       return result;
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('addVector');
       console.error(`Error in addVector (ID: ${id ?? 'auto'}):`, error);
       this.emit('error', {
-        message: `Add vector failed: ${error.message}`,
+        message: `Add vector failed: ${errorMessage(error)}`,
         error: error,
         context: 'addVector',
       });
@@ -746,11 +723,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       const deleted = await this.vectorDB.deleteVector(id);
       this.timer.stop('deleteVector');
       return deleted;
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('deleteVector');
       console.error(`Error deleting vector ${id}:`, error);
       this.emit('error', {
-        message: `Delete vector failed for ${id}: ${error.message}`,
+        message: `Delete vector failed for ${id}: ${errorMessage(error)}`,
         error: error,
         context: 'deleteVector',
       });
@@ -773,7 +750,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /** Adds or updates metadata for a vector. Requires finding the vector first. */
-  async addMetadata(id: number | string, metadata: Record<string, any>): Promise<boolean> {
+  async addMetadata(id: number | string, metadata: Record<string, unknown>): Promise<boolean> {
     await this._assertReady('addMetadata');
     this.timer.start('addMetadata');
     try {
@@ -796,11 +773,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       this.searchCache.clear(); // Clear cache as metadata might affect filtering
       this.timer.stop('addMetadata');
       return true;
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('addMetadata');
       console.error(`Error adding/updating metadata for vector ${id}:`, error);
       this.emit('error', {
-        message: `Add/Update metadata failed for ${id}: ${error.message}`,
+        message: `Add/Update metadata failed for ${id}: ${errorMessage(error)}`,
         error: error,
         context: 'addMetadata',
       });
@@ -809,7 +786,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /** Updates metadata using a callback or merging. Requires finding the vector first. */
-  async updateMetadata(id: number | string, metadataUpdate: Record<string, any> | ((existing: Record<string, any> | null) => Record<string, any>)): Promise<boolean> {
+  async updateMetadata(id: number | string, metadataUpdate: Record<string, unknown> | ((existing: Record<string, unknown> | null) => Record<string, unknown>)): Promise<boolean> {
     await this._assertReady('updateMetadata');
     this.timer.start('updateMetadata');
     try {
@@ -829,11 +806,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       this.searchCache.clear();
       this.timer.stop('updateMetadata');
       return true;
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('updateMetadata');
       console.error(`Error updating metadata for vector ${id}:`, error);
       this.emit('error', {
-        message: `Update metadata failed for ${id}: ${error.message}`,
+        message: `Update metadata failed for ${id}: ${errorMessage(error)}`,
         error: error,
         context: 'updateMetadata',
       });
@@ -842,7 +819,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /** Retrieves metadata by searching loaded partitions. */
-  async getMetadata(id: number | string): Promise<{ partitionId: string; metadata: Record<string, any> } | null> {
+  async getMetadata(id: number | string): Promise<{ partitionId: string; metadata: Record<string, unknown> } | null> {
     await this._assertReady('getMetadata');
     return this.vectorDB.getMetadata(id);
   }
@@ -876,23 +853,23 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    * ```
    */
   async getMetadataWithField(
-    criteria: string | string[] | Record<string, any>,
-    values?: any | any[],
+    criteria: string | string[] | Record<string, unknown>,
+    values?: unknown,
     option?: {
       limit: number;
-    }
-  ): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, any> }>> {
+    },
+  ): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }>> {
     await this._assertReady('getMetadataWithField');
     this.timer.start('getMetadataWithField');
     try {
       const results = await this.vectorDB.getMetadataWithFieldAcrossPartitions(criteria, values, option);
       this.timer.stop('getMetadataWithField');
       return results;
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('getMetadataWithField');
       console.error(`Error in getMetadataWithField:`, error);
       this.emit('error', {
-        message: `Get metadata with field failed: ${error.message}`,
+        message: `Get metadata with field failed: ${errorMessage(error)}`,
         error: error,
         context: 'getMetadataWithField',
       });
@@ -901,10 +878,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /**
-   * Performs a nearest neighbor search using the UnifiedSearch engine.
+   * Performs a nearest neighbor search using the Search engine.
    * Handles caching and concurrency limits.
    */
-  async findNearest(query: Vector, k?: number, options: UnifiedSearchOptions = {}): Promise<SearchResult[]> {
+  async findNearest(query: Vector, k?: number, options: SearchOptions = {}): Promise<SearchResult[]> {
     console.log(`[Database] Searching for nearest vectors to query...`);
 
     await this._assertReady('findNearest');
@@ -923,7 +900,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
         this.metrics.cacheHits++;
         this.monitor?.recordCacheHit();
         operationTimer.stop('findNearest_total');
-        // UnifiedSearch event won't fire for cache hit, emit simple event here if needed
+        // Search event won't fire for cache hit, emit simple event here if needed
         this.emit('search:cacheHit', { options: searchOptions, k: effectiveK });
         return [...cachedResults]; // Return copy
       }
@@ -949,13 +926,13 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       }
     }
 
-    // --- Execute Search via UnifiedSearch ---
-    const searchPromise = this.unifiedSearch.search(query, searchOptions);
+    // --- Execute Search via Search ---
+    const searchPromise = this.searchEngine.search(query, searchOptions);
     this.activeSearchPromises.add(searchPromise);
 
     try {
       const results = await searchPromise;
-      // UnifiedSearch emits search:complete which updates metrics
+      // Search emits search:complete which updates metrics
 
       // Cache results if cache was checked and not skipped
       if (cacheKey && results.length > 0) {
@@ -963,9 +940,9 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       }
       operationTimer.stop('findNearest_total');
       return results;
-    } catch (error: any) {
+    } catch (error) {
       operationTimer.stop('findNearest_total');
-      // Error event emitted by UnifiedSearch listener
+      // Error event emitted by Search listener
       console.error('Error during findNearest execution:', error);
       throw error; // Re-throw
     } finally {
@@ -974,7 +951,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   }
 
   /** Alias for findNearest */
-  async search(query: Vector, options: UnifiedSearchOptions = {}): Promise<SearchResult[]> {
+  async search(query: Vector, options: SearchOptions = {}): Promise<SearchResult[]> {
     return this.findNearest(query, options.k, options);
   }
 
@@ -993,11 +970,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       this.timer.stop('save_database');
       console.log('Database save completed successfully.');
       // db:saved event is emitted by PartitionedVectorDB listener
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('save_database');
       console.error('Manual save failed:', error);
       this.emit('error', {
-        message: `Save failed: ${error.message}`,
+        message: `Save failed: ${errorMessage(error)}`,
         error: error,
         context: 'save',
       });
@@ -1022,11 +999,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       const duration = this.timer.stop('buildIndexes');
       console.log(`Index build process finished in ${duration.total.toFixed(2)}ms for ${partitionId ?? 'relevant partitions'}.`);
       // index:complete event emitted by listener
-    } catch (error: any) {
+    } catch (error) {
       const duration = this.timer.stop('buildIndexes');
       console.error(`Index build failed after ${duration.total.toFixed(2)}ms for ${partitionId ?? 'partitions'}:`, error);
       this.emit('error', {
-        message: `Index build failed: ${error.message}`,
+        message: `Index build failed: ${errorMessage(error)}`,
         error: error,
         context: 'buildIndexes',
       });
@@ -1062,13 +1039,13 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     }
     this.activeSearchPromises.clear();
 
-    // NOTE: `unifiedSearch.close()` also closes the underlying database, so
+    // NOTE: `searchEngine.close()` also closes the underlying database, so
     // closing it here *and* below closed the database twice. The database is
     // closed exactly once, here.
     try {
-      this.unifiedSearch?.removeAllListeners();
+      this.searchEngine?.removeAllListeners();
     } catch (e) {
-      log('error', '[Database] Error detaching UnifiedSearch listeners:', e);
+      log('error', '[Database] Error detaching Search listeners:', e);
     }
 
     // Close PartitionedVectorDB (this performs the final save)
@@ -1076,8 +1053,8 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       try {
         log('info', '[Database] Closing PartitionedVectorDB (will trigger final save)...');
         await this.vectorDB.close();
-      } catch (err: any) {
-        log('error', '[Database] Error closing PartitionedVectorDB:', err.message);
+      } catch (err) {
+        log('error', '[Database] Error closing PartitionedVectorDB:', errorMessage(err));
         // Continue closing process
       }
     }
@@ -1098,7 +1075,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   async getStats(): Promise<DatabaseStats> {
     // No readiness check here, return best effort stats even if initializing/closing
     let dbStats: PartitionedDBStats | null = null;
-    let searchStats: UnifiedSearchPartitionedStats | null = null;
+    let searchStats: SearchStats | null = null;
 
     if (this.vectorDB && typeof this.vectorDB.getStats === 'function') {
       try {
@@ -1107,11 +1084,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
         console.warn('Failed to get PartitionedDB stats:', e);
       }
     }
-    if (this.unifiedSearch && typeof this.unifiedSearch.getStats === 'function') {
+    if (this.searchEngine && typeof this.searchEngine.getStats === 'function') {
       try {
-        searchStats = await this.unifiedSearch.getStats();
+        searchStats = await this.searchEngine.getStats();
       } catch (e) {
-        console.warn('Failed to get UnifiedSearch stats:', e);
+        console.warn('Failed to get Search stats:', e);
       }
     }
 
@@ -1161,11 +1138,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     return this.vectorDB;
   }
 
-  /** Gets the UnifiedSearch instance. */
-  getUnifiedSearch(): UnifiedSearch {
-    if (!this.isReady && !this.isClosed) console.warn('Accessing UnifiedSearch instance before Database is fully ready.');
-    if (this.isClosed) throw new Error('Cannot access UnifiedSearch: Database is closed.');
-    return this.unifiedSearch;
+  /** Gets the Search instance. */
+  getSearch(): Search {
+    if (!this.isReady && !this.isClosed) console.warn('Accessing Search instance before Database is fully ready.');
+    if (this.isClosed) throw new Error('Cannot access Search: Database is closed.');
+    return this.searchEngine;
   }
 
   /** Gets the total count of vectors across all configured partitions. */
@@ -1209,11 +1186,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       metric?: DistanceMetric;
       partitionIds?: string[];
       includeMetadata?: boolean;
-    } = {}
+    } = {},
   ): Promise<
     Array<{
-      vector1: { id: number | string; partitionId: string; metadata?: Record<string, any> };
-      vector2: { id: number | string; partitionId: string; metadata?: Record<string, any> };
+      vector1: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
+      vector2: { id: number | string; partitionId: string; metadata?: Record<string, unknown> };
       distance: number;
     }>
   > {
@@ -1229,11 +1206,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       console.log(`[Database] Extracted ${relationships.length} relationships in ${duration.total.toFixed(2)}ms`);
 
       return relationships;
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('extractRelationships');
       console.error(`[Database] Error extracting relationships:`, error);
       this.emit('error', {
-        message: `Extract relationships failed: ${error.message}`,
+        message: `Extract relationships failed: ${errorMessage(error)}`,
         error,
         context: 'extractRelationships',
       });
@@ -1255,13 +1232,13 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       metric?: DistanceMetric;
       partitionIds?: string[];
       includeMetadata?: boolean;
-    } = {}
+    } = {},
   ): Promise<
     Array<
       Array<{
         id: number | string;
         partitionId: string;
-        metadata?: Record<string, any>;
+        metadata?: Record<string, unknown>;
       }>
     >
   > {
@@ -1289,11 +1266,11 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       console.log(`[Database] Extracted ${communities.length} communities with ${communities.reduce((sum, c) => sum + c.length, 0)} total vectors in ${duration.total.toFixed(2)}ms`);
 
       return communities;
-    } catch (error: any) {
+    } catch (error) {
       this.timer.stop('extractCommunities');
       console.error(`[Database] Error extracting communities:`, error);
       this.emit('error', {
-        message: `Extract communities failed: ${error.message}`,
+        message: `Extract communities failed: ${errorMessage(error)}`,
         error,
         context: 'extractCommunities',
       });

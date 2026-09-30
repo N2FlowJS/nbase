@@ -32,7 +32,7 @@ export function manhattan(a: Vector, b: Vector): number {
 
   for (; i < len; i++) {
     const d = (a[i] ?? 0) - (b[i] ?? 0);
-    sum += (d < 0 ? -d : d);
+    sum += d < 0 ? -d : d;
   }
 
   return sum;
@@ -52,7 +52,8 @@ export function cosine(a: Vector, b: Vector): number {
   let i = 0;
 
   for (; i < len; i++) {
-    const ai = a[i] ?? 0, bi = b[i] ?? 0;
+    const ai = a[i] ?? 0,
+      bi = b[i] ?? 0;
     dotProductVal += ai * bi;
     normA += ai * ai;
     normB += bi * bi;

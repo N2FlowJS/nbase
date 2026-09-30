@@ -1,6 +1,6 @@
 // src/config/index.ts
-import { createConfig } from "./factory";
-import { defaultSystemConfiguration } from "./default"; // Import the only default source
+import { createConfig } from './factory';
+import { defaultSystemConfiguration } from './default'; // Import the only default source
 
 // Export factory and original default configuration
 export { createConfig, defaultSystemConfiguration };

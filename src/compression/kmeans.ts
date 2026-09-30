@@ -30,10 +30,9 @@ import { Vector } from '../types';
  * @property {number} maxIterations - The maximum number of iterations for the algorithm.
  * @property {number} tolerance - The threshold for centroid movement to determine convergence.
  *
- * @constructor
- * @param {number} [k=8] - The number of clusters to form.
- * @param {number} [maxIterations=100] - The maximum number of iterations for the algorithm.
- * @param {number} [tolerance=0.001] - The threshold for centroid movement to determine convergence.
+ * @param k - The number of clusters to form (default 8).
+ * @param maxIterations - The maximum number of iterations for the algorithm (default 100).
+ * @param tolerance - The threshold for centroid movement to determine convergence (default 0.001).
  */
 export class KMeans {
   private k: number;

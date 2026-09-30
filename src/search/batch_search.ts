@@ -52,7 +52,7 @@ export class BatchEngineSearch {
 
   constructor(
     searchEngine: PartitionedVectorDBInterface,
-    options: BatchSearchConfiguration = {} // Accept the new configuration type
+    options: BatchSearchConfiguration = {}, // Accept the new configuration type
   ) {
     this.searchEngine = searchEngine;
 
@@ -146,12 +146,11 @@ export class BatchEngineSearch {
           queryResult = await this.searchEngine.findNearestHNSW(
             query,
             k,
-            engineSearchOptions // Pass the merged options
+            engineSearchOptions, // Pass the merged options
           );
         } else if (typeof this.searchEngine.findNearest === 'function') {
           methodUsed = 'clustered';
           // Ensure HNSW-specific parameters are not passed to findNearest
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars -- stripped on purpose
           const { efSearch: _efSearch, ...clusteredOptions } = engineSearchOptions;
           queryResult = await this.searchEngine.findNearest(query, k, clusteredOptions);
         } else {
@@ -188,8 +187,8 @@ export class BatchEngineSearch {
         }>((_, reject) =>
           setTimeout(
             () => reject(new Error(`Query timed out after ${this.options.defaultSearchTimeoutMs}ms`)),
-            this.options.defaultSearchTimeoutMs // Use the new key
-          )
+            this.options.defaultSearchTimeoutMs, // Use the new key
+          ),
         ),
       ]).catch((error) => {
         console.error('Batch query failed or timed out:', error);
@@ -198,7 +197,7 @@ export class BatchEngineSearch {
           result: [],
           error: (error as Error).message,
         };
-      })
+      }),
     );
 
     // Wait for all queries to complete or timeout

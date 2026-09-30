@@ -18,25 +18,28 @@ class MockVectorProvider implements VectorProvider {
   }
 }
 
-describe('HNSW Worker Thread Indexing', function() {
+describe('HNSW Worker Thread Indexing', function () {
   this.timeout(10000); // Indexing can take time
 
   it('should build HNSW index using a worker thread', async () => {
     const provider = new MockVectorProvider();
     // Add 100 random vectors
     for (let i = 0; i < 100; i++) {
-      provider.addVector(i, Array.from({ length: 128 }, () => Math.random()));
+      provider.addVector(
+        i,
+        Array.from({ length: 128 }, () => Math.random()),
+      );
     }
 
     const hnsw = new HNSW(provider, { M: 16, efConstruction: 100 });
-    
+
     let progressCalled = false;
     await hnsw.buildIndex({
       useWorker: true,
       progressCallback: () => {
         progressCalled = true;
         // console.log(`Progress: ${progress}`);
-      }
+      },
     });
 
     expect(hnsw.getNodeCount()).to.equal(100);

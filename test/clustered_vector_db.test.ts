@@ -1,15 +1,12 @@
-import { expect } from "chai";
-import { promises as fs } from "fs";
-import * as path from "path";
-import { ClusteredVectorDB } from "../src/vector/clustered_vector_db";
-import { Vector } from "../src/types"; // Corrected import path
-import * as os from "os";
+import { expect } from 'chai';
+import { promises as fs } from 'fs';
+import * as path from 'path';
+import { ClusteredVectorDB } from '../src/vector/clustered_vector_db';
+import { Vector } from '../src/types'; // Corrected import path
+import * as os from 'os';
 
-describe("ClusteredVectorDB", () => {
-  const tempDir = path.join(
-    os.tmpdir(),
-    `test-clustered-vector-db-${Date.now()}`
-  );
+describe('ClusteredVectorDB', () => {
+  const tempDir = path.join(os.tmpdir(), `test-clustered-vector-db-${Date.now()}`);
   const vectorDimension = 4; // Small dimension for tests
 
   // Helper to create test vectors
@@ -25,29 +22,29 @@ describe("ClusteredVectorDB", () => {
     try {
       await fs.rm(tempDir, { recursive: true, force: true });
     } catch (err) {
-      console.error("Error cleaning up temp directory:", err);
+      console.error('Error cleaning up temp directory:', err);
     }
   });
 
-  describe("Construction and Configuration", () => {
-    it("should initialize with default parameters", () => {
+  describe('Construction and Configuration', () => {
+    it('should initialize with default parameters', () => {
       const db = new ClusteredVectorDB(vectorDimension);
       expect(db.targetClusterSize).to.exist;
-      expect(db.getDistanceMetric()).to.equal("euclidean");
+      expect(db.getDistanceMetric()).to.equal('euclidean');
     });
 
-    it("should initialize with custom parameters", () => {
+    it('should initialize with custom parameters', () => {
       const db = new ClusteredVectorDB(vectorDimension, null, {
         clusterSize: 50,
-        distanceMetric: "cosine",
+        distanceMetric: 'cosine',
         maxClusters: 100,
       });
       expect(db.targetClusterSize).to.equal(50);
     });
   });
 
-  describe("Vector Operations", () => {
-    it("should add vectors and assign to clusters", () => {
+  describe('Vector Operations', () => {
+    it('should add vectors and assign to clusters', () => {
       const db = new ClusteredVectorDB(vectorDimension);
 
       // Add multiple vectors
@@ -69,7 +66,7 @@ describe("ClusteredVectorDB", () => {
       expect(totalVectors).to.equal(3);
     });
 
-    it("should delete vectors and update clusters", () => {
+    it('should delete vectors and update clusters', () => {
       const db = new ClusteredVectorDB(vectorDimension);
 
       // Add vectors
@@ -78,10 +75,7 @@ describe("ClusteredVectorDB", () => {
 
       // Get initial stats
       const initialClusters = db.getClusterInfo();
-      const initialTotalSize = initialClusters.reduce(
-        (sum, c) => sum + c.size,
-        0
-      );
+      const initialTotalSize = initialClusters.reduce((sum, c) => sum + c.size, 0);
       expect(initialTotalSize).to.equal(2);
 
       // Delete one vector
@@ -95,7 +89,7 @@ describe("ClusteredVectorDB", () => {
       expect(updatedTotalSize).to.equal(1);
     });
 
-    it("should find nearest vectors using clusters", () => {
+    it('should find nearest vectors using clusters', () => {
       const db = new ClusteredVectorDB(vectorDimension);
 
       // Add some vectors forming distinct clusters
@@ -111,12 +105,8 @@ describe("ClusteredVectorDB", () => {
         [12, 22, 32, 42],
       ];
 
-      closerVectors.forEach((v, i) =>
-        db.addVector(`close-${i}`, createTestVector(v))
-      );
-      fartherVectors.forEach((v, i) =>
-        db.addVector(`far-${i}`, createTestVector(v))
-      );
+      closerVectors.forEach((v, i) => db.addVector(`close-${i}`, createTestVector(v)));
+      fartherVectors.forEach((v, i) => db.addVector(`far-${i}`, createTestVector(v)));
 
       // Search for vector close to the first cluster
       const query = createTestVector([1.5, 2.5, 3.5, 4.5]);
@@ -125,13 +115,13 @@ describe("ClusteredVectorDB", () => {
       // Should find vectors from the closer cluster
       expect(results.length).to.equal(3);
       results.forEach((result) => {
-        expect(result.id.toString()).to.include("close-");
+        expect(result.id.toString()).to.include('close-');
       });
     });
   });
 
-  describe("Cluster Management", () => {
-    it("should create multiple clusters for distant vectors", () => {
+  describe('Cluster Management', () => {
+    it('should create multiple clusters for distant vectors', () => {
       const db = new ClusteredVectorDB(vectorDimension, null, {
         clusterSize: 2, // Small size to force new clusters
         newClusterDistanceThreshold: 0.1, // Low threshold to force clustering
@@ -147,7 +137,7 @@ describe("ClusteredVectorDB", () => {
       expect(clusters.length).to.be.at.least(2);
     });
 
-    it("should update cluster centroids when adding vectors", () => {
+    it('should update cluster centroids when adding vectors', () => {
       // Create DB with higher cluster threshold to ensure vectors go in same cluster
       const db = new ClusteredVectorDB(vectorDimension, null, {
         newClusterDistanceThreshold: 10, // Much higher threshold to force vectors into same cluster
@@ -165,14 +155,8 @@ describe("ClusteredVectorDB", () => {
       const updatedCentroid = Array.from(updatedClusters[0]!.centroid);
 
       // Verify clusters are functioning correctly
-      expect(updatedClusters.length).to.equal(
-        1,
-        "Should have exactly one cluster"
-      );
-      expect(updatedClusters[0]!.size).to.equal(
-        2,
-        "Cluster should contain both vectors"
-      );
+      expect(updatedClusters.length).to.equal(1, 'Should have exactly one cluster');
+      expect(updatedClusters[0]!.size).to.equal(2, 'Cluster should contain both vectors');
 
       // Centroid should have changed (it's the average)
       expect(updatedCentroid).to.not.deep.equal(initialCentroid);
@@ -185,10 +169,10 @@ describe("ClusteredVectorDB", () => {
     });
   });
 
-  describe("Persistence", () => {
-    it("should save and load cluster state", async () => {
+  describe('Persistence', () => {
+    it('should save and load cluster state', async () => {
       // Create and populate DB
-      const dbPath = path.join(tempDir, "cluster-save-test");
+      const dbPath = path.join(tempDir, 'cluster-save-test');
       const db = new ClusteredVectorDB(vectorDimension, dbPath);
 
       db.addVector(1, createTestVector([1, 2, 3, 4]));
@@ -212,9 +196,9 @@ describe("ClusteredVectorDB", () => {
       await loadedDb.close();
     });
 
-    it("should rebuild clusters if cluster state is missing", async () => {
+    it('should rebuild clusters if cluster state is missing', async () => {
       // Create and populate DB
-      const dbPath = path.join(tempDir, "rebuild-test");
+      const dbPath = path.join(tempDir, 'rebuild-test');
       const db = new ClusteredVectorDB(vectorDimension, dbPath);
 
       db.addVector(1, createTestVector([1, 2, 3, 4]));
@@ -226,7 +210,7 @@ describe("ClusteredVectorDB", () => {
       await db.close();
 
       // Delete cluster state file but keep vector data
-      const clusterFile = path.join(dbPath, "cluster.json");
+      const clusterFile = path.join(dbPath, 'cluster.json');
       try {
         await fs.unlink(clusterFile);
       } catch (err) {
@@ -234,7 +218,7 @@ describe("ClusteredVectorDB", () => {
         try {
           await fs.unlink(`${clusterFile}.gz`);
         } catch (e) {
-          console.warn("Could not find cluster file to delete:", e);
+          console.warn('Could not find cluster file to delete:', e);
         }
       }
 
@@ -254,8 +238,8 @@ describe("ClusteredVectorDB", () => {
     });
   });
 
-  describe("Stats and Info", () => {
-    it("should provide accurate cluster statistics", () => {
+  describe('Stats and Info', () => {
+    it('should provide accurate cluster statistics', () => {
       const db = new ClusteredVectorDB(vectorDimension);
 
       // Add vectors
@@ -271,14 +255,13 @@ describe("ClusteredVectorDB", () => {
 
       // Check distribution details
       stats.clusters!.distribution.forEach((cluster) => {
-
-        expect(cluster.id).to.be.a("number");
-        expect(cluster.size).to.be.a("number");
+        expect(cluster.id).to.be.a('number');
+        expect(cluster.size).to.be.a('number');
         expect(cluster.dimension).to.equal(vectorDimension);
       });
     });
 
-    it("should return cluster information", () => {
+    it('should return cluster information', () => {
       const db = new ClusteredVectorDB(vectorDimension);
 
       db.addVector(1, createTestVector([1, 2, 3, 4]));
@@ -288,8 +271,8 @@ describe("ClusteredVectorDB", () => {
 
       expect(clusterInfo.length).to.be.at.least(1);
       clusterInfo.forEach((cluster) => {
-        expect(cluster.id).to.be.a("number");
-        expect(cluster.size).to.be.a("number");
+        expect(cluster.id).to.be.a('number');
+        expect(cluster.size).to.be.a('number');
         expect(cluster.dimension).to.equal(vectorDimension);
         expect(cluster.centroid).to.be.instanceof(Float32Array);
         expect(cluster.centroid.length).to.equal(vectorDimension);
@@ -297,8 +280,8 @@ describe("ClusteredVectorDB", () => {
     });
   });
 
-  describe("K-Means Clustering", () => {
-    it("should run K-Means without errors on a populated DB", async () => {
+  describe('K-Means Clustering', () => {
+    it('should run K-Means without errors on a populated DB', async () => {
       const db = new ClusteredVectorDB(vectorDimension);
       db.addVector(1, createTestVector([1, 2, 3, 4]));
       db.addVector(2, createTestVector([1.1, 2.1, 3.1, 4.1]));
@@ -312,10 +295,10 @@ describe("ClusteredVectorDB", () => {
       // K-Means might or might not change the number of clusters depending on initialization and data
       expect(finalClusters.length).to.be.at.least(1);
       // Check if centroids are valid
-      finalClusters.forEach(c => expect(c.centroid).to.be.instanceof(Float32Array));
+      finalClusters.forEach((c) => expect(c.centroid).to.be.instanceof(Float32Array));
     });
 
-    it("should run K-Means with a specific k value", async () => {
+    it('should run K-Means with a specific k value', async () => {
       const db = new ClusteredVectorDB(vectorDimension);
       // Add vectors that should ideally form 2 clusters
       db.addVector(1, createTestVector([1, 2, 3, 4]));
@@ -335,11 +318,11 @@ describe("ClusteredVectorDB", () => {
       // A more robust test might check the distribution of points if k is achieved.
       if (finalClusters.length === 2 && finalStats.clusters?.distribution) {
         // Check if vectors are roughly assigned correctly (this is probabilistic)
-        const cluster1Info = finalStats.clusters.distribution.find(c => c.id === finalClusters[0]!.id);
-        const cluster2Info = finalStats.clusters.distribution.find(c => c.id === finalClusters[1]!.id);
+        const cluster1Info = finalStats.clusters.distribution.find((c) => c.id === finalClusters[0]!.id);
+        const cluster2Info = finalStats.clusters.distribution.find((c) => c.id === finalClusters[1]!.id);
 
-        const cluster1Members = new Set(cluster1Info?.members?.map(m => m.id) ?? []);
-        const cluster2Members = new Set(cluster2Info?.members?.map(m => m.id) ?? []);
+        const cluster1Members = new Set(cluster1Info?.members?.map((m) => m.id) ?? []);
+        const cluster2Members = new Set(cluster2Info?.members?.map((m) => m.id) ?? []);
 
         // This check is simplified and might fail due to randomness
         // Verify that the total number of members across clusters matches the total vectors
@@ -351,13 +334,13 @@ describe("ClusteredVectorDB", () => {
       }
     });
 
-    it("should handle K-Means on an empty database", async () => {
+    it('should handle K-Means on an empty database', async () => {
       const db = new ClusteredVectorDB(vectorDimension);
       await db.runKMeans(); // Should not throw error
       expect(db.getClusterInfo().length).to.equal(0);
     });
 
-    it("should handle K-Means when k is larger than the number of vectors", async () => {
+    it('should handle K-Means when k is larger than the number of vectors', async () => {
       const db = new ClusteredVectorDB(vectorDimension);
       db.addVector(1, createTestVector([1, 2, 3, 4]));
       db.addVector(2, createTestVector([5, 6, 7, 8]));

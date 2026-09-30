@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Breaking renames plus the removal of every explicit `any` from `src/`.
+
+### Changed
+
+- **BREAKING: `UnifiedSearch` is now `Search`**, in `src/search/search.ts`
+  (was `src/search/unified_search.ts`). The public export, the class name and
+  every JSDoc reference changed with it.
+- **BREAKING: `UnifiedSearchOptions` is now `SearchOptions`.** The old
+  `SearchOptions` was a thin wrapper over it, so the two were merged: the
+  backward-compatibility aliases `limit`, `offset` and `stopEarly` moved into
+  the base interface. `HybridSearchOptions` and `BatchQuery.options` follow
+  the merged type.
+- **BREAKING: `UnifiedSearchPartitionedStats` is now `SearchStats`**, and
+  `Database.getUnifiedSearch()` is now `Database.getSearch()`.
+- **BREAKING: metadata is `Record<string, unknown>`**, not
+  `Record<string, any>`, everywhere on the public surface (`SearchResult`,
+  `addVector`/`updateMetadata`/`getMetadata`, filter predicates, the server
+  routes, `RerankingOptions.metadata`/`metadataMap`). Reading a metadata value
+  now requires narrowing, which is the point: the values came from `JSON.parse`
+  and were never checked.
+- Query helpers take `values?: unknown` instead of `any | any[]`, and
+  `FilterConfig.value` is `unknown`.
+- `PartitionedVectorDBInterface` is fully typed: `search`/`findNearest` take
+  `SearchOptions`, `createPartition` takes the new `CreatePartitionOptions`,
+  `getActivePartition()` returns `ClusteredVectorDB | null` and
+  `getPartitionConfigs()` returns `PartitionConfig[]`.
+- `TypedEventEmitter`'s constraint is `object` rather than
+  `Record<string, unknown>`, which interfaces without an index signature
+  cannot satisfy.
+- The `search:complete` payload has one shape (`SearchCompleteEvent`) shared by
+  the engine and `Database`, instead of two that disagreed.
+- The `Search` engine's `search:complete` event no longer carries `timeMs`: the
+  underlying `partition:indexed` event never had it, so it was always
+  `undefined`.
+
+### Fixed
+
+- **The monitor recorded the search method as `undefined`.** `Database`
+  read `data.dbMethodUsed` off the engine's payload, which is called `method`,
+  so every `methodUsage` entry was keyed `"undefined"`.
+- **Filters compared across types.** `$gt`/`$gte`/`$lt`/`$lte` used the raw
+  `>` operator, so a string metadata value was coerced to a number and compared
+  against a numeric filter. Comparisons are now type-bracketed (both numbers or
+  both strings), the way MongoDB does it; mixed types never match.
+- **`recordError()` spread a primitive `extraData`** character by character
+  into the event payload. Only objects are spread now.
+- **`partition:indexProgress.progress` is documented as a fraction (0-1)**, not
+  a percentage, which is what HNSW reports.
+- The HNSW worker restored its state through `as any`; it now assigns the
+  private fields directly, and the compiler checks the field names.
+
+### Removed
+
+- `UnifiedSearchStats` — superseded by `SearchStats` and referenced nowhere.
+- 227 `any` occurrences across 19 files, and the 2 unused
+  `eslint-disable @typescript-eslint/no-unused-vars` directives. `npm run lint`
+  now reports 0 problems, down from 229 warnings.
+- Dead code: `VectorDB.getStats()` re-checked for a `clusters.dimensions` field
+  its own return type requires, `HybridEngineSearch` re-derived `progress`/`id`/
+  `error` from payloads that are already typed, and
+  `getMetadataWithFieldAcrossPartitions` called `getVector(null)`.
+
+### Added
+
+- `utils/errors.ts` — `toError`, `errorMessage` and `errorCode`, so
+  `useUnknownInCatchVariables` no longer forces an `any` annotation on every
+  catch block (`error.code === 'ENOENT'` in particular).
+- `LICENSE` (MIT, 2025 n2flowjs). `package.json` declared `"license": "MIT"`
+  and shipped `LICENSE` in `files`, and the README links to it, but the file
+  was never committed — npm warns on publish and TypeDoc could not resolve the
+  link.
+
+### Fixed
+
+- `npm run docs` reported 21 warnings, now 0: 17 uses of the unsupported
+  `@fires` block tag (TypeDoc's tag is `@event`, so the emitted-event list was
+  silently dropped from the API docs), plus an `@description` block tag, a
+  `@constructor` tag, and a `@param options.force` that did not match the
+  `save(options: SaveOptions)` signature.
+- 64 tracked files carried CRLF in the working tree while `.gitattributes`
+  pins `* text=auto eol=lf` and every committed blob is LF, so `git status` and
+  `npm run format:check` disagreed with the repository. Working tree
+  normalized to LF; `.prettierrc` was committed with CRLF and is now LF too.
+- `npm run format:check` now passes. 42 files had drifted from the prettier
+  config in `.prettierrc` — quote style, wrapping, trailing commas — and
+  nothing caught it because CI never runs the check. Formatting only, no
+  behaviour change.
+
 ## [0.2.0]
 
 Correctness fixes, a smaller published package, and a much stricter build.
