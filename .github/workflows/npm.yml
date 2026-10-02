@@ -116,6 +116,13 @@ jobs:
       # prints the exact fields needed when it is missing.
       - name: Check npm authentication
         if: env.skip_publish != 'true' && inputs.dry_run != true
+        env:
+          # There is no `GITHUB_WORKFLOW_PATH` in the Actions environment; the
+          # real variables are GITHUB_WORKFLOW, GITHUB_WORKFLOW_REF and
+          # GITHUB_WORKFLOW_SHA. Referencing the missing one under `set -u` is
+          # what killed the 0.3.0 publish: this step aborted on its own
+          # diagnostic output, 200 lines above the npm registry.
+          WORKFLOW_FILE: .github/workflows/npm.yml
         run: |
           set -euo pipefail
 
@@ -133,8 +140,8 @@ jobs:
           echo "  publisher registered for this package yet. Add one at"
           echo "  https://www.npmjs.com/org/n2flowjs -> Trusted Publisher, with:"
           echo "    package:   @n2flowjs/nbase"
-          echo "    workflow:  $(basename "$GITHUB_WORKFLOW")"
-          echo "    filename:  $GITHUB_WORKFLOW_PATH"
+          echo "    workflow:  $GITHUB_WORKFLOW"
+          echo "    filename:  $WORKFLOW_FILE"
           echo "    action:    npm publish"
           echo
           echo "  Then re-run this workflow. No code change is needed."

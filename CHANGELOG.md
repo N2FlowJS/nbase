@@ -89,6 +89,13 @@ arrives together.
 
 ### Fixed
 
+- **The release workflow could not publish.** `.github/workflows/npm.yml` ran
+  its "Check npm authentication" step under `set -euo pipefail` and echoed
+  `$GITHUB_WORKFLOW_PATH` inside the diagnostic message. That variable does not
+  exist in the Actions environment, so `set -u` aborted the step on its own
+  error output, before `npm publish` was ever reached. Build, tests and the
+  tarball checks all passed first. The message now uses `$GITHUB_WORKFLOW` and
+  an explicit `WORKFLOW_FILE`.
 - `npm run docs` reported 21 warnings, now 0: 17 uses of the unsupported
   `@fires` block tag (TypeDoc's tag is `@event`, so the emitted-event list was
   silently dropped from the API docs), plus an `@description` block tag, a
