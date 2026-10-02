@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Breaking renames plus the removal of every explicit `any` from `src/`.
+## [0.3.0] - 2026-10-02
+
+Breaking renames plus the removal of every explicit `any` from `src/`. The
+published package was still 0.1.10, so everything in 0.2.0 and this release
+arrives together.
 
 ### Changed
 
@@ -71,6 +75,10 @@ Breaking renames plus the removal of every explicit `any` from `src/`.
 
 ### Added
 
+- Plain repository/npm/stars/forks/issues/license links in place of the five
+  shields.io badges. npmjs.com rendered the badge images as alt text on the
+  package page, so every one of them was a broken image for anyone reading the
+  package there.
 - `utils/errors.ts` — `toError`, `errorMessage` and `errorCode`, so
   `useUnknownInCatchVariables` no longer forces an `any` annotation on every
   catch block (`error.code === 'ENOENT'` in particular).

@@ -1,10 +1,11 @@
 # 🧠 NBase - Neural Vector Database
 
-[![Made with Love](https://img.shields.io/badge/Made%20with-💖-pink.svg)](https://github.com/N2FlowJS/nbase)
-[![GitHub stars](https://img.shields.io/github/stars/N2FlowJS/nbase)](https://github.com/N2FlowJS/nbase/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/N2FlowJS/nbase)](https://github.com/N2FlowJS/nbase/network/members)
-[![GitHub issues](https://img.shields.io/github/issues/N2FlowJS/nbase)](https://github.com/N2FlowJS/nbase/issues)
-[![GitHub license](https://img.shields.io/github/license/N2FlowJS/nbase)](https://github.com/N2FlowJS/nbase/blob/main/LICENSE)
+[Repository](https://github.com/N2FlowJS/nbase) ·
+[npm](https://www.npmjs.com/package/@n2flowjs/nbase) ·
+[Stars](https://github.com/N2FlowJS/nbase/stargazers) ·
+[Forks](https://github.com/N2FlowJS/nbase/network/members) ·
+[Issues](https://github.com/N2FlowJS/nbase/issues) ·
+[MIT License](https://github.com/N2FlowJS/nbase/blob/main/LICENSE)
 
 ```bash
 ╔═══════════════════════════════════════╗

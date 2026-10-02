@@ -1,6 +1,6 @@
 {
   "name": "@n2flowjs/nbase",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Partitioned vector database with HNSW indexing, clustering and a REST API for similarity search",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
