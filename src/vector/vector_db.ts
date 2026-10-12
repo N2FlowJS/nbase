@@ -724,7 +724,10 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
         // Check if all fields exist and match their values
         for (const field of fields) {
-          if (!(field in meta) || meta[field] !== criteriaObj[field]) {
+          // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so a
+          // criteria of `"constructor"` or `"toString"` matched every stored
+          // record and dumped the whole metadata store.
+          if (!Object.hasOwn(meta, field) || meta[field] !== criteriaObj[field]) {
             match = false;
             break;
           }
@@ -749,12 +752,19 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
       log('warn', 'Values array length does not match fields array length. Some value checks will be ignored.');
     }
 
-    this.metadata.forEach((meta, id) => {
+    // `options.limit` was only honoured by the object-criteria branch above. The
+    // legacy string/array branch returned every matching record across every
+    // partition, so `{"criteria": "type"}` with a `limit` of 10 still answered
+    // with the whole store.
+    const limit = options?.limit;
+    // A `for...of` rather than `forEach`, so the limit can stop the scan
+    // instead of only ending the callback.
+    for (const [id, meta] of this.metadata) {
       let match = true;
 
       // Check all fields exist and match values if provided
       for (const [i, field] of fieldArray.entries()) {
-        if (!(field in meta)) {
+        if (!Object.hasOwn(meta, field)) {
           match = false;
           break;
         }
@@ -768,8 +778,11 @@ export class VectorDB extends (EventEmitter as new () => TypedEventEmitter<Vecto
 
       if (match) {
         results.push({ id, metadata: { ...meta } }); // Return a copy of metadata
+        if (limit !== undefined && results.length >= limit) {
+          break;
+        }
       }
-    });
+    }
 
     return results;
   }

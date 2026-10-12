@@ -89,6 +89,39 @@ describe('ClusteredVectorDB', () => {
       expect(updatedTotalSize).to.equal(1);
     });
 
+    it('should keep metadata across an update', () => {
+      const db = new ClusteredVectorDB(vectorDimension);
+
+      db.addVector('keep', createTestVector([1, 2, 3, 4]), { tag: 'keepme', rank: 7 });
+
+      // The implementation used to delete then re-add the vector, and
+      // `deleteVector` removes the metadata entry, so the update left the
+      // vector with no metadata at all.
+      expect(db.updateVector('keep', createTestVector([9, 9, 9, 9]))).to.be.true;
+
+      const metadata = db.getMetadata('keep');
+      expect(metadata).to.deep.equal({ tag: 'keepme', rank: 7 });
+
+      // A metadata filter must still see the vector after the update.
+      const results = db.findNearest(createTestVector([9, 9, 9, 9]), 5, {
+        filter: (_id, meta) => meta?.['tag'] === 'keepme',
+      });
+      expect(results.map((r) => r.id)).to.include('keep');
+    });
+
+    it('should not emit vector:delete for an update', () => {
+      const db = new ClusteredVectorDB(vectorDimension);
+      db.addVector(1, createTestVector([1, 2, 3, 4]), { tag: 'keepme' });
+
+      const seen: string[] = [];
+      db.on('vector:delete', () => seen.push('vector:delete'));
+      db.on('vector:update', () => seen.push('vector:update'));
+
+      expect(db.updateVector(1, createTestVector([5, 6, 7, 8]))).to.be.true;
+
+      expect(seen).to.deep.equal(['vector:update']);
+    });
+
     it('should find nearest vectors using clusters', () => {
       const db = new ClusteredVectorDB(vectorDimension);
 

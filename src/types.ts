@@ -98,6 +98,9 @@ export interface BatchOperation {
 /**
  * Search result interface
  */
+/** Two vectors to a distance. `getDistanceFunction` returns one of these. */
+export type DistanceFunction = (a: Vector, b: Vector) => number;
+
 export interface SearchResult {
   id: IDVector;
   dist: number;
@@ -728,7 +731,7 @@ export interface PartitionedVectorDBInterface {
   save(): Promise<void>;
   IsReady(): boolean;
   initializationPromise: Promise<void>;
-  getMetadataWithFieldAcrossPartitions(criteria: string | string[] | Record<string, unknown>, values?: unknown, option?: { limit: number }): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }>>;
+  getMetadataWithFieldAcrossPartitions(criteria: string | string[] | Record<string, unknown>, values?: unknown, option?: { limit?: number }): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }>>;
   extractRelationships(
     threshold: number,
     options: { metric?: DistanceMetric; partitionIds?: string[]; includeMetadata?: boolean },
@@ -1601,6 +1604,35 @@ export type IServerOptions = {
     /** Time window for rate limiting in milliseconds */
     windowMs?: number;
   };
+  /**
+   * Cross-origin policy for the API.
+   *
+   * Omitted (the default) means no CORS middleware is installed at all: the
+   * browser default already blocks cross-origin reads, and `cors()` used to be
+   * mounted with no arguments, which answers every origin with
+   * `Access-Control-Allow-Origin: *`. Pass a list of origins, or `true` to
+   * restore the previous permissive behaviour.
+   */
+  cors?: string[] | boolean;
+  /**
+   * API key authentication for `/api/*`.
+   *
+   * Opt-in: with no keys configured the API stays open and `createServer`
+   * logs a warning saying so. Set `requireAuth: true` to refuse to start
+   * without a key instead of warning.
+   */
+  auth?: {
+    /** Accepted API keys. Compared in constant time. */
+    apiKeys?: string[];
+    /** Fail startup when no key is configured, instead of warning. */
+    requireAuth?: boolean;
+  };
+  /**
+   * Number of proxy hops to trust for client IPs (`X-Forwarded-For`).
+   * Leave unset when the server is not behind a proxy: trusting a forwarded
+   * header that a client can set forges the IP the rate limiter buckets on.
+   */
+  trustProxy?: number | boolean;
   /** Whether to enable debug logging */
   debug?: boolean;
   database?: DatabaseOptions;

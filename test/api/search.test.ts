@@ -163,7 +163,11 @@ describe('Search Routes', () => {
       .send({ query: [0.1, 0.2, 0.3] });
 
     expect(response.status).to.equal(500);
-    expect(response.body.error).to.equal(errorMessage);
+    // The route used to forward `error.message` to the client. These strings
+    // come from the storage layer and carry absolute paths, so outside
+    // development the client gets a generic message instead.
+    expect(response.body.error).to.equal('Internal server error');
+    expect(response.body.error).to.not.include(errorMessage);
     expect(response.body.duration).to.equal(123);
   });
 

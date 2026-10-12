@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { ApiContext, SearchResult, SearchOptions } from '../../types';
+import { ApiContext, DistanceMetric, RerankingMethod, SearchResult, SearchOptions } from '../../types';
 import { asyncHandler } from '../utils/async_handler';
+import { publicErrorMessage } from '../utils/http_error';
+import { MAX_EF_SEARCH, MAX_GRAPH_THRESHOLD, MAX_K, MAX_LIMIT, InvalidRequestError, requireInteger, requireNumber, requireVector } from '../utils/validation';
 
 /**
  * Configures and returns the search-related routes for the API.
@@ -69,6 +71,16 @@ import { asyncHandler } from '../utils/async_handler';
  * - Returns a 400 status code for invalid requests (e.g., missing or invalid `threshold`).
  * - Returns a 500 status code for internal server errors, with optional stack trace in development mode.
  */
+/** Narrows an untrusted value to the metrics the store supports. */
+function isDistanceMetric(value: unknown): value is DistanceMetric {
+  return value === 'euclidean' || value === 'cosine';
+}
+
+/** Narrows an untrusted value to the reranking methods `Search` implements. */
+function isRerankingMethod(value: unknown): value is RerankingMethod {
+  return value === 'diversity' || value === 'standard' || value === 'weighted';
+}
+
 export function searchRoutes(context: ApiContext) {
   const router = Router();
   const { database, createTimer, createFilterFunction, maxGraphExtractionVectors } = context;
@@ -146,7 +158,7 @@ export function searchRoutes(context: ApiContext) {
       const timer = createTimer();
       timer.start('search');
 
-      const { query, k, method, partitionIds, efSearch, distanceMetric, rerank, rerankingMethod, rerankLambda, filters = {}, includeMetadata, includeVectors, skipCache, searchTimeoutMs } = req.body;
+      const { query, method, partitionIds, distanceMetric, rerank, rerankingMethod, filters = {}, includeMetadata, includeVectors, skipCache } = req.body;
 
       if (!query || !Array.isArray(query)) {
         res.status(400).json({
@@ -155,33 +167,51 @@ export function searchRoutes(context: ApiContext) {
         return;
       }
 
+      // `k` and `efSearch` are forwarded to the search engine, and HNSW derives
+      // its beam width as `Math.max(k, efSearch)`. A non-integer `k` (or one of
+      // a billion) used to turn every query into a full-index scan, so both are
+      // bounded here rather than trusted.
+      let k: number | undefined;
+      let efSearch: number | undefined;
+      let rerankLambda: number | undefined;
+      let searchTimeoutMs: number | undefined;
+      try {
+        requireVector(query, 'query');
+        k = requireInteger(req.body['k'], 'k', 1, MAX_K);
+        efSearch = requireInteger(req.body['efSearch'], 'efSearch', 1, MAX_EF_SEARCH);
+        rerankLambda = requireNumber(req.body['rerankLambda'], 'rerankLambda', 0, 1);
+        searchTimeoutMs = requireInteger(req.body['searchTimeoutMs'], 'searchTimeoutMs', 1, 600_000);
+      } catch (error) {
+        if (error instanceof InvalidRequestError) {
+          res.status(error.status).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+
       try {
         const hasFilters = Array.isArray(filters) ? filters.length > 0 : Object.keys(filters).length > 0;
 
-        // Build comprehensive search options
+        // Build comprehensive search options. Optional keys are spread in only
+        // when present: an explicit `undefined` is not the same as an absent key
+        // under exactOptionalPropertyTypes, and `Search` defaults a missing key
+        // while an explicit undefined would reach the engine as a real value.
         const searchOptions: SearchOptions = {
-          k,
           useHNSW: method === 'hnsw',
           // Only include filter if filters are present
           filter: hasFilters ? createFilterFunction(filters) : undefined,
-          includeMetadata,
-          includeVectors,
-          skipCache,
-          partitionIds,
-          efSearch,
-          distanceMetric,
-          rerank,
-          rerankingMethod,
-          rerankLambda,
-          searchTimeoutMs,
+          ...(k !== undefined ? { k } : {}),
+          ...(efSearch !== undefined ? { efSearch } : {}),
+          ...(rerankLambda !== undefined ? { rerankLambda } : {}),
+          ...(searchTimeoutMs !== undefined ? { searchTimeoutMs } : {}),
+          ...(includeMetadata !== undefined ? { includeMetadata: includeMetadata === true } : {}),
+          ...(includeVectors !== undefined ? { includeVectors: includeVectors === true } : {}),
+          ...(skipCache !== undefined ? { skipCache: skipCache === true } : {}),
+          ...(rerank !== undefined ? { rerank: rerank === true } : {}),
+          ...(isDistanceMetric(distanceMetric) ? { distanceMetric } : {}),
+          ...(isRerankingMethod(rerankingMethod) ? { rerankingMethod } : {}),
+          ...(Array.isArray(partitionIds) && partitionIds.every((id) => typeof id === 'string') ? { partitionIds: partitionIds as string[] } : {}),
         };
-
-        // Remove undefined options to avoid overriding defaults
-        Object.keys(searchOptions).forEach((key) => {
-          if (searchOptions[key as keyof SearchOptions] === undefined) {
-            delete searchOptions[key as keyof SearchOptions];
-          }
-        });
 
         const results: SearchResult[] = await database.findNearest(query, k, searchOptions);
 
@@ -208,7 +238,7 @@ export function searchRoutes(context: ApiContext) {
 
         // Provide detailed error response
         res.status(500).json({
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
           duration,
         });
@@ -274,7 +304,7 @@ export function searchRoutes(context: ApiContext) {
       const timer = createTimer();
       timer.start('metadata_search');
 
-      const { criteria, values, includeVectors = false, limit } = req.body;
+      const { criteria, values, includeVectors = false } = req.body;
 
       // Validate that criteria is provided and is of the right type
       if (criteria === undefined || (typeof criteria !== 'string' && !Array.isArray(criteria) && (typeof criteria !== 'object' || criteria === null))) {
@@ -284,9 +314,23 @@ export function searchRoutes(context: ApiContext) {
         return;
       }
 
+      // `limit` was forwarded unvalidated, and the legacy string/array branch of
+      // `getMetadataWithField` ignores it entirely — so `{"criteria":"x"}`
+      // returned every matching record across every loaded partition.
+      let limit: number | undefined;
+      try {
+        limit = requireInteger(req.body['limit'], 'limit', 1, MAX_LIMIT);
+      } catch (error) {
+        if (error instanceof InvalidRequestError) {
+          res.status(error.status).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+
       try {
         // Call the database method to get metadata with matching fields
-        const results = await database.getMetadataWithField(criteria, values, { limit });
+        const results = await database.getMetadataWithField(criteria, values, limit !== undefined ? { limit } : {});
 
         // If includeVectors is true, fetch vectors for each result
         if (includeVectors) {
@@ -320,7 +364,7 @@ export function searchRoutes(context: ApiContext) {
         console.error('Metadata search error:', error);
 
         res.status(500).json({
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
           duration,
         });
@@ -378,7 +422,20 @@ export function searchRoutes(context: ApiContext) {
 
       const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
 
-      if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
+      // A large threshold makes every pair related, so the guard on the scan
+      // budget below is not enough on its own: 10k vectors still means 50M
+      // result objects. The threshold is capped as well.
+      let safeThreshold: number | undefined;
+      try {
+        safeThreshold = requireNumber(threshold, 'threshold', Number.MIN_VALUE, MAX_GRAPH_THRESHOLD);
+      } catch (error) {
+        if (error instanceof InvalidRequestError) {
+          res.status(error.status).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+      if (safeThreshold === undefined) {
         res.status(400).json({
           error: 'Invalid request: threshold must be a positive number',
         });
@@ -397,7 +454,7 @@ export function searchRoutes(context: ApiContext) {
       }
 
       try {
-        const relationships = await database.extractRelationships(threshold, {
+        const relationships = await database.extractRelationships(safeThreshold, {
           metric,
           partitionIds,
           includeMetadata,
@@ -415,7 +472,7 @@ export function searchRoutes(context: ApiContext) {
         console.error('Relationship extraction error:', error);
 
         res.status(500).json({
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
           duration,
         });
@@ -474,7 +531,20 @@ export function searchRoutes(context: ApiContext) {
 
       const { threshold, metric, partitionIds, includeMetadata = true } = req.body;
 
-      if (threshold === undefined || typeof threshold !== 'number' || threshold <= 0) {
+      // A large threshold makes every pair related, so the guard on the scan
+      // budget below is not enough on its own: 10k vectors still means 50M
+      // result objects. The threshold is capped as well.
+      let safeThreshold: number | undefined;
+      try {
+        safeThreshold = requireNumber(threshold, 'threshold', Number.MIN_VALUE, MAX_GRAPH_THRESHOLD);
+      } catch (error) {
+        if (error instanceof InvalidRequestError) {
+          res.status(error.status).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+      if (safeThreshold === undefined) {
         res.status(400).json({
           error: 'Invalid request: threshold must be a positive number',
         });
@@ -493,7 +563,7 @@ export function searchRoutes(context: ApiContext) {
       }
 
       try {
-        const communities = await database.extractCommunities(threshold, {
+        const communities = await database.extractCommunities(safeThreshold, {
           metric,
           partitionIds,
           includeMetadata,
@@ -512,7 +582,7 @@ export function searchRoutes(context: ApiContext) {
         console.error('Community extraction error:', error);
 
         res.status(500).json({
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           stack: process.env['NODE_ENV'] === 'development' ? (error as Error).stack : undefined,
           duration,
         });

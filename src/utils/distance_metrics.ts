@@ -7,7 +7,7 @@
  * `number[]` element reads to `number | undefined`, and `Vector` is a union of
  * `Float32Array | number[]`.
  */
-import { Vector } from '../types';
+import { DistanceFunction, DistanceMetric, Vector } from '../types';
 
 /**
  * Euclidean distance (L2 norm)
@@ -159,7 +159,7 @@ export function hamming(a: Vector, b: Vector): number {
  * @param name Name of the distance function
  * @returns Distance function
  */
-export function getDistanceFunction(name: string): (a: Vector, b: Vector) => number {
+export function getDistanceFunction(name: DistanceMetric): DistanceFunction {
   switch (name.toLowerCase()) {
     case 'euclidean':
       return euclidean;

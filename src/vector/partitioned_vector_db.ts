@@ -171,6 +171,20 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   /** In-flight partition loads, keyed by partition id, to de-duplicate concurrent loads. */
   private partitionLoads: Map<string, Promise<ClusteredVectorDB | null>> = new Map();
   private isClosing: boolean = false; // Flag to prevent operations during close
+  /**
+   * Partitions being flushed by the LRU dispose hook.
+   *
+   * lru-cache v11 never awaits the disposer (`dispose` and `disposeAfter` are
+   * both fire-and-forget: `Disposer` is typed `(value, key, reason) => void`),
+   * so an eviction flush would otherwise still be running when `close()`
+   * returned or when the partition was read back. `close()` awaits these.
+   */
+  private readonly evictionFlushes: Set<Promise<void>> = new Set();
+  /**
+   * True while `close()` tears down. The forced final save has already covered
+   * every loaded partition, so the disposer must not write them a second time.
+   */
+  private skipEvictionFlush: boolean = false;
 
   constructor(options: PartitionedVectorDBOptions = {}) {
     super();
@@ -206,36 +220,24 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     // --- Initialize LRU Cache ---
     this.loadedPartitions = new LRUCache<string, ClusteredVectorDB>({
       max: this.maxActivePartitions,
-      // Dispose function called when an item is removed (evicted).
-      // lru-cache awaits a Promise-returning dispose; no-misused-promises cannot
-      // see through the generic and flags this as a void-return violation.
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
-      dispose: async (dbInstance, partitionId, reason) => {
+      // Called when an item is removed (evicted).
+      //
+      // lru-cache does NOT await the disposer — `Disposer` is typed
+      // `(value, key, reason) => void` and the return value is dropped — so
+      // this must not be `async`: the promise it starts is tracked in
+      // `evictionFlushes` and awaited by `close()` instead.
+      dispose: (dbInstance, partitionId, reason) => {
         log('info', `[PartitionedVectorDB] Disposing partition ${partitionId} from memory (Reason: ${reason}).`);
-        // Save is handled by the main save() method or explicitly before eviction if needed.
-        // Close the DB instance to release resources.
-        const hnswIndex = this.hnswIndices.get(partitionId);
-        if (hnswIndex) {
-          // Decide if HNSW index should be saved on eviction - maybe not, rely on explicit save?
-          // await this._saveHNSWIndex(partitionId); // Optional: save index on eviction
-          this.hnswIndices.delete(partitionId); // Remove from memory map
-          log('info', `[PartitionedVectorDB] Unloaded HNSW index for evicted partition ${partitionId}`);
-        }
-        try {
-          // `save: false` — persistence is orchestrated by `save()`, and
-          // `close()` already flushed everything before clearing this cache.
-          // Letting `close()` save here would re-write every evicted partition
-          // on the eviction path.
-          await dbInstance.close({ save: false });
-          this.emit('partition:unloaded', { id: partitionId });
-        } catch (error) {
-          log('error', `[PartitionedVectorDB] Error closing partition ${partitionId} during dispose:`, error);
-          this.emit('partition:error', {
-            id: partitionId,
-            error,
-            operation: 'dispose',
-          });
-        }
+
+        // An evicted partition's unpersisted vectors were lost outright: the
+        // disposer closed it with `save: false`, and `save()` only walks the
+        // *loaded* partitions, so once a partition left the LRU nothing would
+        // ever write it again. Persist before releasing it.
+        const flush = this._flushEvictedPartition(dbInstance, partitionId, reason);
+        this.evictionFlushes.add(flush);
+        void flush.finally(() => {
+          this.evictionFlushes.delete(flush);
+        });
       },
     });
 
@@ -984,6 +986,39 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
   }
 
   /**
+   * Persists and closes a partition that the LRU cache just evicted, and drops
+   * its in-memory HNSW index. Failures are reported as `partition:error` rather
+   * than thrown: a disposer cannot throw into the caller that triggered the
+   * eviction.
+   */
+  private async _flushEvictedPartition(dbInstance: ClusteredVectorDB, partitionId: string, reason: string): Promise<void> {
+    const hnswIndex = this.hnswIndices.get(partitionId);
+    if (hnswIndex) {
+      this.hnswIndices.delete(partitionId); // Remove from memory map
+      log('info', `[PartitionedVectorDB] Unloaded HNSW index for evicted partition ${partitionId}`);
+    }
+
+    try {
+      if (!this.skipEvictionFlush) {
+        // `save: true` — durability on the eviction path. `close()` sets
+        // `skipEvictionFlush` so its own teardown does not write every
+        // partition twice.
+        await dbInstance.close({ save: true });
+      } else {
+        await dbInstance.close({ save: false });
+      }
+      this.emit('partition:unloaded', { id: partitionId });
+    } catch (error) {
+      log('error', `[PartitionedVectorDB] Error closing partition ${partitionId} during dispose (${reason}):`, error);
+      this.emit('partition:error', {
+        id: partitionId,
+        error,
+        operation: 'dispose',
+      });
+    }
+  }
+
+  /**
    * Close the partitioned database, saving state and releasing resources.
    */
   async close(options: CloseOptions = {}): Promise<void> {
@@ -1022,7 +1057,17 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
     // 3. Clear the LRU cache - this triggers dispose which calls close() on individual DBs
     // State was already flushed in step 2, so dispose must not re-save.
+    this.skipEvictionFlush = true;
     this.loadedPartitions.clear();
+
+    // 3b. Await evictions that happened earlier, while the database was
+    // running. lru-cache never awaits its disposer, so without this `close()`
+    // could return (and the process could exit) with a partition write still in
+    // flight.
+    const pendingFlushes = Array.from(this.evictionFlushes);
+    if (pendingFlushes.length > 0) {
+      await Promise.allSettled(pendingFlushes);
+    }
 
     // 4. Clear HNSW index map (dispose might have already removed some)
     this.hnswIndices.clear();
@@ -1622,14 +1667,35 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
 
     const queryVector = query instanceof Float32Array ? query : new Float32Array(query);
 
-    // Determine partitions to search
-    const partitionIdsToSearch = options.partitionIds
-      ? options.partitionIds.filter((id) => this.loadedPartitions.has(id)) // Search specified *loaded* partitions
-      : Array.from(this.loadedPartitions.keys()); // Default: search all *loaded* partitions
+    // An explicit `partitionIds` list is a request, not a hint. It used to be
+    // filtered against `loadedPartitions`, so naming a partition that was not
+    // resident silently returned whatever the resident partitions had — or an
+    // empty array — and the caller could not tell "no matches" from "never
+    // searched". Unknown ids are reported and dropped; known ones are loaded.
+    const unknownPartitionIds = (options.partitionIds ?? []).filter((id) => !this.partitionConfigs.has(id));
+    if (unknownPartitionIds.length > 0) {
+      log('warn', `[PartitionedVectorDB] Ignoring unknown partition ids: [${unknownPartitionIds.join(', ')}]`);
+    }
+    const requestedPartitionIds = options.partitionIds ? options.partitionIds.filter((id) => this.partitionConfigs.has(id)) : undefined;
+
+    if (requestedPartitionIds && requestedPartitionIds.length > 0) {
+      // Load the partitions that were asked for. `_loadPartition` de-duplicates
+      // concurrent loads and honours the LRU. `loadHNSW: false` — this is the
+      // linear path, the index would be pure overhead.
+      await Promise.all(requestedPartitionIds.map((id) => this._loadPartition(id, false)));
+    }
+
+    // Without an explicit list, search the resident partitions (loading every
+    // configured partition per query would defeat the LRU) — but say so when
+    // that leaves partitions out of the search.
+    const partitionIdsToSearch = requestedPartitionIds ?? Array.from(this.loadedPartitions.keys());
 
     if (partitionIdsToSearch.length === 0) {
       log('warn', '[PartitionedVectorDB] No valid partitions specified or loaded to search.');
       return [];
+    }
+    if (!requestedPartitionIds && this.partitionConfigs.size > this.loadedPartitions.size) {
+      log('warn', `[PartitionedVectorDB] Searched the ${this.loadedPartitions.size} resident partition(s) of ` + `${this.partitionConfigs.size} configured; pass partitionIds to search specific partitions.`);
     }
     log('info', `[PartitionedVectorDB] Performing standard search on partitions: [${partitionIdsToSearch.join(', ')}]`);
 
@@ -1770,7 +1836,7 @@ export class PartitionedVectorDB extends (EventEmitter as new () => TypedEventEm
     criteria: string | string[] | Record<string, unknown>,
     values?: unknown,
     option?: {
-      limit: number;
+      limit?: number;
     },
   ): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }>> {
     await this._ensureInitialized();

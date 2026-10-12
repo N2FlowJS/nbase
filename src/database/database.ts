@@ -187,12 +187,26 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       return null;
     }
 
-    return new VectorDBMonitor({
+    const monitor = new VectorDBMonitor({
       interval: this.options.monitoring.intervalMs,
       logToConsole: this.options.monitoring.logToConsole,
       enableDatabaseMetrics: this.options.monitoring.enableDatabaseMetrics,
       enableSystemMetrics: this.options.monitoring.enableSystemMetrics,
     });
+
+    // The monitor emits `error` (Node's special-case event: emitting it with no
+    // listener throws). `recordEventInMonitor` routes every `partition:error`
+    // into `monitor.recordError`, so without this listener the first partition
+    // error threw out of the emitter and took the caller down with it.
+    monitor.on('error', (payload) => {
+      this.emit('error', {
+        message: `[Database] Monitor error: ${payload.message}`,
+        error: payload.error,
+        context: payload.context ?? 'monitor',
+      });
+    });
+
+    return monitor;
   }
 
   /**
@@ -220,7 +234,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    * Ensures base directory exists for storage
    */
   private async initializeStorage(): Promise<void> {
-    const baseDir = path.join(process.cwd(), this.options.persistence.dbPath || Database.DEFAULT_DB_PATH);
+    // `path.resolve`, not `path.join`: `path.join(cwd, '/tmp/my-db')` silently
+    // produces `<cwd>/tmp/my-db`, so an absolute `dbPath` was rewritten into a
+    // directory inside the project instead of being honoured.
+    const baseDir = path.resolve(process.cwd(), this.options.persistence.dbPath || Database.DEFAULT_DB_PATH);
 
     this.ensureDirectoryExists(baseDir, Database.PARTITIONS_DIR_NAME);
   }
@@ -231,7 +248,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   private async initializeVectorDB(): Promise<void> {
     console.log('[Database] Initializing PartitionedVectorDB...');
 
-    const baseDir = path.join(process.cwd(), this.options.persistence.dbPath || Database.DEFAULT_DB_PATH);
+    // `path.resolve`, not `path.join`: `path.join(cwd, '/tmp/my-db')` silently
+    // produces `<cwd>/tmp/my-db`, so an absolute `dbPath` was rewritten into a
+    // directory inside the project instead of being honoured.
+    const baseDir = path.resolve(process.cwd(), this.options.persistence.dbPath || Database.DEFAULT_DB_PATH);
 
     this.vectorDB = new PartitionedVectorDB({
       partitionsDir: path.join(baseDir, Database.PARTITIONS_DIR_NAME),
@@ -574,18 +594,25 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     // `filter` used to be flattened to the string 'present'/'absent', so two
     // completely different predicates hashed to the same key and a cached
     // result for one filter was served in response to another.
+    // Everything that can change the returned payload has to be in the key.
+    // The previous hand-written list omitted `includeMetadata` and
+    // `includeVectors`, and the cache is consulted *before* `Search` attaches
+    // metadata (`Search.search` mutates the result objects it was handed), so a
+    // query primed with `includeMetadata: false` satisfied a later
+    // `includeMetadata: true` query with results that had no metadata at all.
+    //
+    // Derived from the option object rather than re-listed by hand: a new
+    // option is then in the key by default, instead of silently producing a
+    // cache collision the next time someone adds a field.
+    const { filter, partitionIds, ...rest } = options;
     const optionsKey = JSON.stringify({
       k,
-      filter: this._hashFilter(options.filter),
-      distanceMetric: options.distanceMetric ?? 'default', // Use default marker
-      efSearch: options.efSearch,
-      useHNSW: options.useHNSW,
-      rerank: options.rerank,
-      rerankingMethod: options.rerankingMethod,
+      filter: this._hashFilter(filter),
       // Copy before sorting: `.sort()` mutates in place, and this array belongs
       // to the caller.
-      partitionIds: options.partitionIds ? [...options.partitionIds].sort() : undefined,
-      searchMethod: options.searchMethod,
+      partitionIds: partitionIds ? [...partitionIds].sort() : undefined,
+      distanceMetric: options.distanceMetric ?? 'default', // Use default marker
+      ...rest,
     });
     return `${vectorHash}::${optionsKey}`;
   }
@@ -601,6 +628,22 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
    *
    * @private
    */
+  /**
+   * Copies search results (and their metadata) so cache entries and callers
+   * cannot mutate each other. `Search` attaches metadata by assigning onto the
+   * result objects it was handed, so storing the caller's objects would rewrite
+   * the cached payload after the fact.
+   */
+  private _cloneSearchResults(results: readonly SearchResult[]): SearchResult[] {
+    return results.map((result) => {
+      const clone: SearchResult = { ...result };
+      if (result.metadata) {
+        clone.metadata = { ...result.metadata };
+      }
+      return clone;
+    });
+  }
+
   private _hashFilter(filter: unknown): string {
     if (filter === undefined || filter === null) return 'none';
     if (typeof filter === 'function') {
@@ -856,7 +899,7 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
     criteria: string | string[] | Record<string, unknown>,
     values?: unknown,
     option?: {
-      limit: number;
+      limit?: number;
     },
   ): Promise<Array<{ partitionId: string; vectorId: number | string; metadata: Record<string, unknown> }>> {
     await this._assertReady('getMetadataWithField');
@@ -902,7 +945,10 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
         operationTimer.stop('findNearest_total');
         // Search event won't fire for cache hit, emit simple event here if needed
         this.emit('search:cacheHit', { options: searchOptions, k: effectiveK });
-        return [...cachedResults]; // Return copy
+        // Hand out fresh objects: callers are free to mutate what they get back
+        // (the server route assigns `dimension` onto results), and the cached
+        // entries must not change underneath the next reader.
+        return this._cloneSearchResults(cachedResults);
       }
       this.metrics.cacheMisses++;
       this.monitor?.recordCacheMiss();
@@ -934,9 +980,14 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
       const results = await searchPromise;
       // Search emits search:complete which updates metrics
 
-      // Cache results if cache was checked and not skipped
+      // Cache results if cache was checked and not skipped.
+      //
+      // A shallow array copy was not enough: `Search` attaches metadata by
+      // assigning onto the result objects it was handed, so the cached entries
+      // were mutated after they were stored and a later reader of the same key
+      // saw a payload that no longer matched its own options.
       if (cacheKey && results.length > 0) {
-        this.searchCache.set(cacheKey, [...results]); // Store copy
+        this.searchCache.set(cacheKey, this._cloneSearchResults(results));
       }
       operationTimer.stop('findNearest_total');
       return results;

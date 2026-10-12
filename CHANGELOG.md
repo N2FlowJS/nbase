@@ -7,6 +7,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Five defects found reviewing the 0.3.0 release: two silent data-loss paths, one
+process-killing event, one erased field, and a cache that served the wrong
+payload. Each has a regression test that fails on 0.3.0 and passes here.
+
+### Fixed
+
+- **Evicting a partition deleted its unpersisted vectors.** The LRU disposer
+  closed the partition with `save: false`, and `save()` only walks the *loaded*
+  partitions — so once a partition left the cache nothing would ever write it
+  again. On `partitionCapacity: 2, maxActivePartitions: 1` with 6 vectors, only
+  **2 of 6** survived on disk. Eviction now persists before releasing, and
+  `close()` awaits the write: lru-cache v11 never awaits a disposer
+  (`Disposer` is typed `(value, key, reason) => void` and the return value is
+  dropped), which is also what the old comment claimed otherwise.
+- **A `partitionIds` search silently skipped the partitions it named.**
+  `findNearest` filtered the caller's list against `loadedPartitions`, so a
+  request for a non-resident partition returned results from whatever happened
+  to be resident, or `[]` — indistinguishable from "no matches". An explicit
+  list is now loaded and searched; unknown ids are reported and dropped. A
+  search with no list still covers only the resident partitions, and now logs
+  that it did so instead of passing it off as a full search.
+- **`VectorDBMonitor` emitted `error` with no listener.** `recordError` emits
+  `error`, which Node treats specially: with no listener the emit throws
+  `ERR_UNHANDLED_ERROR`. Every `partition:error` is routed into it, so the
+  first partition error threw out of whatever code path raised it. The monitor's
+  errors are now forwarded to the `Database`'s own `error` event.
+- **`updateVector` erased the vector's metadata.** `ClusteredVectorDB` updated
+  by deleting and re-adding the vector, and `deleteVector` removes the metadata
+  entry; the re-add did not supply it again. Every update silently dropped that
+  vector's metadata, which then also excluded it from any metadata filter. It
+  now updates in place, so metadata and dimension survive and an update no
+  longer emits `vector:delete`.
+- **The search cache ignored `includeMetadata` and shared its result objects.**
+  The key was hand-listed and omitted the flag, and the cache is consulted
+  *before* `Search` attaches metadata, so a query primed with
+  `includeMetadata: false` satisfied a later `includeMetadata: true` query with
+  metadata-free results. The key is now derived from the whole option object, so
+  a newly added option is in the key by default, and both the stored entries and
+  the returned results are copied — a caller mutating what it got back could
+  rewrite the cached payload.
+
+- **An absolute `persistence.dbPath` was rewritten into the project directory.**
+  `Database` joined it onto `process.cwd()`, and `path.join(cwd, '/tmp/my-db')`
+  is `<cwd>/tmp/my-db`, so an absolute path produced a directory inside the
+  package instead of the one that was asked for. Now `path.resolve`, which
+  honours an absolute path and still resolves a relative one against the cwd.
+
+### Fixed
+
+- **`efSearch` was never read.** `ef` was always `max(k, this.efSearch)`, so the
+  documented accuracy dial did nothing: `efSearch: 1` and `efSearch: 500`
+  returned the same list. It now sets the beam width — on a 4000x128 index,
+  200 queries went from 0.37 ms to 32.35 ms across that range.
+- **`distanceMetric` was ignored on the HNSW path.** The distance function is
+  fixed when the index is built, so a `cosine` request was answered with
+  Euclidean distances in Euclidean order: measured recall against the true
+  cosine ranking was 0.80, and it is 1.00 now. The per-search function is
+  threaded through the traversal rather than swapping shared state, so
+  concurrent searches cannot change each other's metric.
+- **`exactDimensions: true` returned `[]` after every `buildIndex()`.** The
+  per-dimension entry point was only written by the `dimensionSet.size === 1`
+  branch of `addVector`, and the build's dimension pre-scan had already filled
+  every group before the first `addVector` ran. The pre-scan seeds it now.
+- **A query could be answered from the wrong dimension group.** With
+  `dimensionAware` on, the descent started at the global entry point, which
+  belongs to whichever dimension was indexed first, so a query in another
+  dimension returned confidently wrong-dimension hits whenever those were
+  closer in raw distance. It now starts at that dimension's entry point.
+- **An id of `0` disabled the index.** `if (!this.entryPointId)` and
+  `if (dimEntryPoint)` are truthiness tests, and `0` is a valid id:
+  `findNearest` silently answered from the linear fallback — which returns
+  exact results, so nothing looked wrong — and the per-dimension entry point
+  was never promoted past the level-0 node it started on.
+- **Distance kernels are typed against `DistanceMetric`** instead of `string`,
+  and the metric a per-search function implements is detected by comparison.
+- **HNSW prunes with Algorithm 4 instead of nearest-M.** Keeping the `M` nearest
+  neighbours builds a kNN graph — every node points inward at its own cluster,
+  with no long-range links, which is the property a small-world graph needs to
+  be navigable. Recall@10 over six seeded queries on 8000 vectors of dimension
+  64, both variants built from the same data in the same process, reproduced
+  over two runs: **0.917 average / 0.800 worst before, 0.967 / 0.900 after.**
+  `keepPrunedConnections` is off; refilling with the rejected candidates
+  re-introduces the clustering the heuristic removes. This is a benchmark
+  result rather than a CI gate, for the `Math.random()` reason above — the suite
+  pins the recall floor instead.
+- **Tombstones survive a save/load.** `serialize()` omitted `deletedNodes`, so a
+  reloaded index reported `deletedNodesCount: 0` while the graph still carried
+  the deleted nodes and their edges, and every query kept paying to traverse
+  them.
+
+Recall@10 measured with the new oracle: 1.00 at 500 vectors of dimension 16
+(every run), and 0.95-0.98 average / 0.90 worst at 2000x128.
+
+### Known
+
+- **`_randomLevel()` uses `Math.random()`, so two builds of the same data
+  produce different graphs** and one build's recall@10 is not reproducible.
+  Every figure quoted here is several seeded queries against one build, and
+  comparing *builds* of two variants has to happen in the same process or the
+  delta is noise. That is not hypothetical: the first measurement of the
+  pruning heuristic below said it was worse, and only a same-process comparison
+  showed the opposite.
+
+### Added
+
+- `test/test-helpers/search-oracle.ts` — a seeded PRNG, a float64 reference
+  distance, a brute-force top-k and a recall metric. Every existing search
+  assertion was `length > 0`, so an implementation returning `k` arbitrary
+  vectors passed.
+- `test/tests/search_oracle.test.ts` — the exact paths must match the reference
+  id for id; the approximate ones must reach a stated recall; the library's
+  kernels must agree with the reference; a deleted vector never comes back.
+- `test/tests/hnsw_correctness.test.ts` — `efSearch`, the metric override, the
+  per-dimension entry point, `exactDimensions` after a build, and id `0`.
+
+### Security
+
+Hardening of the optional REST API. `createServer` was the only code that
+assembled the real Express app, and it had no tests, so none of this was
+covered.
+
+- **The server bound every interface.** `app.listen(PORT)` ignores the
+  configured host, so a process configured for `localhost` — the default — was
+  reachable from the network while logging `http://localhost:PORT`. The host is
+  passed through now.
+- **CORS is opt-in.** It was mounted as a bare `cors()`, answering every origin
+  with `Access-Control-Allow-Origin: *`. That is not access control, and it
+  defeated an api-key middleware added through `middleware` — a key held by a
+  browser app is readable by any site that can reach the API. Pass
+  `cors: ['https://app.example']`, or `cors: true` to restore the old
+  behaviour.
+- **API keys (opt-in).** `auth: { apiKeys: [...] }` protects `/api/*` via
+  `Authorization: Bearer` or `x-api-key`, compared with `timingSafeEqual` over
+  SHA-256 digests. With no keys configured the API stays open and the server logs
+  a warning saying so; `auth: { requireAuth: true }` makes it refuse to start
+  instead.
+- **A 500 no longer leaks internal messages.** Every route answered
+  `res.status(500).json({ error: error.message })`, and those strings come from
+  the storage layer — `ENOENT: /home/user/.../partitions/vec.bin` is what a
+  client got, which is a map of the host. Outside `NODE_ENV=development` the
+  client now gets `Internal server error`.
+- **`k` is validated.** `k: "abc"` produced `NaN`, HNSW derives its beam width as
+  `Math.max(k, efSearch)`, and `results.size >= NaN` is never true — so one
+  request scanned the whole index. `k: 1e9` did the same directly. `k`,
+  `efSearch`, `limit` and `rerankLambda` are now bounded integers/numbers on
+  `/search`, `/similar` and `/search/metadata`.
+- **`threshold` is capped on the O(n^2) endpoints.** `/relationships` and
+  `/communities` only checked `> 0`; a threshold of 1e9 makes every pair related,
+  so 10k vectors meant 50M result objects and an OOM kill — which also loses
+  whatever the database had not saved yet.
+- **Vector payloads are checked.** `new Float32Array(["1", null])` stored NaN and
+  answered 200, poisoning every later distance for that vector.
+- **Ids are checked.** An object or `null` id became a `Map` key across
+  `memoryStorage`, `metadata` and `vectorDimensions`, and because
+  `typeof id === 'number'` was false the auto-id counter never advanced, so the
+  next generated id silently overwrote it.
+- **`__proto__` is stripped from metadata** before it is persisted and echoed.
+- **A metadata criteria no longer matches inherited keys.** `field in meta` walks
+  the prototype chain, so `{"criteria": "constructor"}` matched every stored
+  record. `Object.hasOwn` now.
+- **`/stats` is rate-limited.** It is mounted at `/`, outside the `/api` limiter,
+  and it is an O(all vectors) call that stringifies every metadata object.
+- **`limit` is honoured by the metadata search.** Only the object-criteria branch
+  applied it; the string/array branch returned every match from every loaded
+  partition.
+- **Middleware order.** The 404 handler now runs before the error handler, so a
+  throw after `createServer` returns reaches the app's handler instead of
+  Express's default one, which answers with a stack trace. A malformed JSON body
+  is reported as 400 instead of 500.
+
+### Added
+
+- `test/api/server_defaults.test.ts` — the assembled app: headers, CORS, auth,
+  error handling, payload validation, limiter scope.
+- `test/api/validation.test.ts` — the validators, including the NaN and
+  out-of-range cases that were denial of service.
+- `src/server/utils/validation.ts` and `src/server/utils/http_error.ts`.
+- `trustProxy` option; without it the rate limiter trusts a client-supplied
+  `X-Forwarded-For` by default, which was the case before it existed.
+
+- `test/database/database.test.ts` — the `Database` facade had no tests at all;
+  nothing in the suite ever constructed one, and the coverage tool reported it
+  as 100%.
+- `test/tests/partitioned_vector_db.eviction.test.ts` — eviction durability,
+  restart, and `partitionIds` coverage.
+
 ## [0.3.0] - 2026-10-02
 
 Breaking renames plus the removal of every explicit `any` from `src/`. The

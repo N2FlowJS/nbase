@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ApiContext } from '../../types';
 import config from '../../config';
+import { publicErrorMessage } from '../utils/http_error';
 
 export function indexRoutes(context: ApiContext) {
   const router = Router();
@@ -22,7 +23,7 @@ export function indexRoutes(context: ApiContext) {
     } catch (error) {
       console.error('Error getting stats:', error);
       res.status(500).json({
-        error: (error as Error).message,
+        error: publicErrorMessage(error),
       });
     }
   });

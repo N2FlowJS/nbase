@@ -277,22 +277,28 @@ export class ClusteredVectorDB extends VectorDB {
       return false;
     }
 
-    const deleted = super.deleteVector(id);
-    if (!deleted) {
-      log('warn', `Attempted to update non-existent vector ID: ${id}`);
+    // `VectorDB.updateVector` replaces the entry in place, so the metadata and
+    // the recorded dimension survive. The previous implementation routed
+    // through `super.deleteVector` + `super.addVector` without re-supplying the
+    // metadata: `deleteVector` removes the metadata entry, so every update
+    // silently erased that vector's metadata (and any metadata filter then
+    // excluded the vector), and an update emitted a `vector:delete`.
+    const updated = super.updateVector(id, vector);
+    if (!updated) {
+      log('warn', `Failed to update vector ID: ${id}`);
       return false;
     }
 
-    const vectorId = super.addVector(id, vector); // Let parent handle storage
-
-    const typedVector = this.memoryStorage.get(vectorId);
+    const typedVector = this.memoryStorage.get(id);
     if (!typedVector) return false; // Should not happen
 
     // Detach the id from its previous cluster *before* re-assigning, otherwise
     // the id ends up a member of two clusters and `_removeVectorFromCluster`
-    // later removes it from whichever happens to be found first.
-    this._removeVectorFromCluster(vectorId, oldVector);
-    this._assignVectorToCluster(vectorId, typedVector);
+    // later removes it from whichever happens to be found first. `oldVector` is
+    // handed over explicitly because the entry in `memoryStorage` is already the
+    // new vector by now.
+    this._removeVectorFromCluster(id, oldVector);
+    this._assignVectorToCluster(id, typedVector);
 
     return true;
   }

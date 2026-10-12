@@ -247,7 +247,9 @@ describe('Search Metadata Endpoint', () => {
     expect(mockDatabase.getMetadataWithField.calledWith('type', undefined)).to.be.true;
     expect(mockTimer.stop.calledWith('metadata_search')).to.be.true;
     expect(res.status.calledWith(500)).to.be.true;
-    expect(res.json.firstCall.args[0]).to.have.property('error', 'Database error');
+    // Withheld outside development: see `publicErrorMessage`.
+    expect(res.json.firstCall.args[0]).to.have.property('error', 'Internal server error');
+    expect(res.json.firstCall.args[0]).to.not.have.property('error', 'Database error');
     expect(res.json.firstCall.args[0]).to.have.property('duration', 42);
   });
 
@@ -365,7 +367,7 @@ describe('Search Metadata Endpoint', () => {
     expect(mockDatabase.getVector.callCount).to.equal(3); // Should stop after the error
     expect(res.status.calledWith(500)).to.be.true;
     expect(res.json.calledOnce).to.be.true;
-    expect(res.json.firstCall.args[0]).to.have.property('error', 'Vector not found');
+    expect(res.json.firstCall.args[0]).to.have.property('error', 'Internal server error');
     expect(res.json.firstCall.args[0]).to.have.property('duration', 42);
   });
 

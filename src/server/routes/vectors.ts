@@ -3,6 +3,8 @@ import type { Request, Response } from 'express';
 import { ensureDatabaseReady } from '../middleware/common';
 import { asyncHandler } from '../utils/async_handler';
 import { UpdateMetadataRequest, ApiContext, SearchResult, VectorData } from '../../types'; // Thêm VectorData
+import { publicErrorMessage } from '../utils/http_error';
+import { InvalidRequestError, MAX_K, MAX_VECTOR_DIMENSIONS, requireInteger, requireVector, requireVectorId, stripDangerousKeys } from '../utils/validation';
 
 /** Body returned by `GET /api/vectors/:id`. */
 interface VectorDetailResponse {
@@ -81,17 +83,36 @@ export function vectorRoutes(context: ApiContext) {
           }
 
           for (const item of rawVectors) {
-            if (!item || !item.vector || !Array.isArray(item.vector)) {
+            if (!item || typeof item !== 'object' || !Array.isArray((item as { vector?: unknown }).vector)) {
               console.warn(`Skipping invalid vector item in bulk add (vector must be an array): ${JSON.stringify(item)}`);
               continue;
             }
 
-            const typedVector = item.vector instanceof Float32Array ? item.vector : new Float32Array(item.vector);
+            // `new Float32Array(item.vector)` used to be the only check, which
+            // turned a component like `"3"` or `null` into NaN and stored it:
+            // the request succeeded and every later distance came back NaN.
+            try {
+              requireVector((item as { vector: unknown }).vector);
+              requireVectorId((item as { id?: unknown }).id);
+            } catch (error) {
+              if (error instanceof InvalidRequestError) {
+                res.status(error.status).json({ success: false, error: error.message });
+                return;
+              }
+              throw error;
+            }
+
+            const typedVector = new Float32Array(requireVector((item as { vector: unknown }).vector));
             const vectorDim = typedVector.length;
+            if (vectorDim > MAX_VECTOR_DIMENSIONS) {
+              res.status(400).json({ success: false, error: `Invalid vector: at most ${MAX_VECTOR_DIMENSIONS} dimensions are supported` });
+              return;
+            }
             dimensionCounts[vectorDim] = (dimensionCounts[vectorDim] || 0) + 1;
 
             // Metadata được truyền trực tiếp vào VectorData
-            const metadata = item.metadata ? { ...item.metadata, dimension: vectorDim, createdAt: Date.now() } : { dimension: vectorDim, createdAt: Date.now() };
+            const rawMetadata = (item as { metadata?: Record<string, unknown> }).metadata;
+            const metadata = rawMetadata ? { ...stripDangerousKeys(rawMetadata), dimension: vectorDim, createdAt: Date.now() } : { dimension: vectorDim, createdAt: Date.now() };
 
             vectorsToAdd.push({
               id: item.id, // ID có thể là undefined, DB sẽ tự tạo
@@ -126,16 +147,36 @@ export function vectorRoutes(context: ApiContext) {
             return;
           }
 
-          const typedVector = vector instanceof Float32Array ? vector : new Float32Array(vector);
-          const vectorDim = typedVector.length;
+          // `id` used to be accepted as any JSON value and stored as a `Map`
+          // key; an object id also kept the auto-id counter from advancing, so
+          // the next generated id silently overwrote it.
+          let typedVector: Float32Array;
+          let vectorDim: number;
+          let vectorId: string | number | undefined;
+          try {
+            requireVector(vector);
+            vectorId = requireVectorId(id);
+            typedVector = new Float32Array(requireVector(vector));
+            vectorDim = typedVector.length;
+            if (vectorDim > MAX_VECTOR_DIMENSIONS) {
+              res.status(400).json({ success: false, error: `Invalid vector: at most ${MAX_VECTOR_DIMENSIONS} dimensions are supported` });
+              return;
+            }
+          } catch (error) {
+            if (error instanceof InvalidRequestError) {
+              res.status(error.status).json({ success: false, error: error.message });
+              return;
+            }
+            throw error;
+          }
           dimensionCounts[vectorDim] = 1;
 
           // Metadata được truyền trực tiếp vào addVector
-          const enhancedMetadata = metadata ? { ...metadata, dimension: vectorDim, createdAt: Date.now() } : { dimension: vectorDim, createdAt: Date.now() };
+          const enhancedMetadata = metadata ? { ...stripDangerousKeys(metadata as Record<string, unknown>), dimension: vectorDim, createdAt: Date.now() } : { dimension: vectorDim, createdAt: Date.now() };
 
           // Gọi phương thức addVector mới của Database (async)
           // addVector bây giờ trả về { partitionId, vectorId }
-          const addResult = await database.addVector(id, typedVector, enhancedMetadata);
+          const addResult = await database.addVector(vectorId, typedVector, enhancedMetadata);
           console.log('[API] Add result:', addResult);
 
           addedIds.push(addResult.vectorId); // Lưu ID thực tế trả về
@@ -165,7 +206,7 @@ export function vectorRoutes(context: ApiContext) {
         res.status(500).json({
           // Sử dụng 500 cho lỗi server/DB
           success: false,
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           duration, // Thêm duration vào response lỗi
         });
         return;
@@ -278,7 +319,7 @@ export function vectorRoutes(context: ApiContext) {
         console.error(`Error getting vector ${idParam}:`, error);
         res.status(500).json({
           success: false,
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           duration,
         });
         return;
@@ -352,7 +393,7 @@ export function vectorRoutes(context: ApiContext) {
         console.error(`Error checking vector existence for ${idParam}:`, error);
         res.status(500).json({
           success: false,
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           duration,
         });
       }
@@ -470,7 +511,7 @@ export function vectorRoutes(context: ApiContext) {
         console.error(`Error updating metadata for ${idParam}:`, error);
         res.status(500).json({
           success: false,
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           duration,
         });
         return;
@@ -539,7 +580,7 @@ export function vectorRoutes(context: ApiContext) {
         console.error(`Error deleting vector ${idParam}:`, error);
         res.status(500).json({
           success: false,
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           duration,
         });
         return;
@@ -564,7 +605,18 @@ export function vectorRoutes(context: ApiContext) {
         });
         return;
       }
-      const k = parseInt((req.query['k'] as string) || '10', 10);
+      // `parseInt('abc')` produced NaN, which reached `Math.max(k, efSearch)`
+      // inside HNSW and turned a "nearest 10" request into a full-index scan.
+      let k = 10;
+      try {
+        k = requireInteger(req.query['k'] ?? undefined, 'k', 1, MAX_K) ?? 10;
+      } catch (error) {
+        if (error instanceof InvalidRequestError) {
+          res.status(error.status).json({ success: false, error: error.message });
+          return;
+        }
+        throw error;
+      }
       const includeMetadata = req.query['includeMetadata'] !== 'false';
       // Search sẽ quyết định includeVectors dựa trên tùy chọn, không cần query param riêng?
       // Hoặc ta có thể thêm nó vào SearchOptions
@@ -653,7 +705,7 @@ export function vectorRoutes(context: ApiContext) {
         console.error(`Error finding similar vectors for ${idParam}:`, error);
         res.status(500).json({
           success: false,
-          error: (error as Error).message,
+          error: publicErrorMessage(error),
           duration,
         });
         return;
