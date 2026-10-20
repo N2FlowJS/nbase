@@ -32,6 +32,8 @@ export const MAX_LIMIT = 10_000;
 /** Ceiling for a distance threshold on the O(n^2) graph endpoints. */
 export const MAX_GRAPH_THRESHOLD = 1_000_000;
 export const MAX_VECTOR_DIMENSIONS = 8192;
+/** Queries accepted by one `Database.batchSearch` call. */
+export const MAX_BATCH_QUERIES = 1000;
 
 /**
  * An integer within `[min, max]`.

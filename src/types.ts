@@ -857,6 +857,20 @@ export interface BatchSearchOptions {
   defaultSearchTimeoutMs?: number | undefined;
 }
 
+/**
+ * Options for `Database.batchSearch`.
+ *
+ * Distinct from `BatchSearchOptions`, which describes `BatchEngineSearch`'s
+ * chunking and worker settings; those do not apply here because every query
+ * goes through the ordinary `findNearest` path.
+ */
+export interface DatabaseBatchSearchOptions {
+  /** Applied to every query, unless the query's own options override it. */
+  search?: SearchOptions;
+  /** How many queries run at once. Defaults to the number of queries. */
+  maxConcurrency?: number;
+}
+
 export interface BatchSearchResult {
   results: SearchResult[][];
   stats?: {
@@ -877,13 +891,6 @@ export interface HybridSearchStats {
 /**
  * Options for BatchSearch using PartitionedVectorDB
  */
-export interface BatchSearchOptions {
-  maxBatchSize?: number;
-  prioritizeOrder?: boolean;
-  groupSimilarQueries?: boolean; // Tùy chọn này có thể vẫn hữu ích ở mức độ nào đó
-  defaultSearchTimeout?: number; // Timeout cho mỗi truy vấn trong batch
-}
-
 // --- Core Types ---
 
 export interface VectorProvider {

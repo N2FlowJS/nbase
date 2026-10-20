@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-20
+
 Five defects found reviewing the 0.3.0 release: two silent data-loss paths, one
 process-killing event, one erased field, and a cache that served the wrong
 payload. Each has a regression test that fails on 0.3.0 and passes here.
@@ -111,6 +113,18 @@ Recall@10 measured with the new oracle: 1.00 at 500 vectors of dimension 16
   showed the opposite.
 
 ### Added
+
+- **`Database.batchSearch(queries, options)` and `POST /api/search/batch`.**
+  Both have been documented in `README.md` and `docs/api-reference.md` since
+  0.1.x with nothing behind them. The method runs the ordinary `findNearest`
+  path per query — so the cache, the concurrency limiter, reranking and
+  metadata all apply — with a bounded worker pool, and reports a failed query
+  in `errors` with its index instead of flattening it into an empty result list.
+  `BatchEngineSearch` was not reused: it bypasses all of the above and turns a
+  failure or timeout into an empty array.
+- `DatabaseBatchSearchOptions`; the duplicate `BatchSearchOptions` declaration
+  in `types.ts` was removed, since interface merging had been making its
+  effective shape the union of two documents.
 
 - `test/test-helpers/search-oracle.ts` — a seeded PRNG, a float64 reference
   distance, a brute-force top-k and a recall metric. Every existing search
@@ -413,5 +427,7 @@ Correctness fixes, a smaller published package, and a much stricter build.
 - Test fixtures are written to `os.tmpdir()` instead of the repository, which
   unblocks `mocha --parallel`.
 
-[Unreleased]: https://github.com/n2flowjs/nbase/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/n2flowjs/nbase/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/n2flowjs/nbase/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/n2flowjs/nbase/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/n2flowjs/nbase/compare/v0.1.10...v0.2.0

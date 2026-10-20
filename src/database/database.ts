@@ -14,6 +14,8 @@ import {
   PartitionedDBStats,
   PartitionedVectorDBInterface,
   PerformanceMetrics,
+  BatchQuery,
+  DatabaseBatchSearchOptions,
   SearchCompleteEvent,
   SearchResult,
   TypedEventEmitter,
@@ -24,6 +26,7 @@ import {
 } from '../types';
 import { createTimer, Timer } from '../utils/profiling';
 import { errorMessage } from '../utils/errors';
+import { InvalidRequestError, MAX_BATCH_QUERIES } from '../server/utils/validation';
 import { log } from '../utils/log';
 import { VectorDBMonitor } from '../utils/vector_monitoring';
 import { PartitionedVectorDB } from '../vector/partitioned_vector_db';
@@ -1004,6 +1007,67 @@ export class Database extends (EventEmitter as new () => TypedEventEmitter<Datab
   /** Alias for findNearest */
   async search(query: Vector, options: SearchOptions = {}): Promise<SearchResult[]> {
     return this.findNearest(query, options.k, options);
+  }
+
+  /**
+   * Runs several searches concurrently and returns one result list per query, in
+   * the order the queries were given.
+   *
+   * The README and `docs/api-reference.md` have documented
+   * `db.batchSearch(queries, options)` since 0.1.x while no such method existed.
+   * This is that method, and it deliberately runs the ordinary `findNearest`
+   * path per query rather than a separate batch engine: that way the search
+   * cache, the concurrency limiter, reranking and metadata resolution all
+   * apply. `BatchEngineSearch` bypasses every one of them, and it converts a
+   * failed or timed-out query into an empty array, so a caller could not tell
+   * "no matches" from "this query never ran".
+   *
+   * @param queries One entry per query: the vector, how many neighbours to
+   *   return, and optional per-query search options.
+   * @returns One entry per query, in order. A query that failed is reported in
+   *   the parallel `errors` array with its index; the returned slot is empty.
+   */
+  async batchSearch(queries: readonly BatchQuery[], options: DatabaseBatchSearchOptions = {}): Promise<{ results: SearchResult[][]; errors: { index: number; message: string }[] }> {
+    await this._assertReady('batchSearch');
+
+    if (!Array.isArray(queries)) {
+      throw new InvalidRequestError('batchSearch: expected an array of queries');
+    }
+    if (queries.length > MAX_BATCH_QUERIES) {
+      throw new InvalidRequestError(`batchSearch: at most ${MAX_BATCH_QUERIES} queries per call, received ${queries.length}`);
+    }
+
+    // No explicit concurrency means "all of them": the underlying limiter is
+    // what actually bounds the work.
+    const requested = options.maxConcurrency ?? queries.length;
+    const concurrency = Math.max(1, Math.min(requested, MAX_BATCH_QUERIES));
+    const results: SearchResult[][] = new Array(queries.length);
+    const errors: { index: number; message: string }[] = [];
+    let next = 0;
+
+    // A fixed pool of workers rather than `Promise.all` over every query: the
+    // underlying limiter would serialise the excess anyway, and this keeps the
+    // queue bounded on a 1000-query batch.
+    const worker = async (): Promise<void> => {
+      for (let index = next++; index < queries.length; index = next++) {
+        const entry = queries[index];
+        if (!entry) continue;
+        try {
+          results[index] = await this.findNearest(entry.query, entry.k, {
+            ...options.search,
+            ...(entry.options ?? {}),
+          });
+        } catch (error) {
+          // Reported instead of silently answered with an empty list.
+          results[index] = [];
+          errors.push({ index, message: errorMessage(error) });
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.max(1, concurrency) }, () => worker()));
+
+    return { results, errors };
   }
 
   /**

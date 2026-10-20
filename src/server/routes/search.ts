@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { ApiContext, DistanceMetric, RerankingMethod, SearchResult, SearchOptions } from '../../types';
+import { ApiContext, BatchQuery, DistanceMetric, RerankingMethod, SearchResult, SearchOptions } from '../../types';
 import { asyncHandler } from '../utils/async_handler';
 import { publicErrorMessage } from '../utils/http_error';
-import { MAX_EF_SEARCH, MAX_GRAPH_THRESHOLD, MAX_K, MAX_LIMIT, InvalidRequestError, requireInteger, requireNumber, requireVector } from '../utils/validation';
+import { MAX_BATCH_QUERIES, MAX_EF_SEARCH, MAX_GRAPH_THRESHOLD, MAX_K, MAX_LIMIT, InvalidRequestError, requireInteger, requireNumber, requireVector } from '../utils/validation';
 
 /**
  * Configures and returns the search-related routes for the API.
@@ -298,6 +298,60 @@ export function searchRoutes(context: ApiContext) {
    * }
    * @returns Array of metadata entries matching the criteria with partition and vector IDs
    */
+  /**
+   * POST `/api/search/batch` — several searches in one call.
+   *
+   * Documented in `README.md` and `docs/api-reference.md` since 0.1.x with no
+   * route behind it. Per-query failures come back in `errors` with their index
+   * rather than being flattened into an empty result list.
+   */
+  router.post(
+    '/batch',
+    asyncHandler(async function (req: Request, res: Response) {
+      const timer = createTimer();
+      timer.start('batch_search');
+
+      const { queries } = req.body ?? {};
+
+      if (!Array.isArray(queries)) {
+        res.status(400).json({ error: 'Invalid request: queries array is required' });
+        return;
+      }
+      if (queries.length > MAX_BATCH_QUERIES) {
+        res.status(413).json({ error: `Too many queries: at most ${MAX_BATCH_QUERIES} per request` });
+        return;
+      }
+
+      // Validate every query before running any of them: a partially applied
+      // batch is worse than a rejected one.
+      for (const [index, entry] of queries.entries()) {
+        try {
+          if (!entry || typeof entry !== 'object') {
+            throw new InvalidRequestError('each query must be an object');
+          }
+          requireVector((entry as { query?: unknown }).query, `queries[${index}].query`);
+          requireInteger((entry as { k?: unknown }).k, `queries[${index}].k`, 1, MAX_K);
+        } catch (error) {
+          if (error instanceof InvalidRequestError) {
+            res.status(error.status).json({ error: error.message });
+            return;
+          }
+          throw error;
+        }
+      }
+
+      const { results, errors } = await database.batchSearch(queries as BatchQuery[]);
+      const duration = timer.stop('batch_search').total;
+
+      res.json({
+        results,
+        count: results.length,
+        duration,
+        errors,
+      });
+    }),
+  );
+
   router.post(
     '/metadata',
     asyncHandler(async function (req: Request, res: Response) {

@@ -185,6 +185,47 @@ describe('createServer defaults', () => {
       expect(res.status).to.equal(400);
     });
 
+    it('runs a batch search and reports per-query failures', async () => {
+      const { app } = await start();
+      await request(app)
+        .post('/api/vectors')
+        .send({ id: 'a', vector: [1, 0, 0, 0] });
+
+      const res = await request(app)
+        .post('/api/search/batch')
+        .send({
+          queries: [
+            { query: [1, 0, 0, 0], k: 1 },
+            { query: [0, 1, 0, 0], k: 1 },
+          ],
+        });
+
+      expect(res.status).to.equal(200);
+      expect(res.body.count).to.equal(2);
+      expect(res.body.results[0][0].id).to.equal('a');
+      expect(res.body.errors).to.deep.equal([]);
+    });
+
+    it('rejects an invalid batch before running any of it', async () => {
+      const { app } = await start();
+
+      expect((await request(app).post('/api/search/batch').send({})).status).to.equal(400);
+      expect(
+        (
+          await request(app)
+            .post('/api/search/batch')
+            .send({ queries: [{ query: 'nope', k: 1 }] })
+        ).status,
+      ).to.equal(400);
+      expect(
+        (
+          await request(app)
+            .post('/api/search/batch')
+            .send({ queries: [{ query: [1, 0, 0, 0], k: 0 }] })
+        ).status,
+      ).to.equal(400);
+    });
+
     it('caps the graph threshold', async () => {
       const { app } = await start();
       const res = await request(app).post('/api/search/relationships').send({ threshold: 1e12 });

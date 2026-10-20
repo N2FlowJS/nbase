@@ -1,10 +1,9 @@
-﻿node_modules
+node_modules
 
 # Local database state
 /database
 test-data
 /test/benchmarks/benchmark_db_data
-/test/database
 
 # Logs & service artifacts
 logs

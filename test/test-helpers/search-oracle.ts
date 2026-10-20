@@ -97,11 +97,17 @@ export function bruteForceNearest(ids: ReadonlyArray<number | string>, vectors: 
   return hits.slice(0, k);
 }
 
-/** Fraction of the true top-k that the implementation returned, order ignored. */
+/**
+ * Fraction of the true top-k that the implementation returned, order ignored.
+ *
+ * Ids are compared as strings: a store may be keyed by numeric ids while the
+ * expected set was built from the same vectors under string ids, and a `Set`
+ * of the raw values never matches across those two.
+ */
 export function recallAt(actual: ReadonlyArray<{ id: number | string }>, expected: ReadonlyArray<BruteForceHit>, k: number): number {
-  const expectedIds = new Set(expected.slice(0, k).map((hit) => hit.id));
+  const expectedIds = new Set(expected.slice(0, k).map((hit) => String(hit.id)));
   if (expectedIds.size === 0) return 1;
-  const returned = new Set(actual.slice(0, k).map((result) => result.id));
+  const returned = new Set(actual.slice(0, k).map((result) => String(result.id)));
   let hits = 0;
   for (const id of expectedIds) {
     if (returned.has(id)) hits++;

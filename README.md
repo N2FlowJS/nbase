@@ -267,8 +267,9 @@ await db.search(query: number[], options?: SearchOptions): Promise<SearchResult[
 // Advanced search with options
 await db.findNearest(query: number[], k?: number, options?: SearchOptions): Promise<SearchResult[]>
 
-// Batch search
-await db.batchSearch(queries: BatchQuery[], options?: BatchSearchOptions): Promise<SearchResult[][]>
+// Batch search. One result list per query, in order. A query that failed is
+// reported in `errors` with its index rather than returned as an empty list.
+await db.batchSearch(queries: BatchQuery[], options?: DatabaseBatchSearchOptions): Promise<{ results: SearchResult[][]; errors: { index: number; message: string }[] }>
 ```
 
 #### Search Options
@@ -313,7 +314,7 @@ The REST API provides HTTP access to all database operations:
 - `POST /vectors` - Add a vector
 - `GET /vectors/:id` - Get a vector
 - `DELETE /vectors/:id` - Delete a vector
-- `PUT /vectors/:id/metadata` - Update metadata
+- `PATCH /vectors/:id/metadata` - Update metadata
 
 #### Search
 - `POST /search` - Similarity search
@@ -325,8 +326,10 @@ The REST API provides HTTP access to all database operations:
 #### Database Management
 - `GET /health` - Health check
 - `GET /stats` - Database statistics
-- `POST /indexes/build` - Build search indexes
-- `POST /save` - Save database state
+
+There is no HTTP route for saving or building indexes: both are
+library-side (`db.save()`, `db.buildIndexes()`) so that a request cannot pin a
+core for the duration of an index build.
 
 #### Example API Usage
 

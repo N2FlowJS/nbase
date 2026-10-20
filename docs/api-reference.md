@@ -174,7 +174,9 @@ const queries = [
   { query: [0.1, 0.2, 0.3], k: 5 },
   { query: [0.4, 0.5, 0.6], k: 3 }
 ];
-const results = await db.batchSearch(queries);
+const { results, errors } = await db.batchSearch(queries);
+// `errors` carries the index of any query that failed. A batch answers with an
+// empty list for a failed query only alongside that entry.
 ```
 
 #### Metadata Operations
@@ -538,7 +540,7 @@ const server = createServer({
 - `POST /vectors` - Add a vector
 - `GET /vectors/:id` - Get a vector
 - `DELETE /vectors/:id` - Delete a vector
-- `PUT /vectors/:id/metadata` - Update metadata
+- `PATCH /vectors/:id/metadata` - Update metadata
 
 #### Search
 - `POST /search` - Similarity search
@@ -550,8 +552,7 @@ const server = createServer({
 #### Database Management
 - `GET /health` - Health check
 - `GET /stats` - Database statistics
-- `POST /indexes/build` - Build search indexes
-- `POST /save` - Save database state
+- Index building and saving are library-side (`db.buildIndexes()`, `db.save()`); neither has an HTTP route.
 
 #### Example API Usage
 
