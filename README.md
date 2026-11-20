@@ -1,559 +1,105 @@
-# 🧠 NBase - Neural Vector Database
+# nbase / libnbase (Pure C11 / C++17 Vector, Graph & Full-Text Engine — v1.0.0)
 
-[Repository](https://github.com/N2FlowJS/nbase) ·
-[npm](https://www.npmjs.com/package/@n2flowjs/nbase) ·
-[Stars](https://github.com/N2FlowJS/nbase/stargazers) ·
-[Forks](https://github.com/N2FlowJS/nbase/network/members) ·
-[Issues](https://github.com/N2FlowJS/nbase/issues) ·
-[MIT License](https://github.com/N2FlowJS/nbase/blob/main/LICENSE)
+`nbase` is a standalone, zero-dependency, pure-C11 (with header-only C++17 RAII wrapper [`include/nbase.hpp`](include/nbase.hpp)) embedded vector/graph/full-text database engine (`libnbase.a` / `libnbase.so`), persistent HTTP/1.1 Keep-Alive REST daemon (`nbased`), and streaming NDJSON CLI (`nbase-cli`) with AVX2/NEON SIMD distance & quantization kernels, flat `mmap` storage, CRC32 Write-Ahead Log recovery, thread-safe LRU query result cache, typed binary metadata filtering & batch/filter deletion, DB-integrated & partitioned BM25 full-text + Hybrid RRF search, Dynamic Online Clustered Vector DB (`.nbcl`), IVF-PQ, PQ, SIMD SQ8, 1-bit Binary Quantization (`BQ`), multi-probe LSH, lock-striped parallel HNSW build & search, MMR & metadata-weighted reranking, Union-Find graph analytics, multi-partition durable LRU storage with full batch/graph parity & `memory_bytes` telemetry, Prometheus P50/P95/P99 `/metrics`, CORS & rate limiting, strict RFC 8259 JSON, installable `pkg-config` packaging, and native Docker deployment.
 
-```bash
-╔═══════════════════════════════════════╗
-║  _   _       ____                     ║
-║ | \ | |     | __ )  __ _ ___  ___     ║
-║ |  \| |_____| |_ \ / _` / __|/ _ \    ║
-║ | |\  |_____| |_) | (_| \__ \  __/    ║
-║ |_| \_|     |____/ \__,_|___/\___|    ║
-║                                       ║
-╚═══════════════════════════════════════╝
-```
+## Architecture & Core Features (`v1.0.0`)
 
-> 🚀 **NBase** is a high-performance, scalable vector database designed for efficient similarity search and neural search applications. Built with TypeScript, it provides enterprise-grade storage for high-dimensional vectors with advanced indexing algorithms and distributed architecture.
+- **C11 Public API** ([`include/nbase.h`](include/nbase.h)):
+  - Single-DB handle (`nbase_db_t`): `create`, `open`, `open_mmap`, `open_wal`, `wal_enable`, `wal_checkpoint`, `save`, `close`, `add`, `add_batch`, `upsert`, `delete`, `delete_batch`, `delete_by_filter`, `get`, `contains`, `search`, `find_similar`, `search_batch`, `search_text`, `search_hybrid`, `rebuild_hnsw`, `rebuild_hnsw_mt`, `compact`, `cache_configure`, `cache_clear`, `stats` (with `text_docs`, `memory_bytes`, `cache_capacity`, `cache_entries`, `cache_hits`, `cache_misses`).
+  - Thread-safe read/write concurrency (`pthread_rwlock_t`) + mutex-protected LRU query result cache (`cfg.cache_capacity`, `opts.skip_cache`, automatic invalidation on mutations) + parallel `pthreads` work-stealing `nbase_search_batch` (`opts.num_threads`) + lock-striped parallel HNSW construction (`nbase_add_batch`, `nbase_rebuild_hnsw_mt`).
+- **Write-Ahead Log & Crash Recovery** (`src/wal.c`): CRC32-framed binary log `wal.nbw` (`NBASEWL1`), auto-replay on `nbase_open`/`nbase_open_wal`, torn-write tail detection and truncation, and atomic `nbase_wal_checkpoint`.
+- **SIMD Distance Kernels** (`src/distance.c`): All 7 metrics (`euclidean`, `squared_euclidean`, `cosine`, `inner_product`, `manhattan`, `chebyshev`, `hamming`) resolved via direct function pointer (`nbase_get_distance_fn`) with runtime-dispatched **AVX2+FMA** on x86_64, **NEON** on ARM64, and a portable scalar fallback.
+- **Flat Vector Store, Compaction & `mmap`** (`src/store.c`): Contiguous `float32` storage, open-addressing `uint64_t -> slot` hash table supporting full `uint64_t` range (including `0` and `UINT64_MAX`), tombstone deletion, `NaN`/`Inf` validation, physical compaction (`nbase_compact`), and zero-copy read-only `nbase_open_mmap`.
+- **HNSW Index** (`src/hnsw.c`): Slot-indexed HNSW with Algorithm 4 heuristic pruning, 256-stripe fine-grained node locks for parallel batch construction, thread-safe per-query generation-stamped traversal state, `ef_search` override, per-search metric override, callback + metadata filter predicates, persistent tombstones, deterministic seeded PRNG, and rebuild.
+- **Typed Binary Metadata & Filtering** (`src/meta.c`): Per-vector typed attributes (`int64`, `double`, `bool`, `string`) with `set_meta`, `update_meta`, `get_meta`, `delete_meta`, preserved across `upsert`, strict type-bracketed operators (`EQ`, `NE`, `GT`, `GTE`, `LT`, `LTE`, `EXISTS`, `CONTAINS`), and atomic `meta.nbm` persistence.
+- **IVF-PQ Compressed Approximate Index, K-Means++ & PQ** (`src/kmeans.c`, `src/pq.c`, `src/ivfpq.c`): Coarse K-Means++ inverted lists + residual subspace PQ encoding (`nbase_ivfpq_train`, `nbase_ivfpq_add`), multi-probe Asymmetric Distance Computation (`nbase_ivfpq_search`), and atomic `.nbiv` (`NBASEIV1`) persistence, alongside standalone K-Means++ and PQ (`nbq` / `NBASEPQ1`).
+- **MMR Diversity & Weighted Reranking & Graph Analytics** (`src/rerank.c`): `nbase_rerank_mmr` (Maximal Marginal Relevance balancing relevance and candidate diversity), `nbase_rerank_weighted` (metadata-weighted candidate score adjustment), `nbase_extract_relationships` (k-NN graph edge extraction), and iterative Union-Find `nbase_extract_communities`.
+- **Multi-Partition DB with Durable LRU Cache & Full Parity** (`src/partitioned.c`): `nbase_pdb_t` with automatic partition rollover (`partition_capacity`), durable LRU eviction (`max_active_partitions`), `add_batch`, `delete_batch`, `delete_by_filter`, `search_batch`, `extract_relationships`, cross-partition metadata (`query_meta`, `delete_meta`, `foreach_meta`), text & hybrid search (`set_text`, `get_text`, `delete_text`, `search_text`, `search_hybrid`), `find_similar`, `compact`, `rebuild_hnsw_mt`, cache `cache_hits`/`cache_misses` & `memory_bytes` telemetry, and atomic `manifest.nbp` persistence.
+- **Dynamic Online Clustered Vector Index (`.nbcl`)** (`src/clustered.c`): online distance-threshold & `target_cluster_size` cluster assignment with incremental centroid updates, K-Means++ `nbase_clustered_recluster`, `nprobe` search, and atomic CRC32-framed `.nbcl` (`NBASECL1`) persistence.
+- **Scalar Quantization (`SQ8`), 1-bit Binary Quantization (`BQ`) & Locality-Sensitive Hashing (`LSH`)** (`src/sq8.c`, `src/bq.c`, `src/lsh.c`):
+  - Per-dimension uint8 quantization with runtime-dispatched AVX2+FMA asymmetric/symmetric L2 estimators and `.nbsq` (`NBASESQ1`) persistence.
+  - 1-bit mean-threshold packing (`nbase_bq_train`, `encode`, `nbase_bq_hamming` popcount) with 32x compression and `.nbbq` (`NBASEBQ1`) persistence.
+  - Multi-table multi-probe SimHash (`cosine`) and p-stable (`euclidean`) LSH (`nbase_lsh_create`, `add`, `delete`, `search`) with `.nblh` (`NBASELH1`) persistence.
+- **DB-Integrated BM25 Full-Text & Hybrid RRF Search** (`src/bm25.c`, `src/nbase.c`):
+  - Okapi BM25 inverted index (`nbase_bm25_create`, `index`, `get`, `delete`, `search`, `search_filtered`, `.nbbm` persistence) + Reciprocal Rank Fusion (`nbase_hybrid_rrf`).
+  - Integrated DB text & hybrid search (`nbase_set_text`, `nbase_get_text`, `nbase_delete_text`, `nbase_search_text`, `nbase_search_hybrid`) with WAL durability (`SET_TEXT` / `DELETE_TEXT`) and automatic `bm25.nbbm` save/load.
+  - Vector metadata enumeration/queries (`nbase_foreach_meta`, `nbase_query_meta`) and find-similar (`nbase_find_similar`).
+- **Embeddable HTTP/1.1 Keep-Alive Server (`src/http_server.c`), Prometheus `/metrics`, Strict JSON (`src/json.c`), `nbased` & `nbase-cli`** (`apps/nbased.c`, `apps/nbase_cli.c`, `Dockerfile`):
+  - Pure POSIX threaded HTTP/1.1 REST API (`poll` accept loop + worker pool, persistent HTTP/1.1 Keep-Alive connection reuse, clean non-blocking shutdown, optional Bearer API key, CORS preflight, per-second `/api/*` rate limit `429`, Prometheus `GET /metrics` with rolling P50/P95/P99 latency, `nbase_memory_bytes`, `nbase_cache_{entries,hits_total,misses_total}`, `POST/PUT/GET/DELETE /api/vectors`, `POST /api/vectors/delete` & `DELETE /api/vectors`, `PUT/DELETE /api/vectors/:id/text`, `GET /api/vectors/:id/similar`, `PATCH /api/vectors/:id/metadata`, `POST /api/search` supporting `rerankingMethod`/`rerankWeights`/`skipCache`, `/api/search/batch`, `/api/search/metadata`, `/api/search/text`, `/api/search/hybrid`, `/api/search/relationships`, `/api/search/communities`, `/api/admin/{save,checkpoint,compact,rebuild,cache}`, `/health`, `/stats`).
+  - Standalone WAL-backed daemon `nbased`, streaming NDJSON `import`/`export`, `delete-batch` & offline CLI `nbase-cli`, complete C++17 RAII wrapper [`include/nbase.hpp`](include/nbase.hpp) (including `Database` meta/cache/rerank/graph helpers, `PartitionedDatabase`, `ClusteredDatabase`, `IvfPq`, `HttpServer`), and multi-stage native Docker image ([`Dockerfile`](Dockerfile)).
+- **Crash-Safe Binary Formats (Headers + IEEE 802.3 CRC32)**:
+  - `vectors.nbv` (`NBASEVC1`), `hnsw.nbi` (`NBASEHN1`), `meta.nbm` (`NBASEMT1`), `wal.nbw` (`NBASEWL1`), PQ (`NBASEPQ1`), IVF-PQ (`.nbiv` / `NBASEIV1`), SQ8 (`.nbsq` / `NBASESQ1`), BQ (`.nbbq` / `NBASEBQ1`), BM25 (`.nbbm` / `NBASEBM1`), LSH (`.nblh` / `NBASELH1`), Clustered (`.nbcl` / `NBASECL1`), and partition manifests (`manifest.nbp` / `NBASEPM1`).
 
-## ✨ Key Features
-
-### 🌟 Core Capabilities
-- **📦 Enterprise-Grade Storage**: Store and manage millions of high-dimensional vectors with production-ready reliability
-- **🔄 Auto-Scaling**: Dynamic partitioning system that automatically creates new partitions as data grows
-- **💾 Persistent Storage**: Automatic saving and loading of database state, partitions, and indexes
-- **🔧 Flexible Configuration**: Comprehensive configuration system for clustering, indexing, partitioning, and performance tuning
-
-### 🔍 Advanced Search Technologies
-- **🎯 State-of-the-Art Algorithms**:
-  - **🕸️ HNSW (Hierarchical Navigable Small World)**: Graph-based indexing providing logarithmic search complexity with optimized memory usage
-  - **🎲 LSH (Locality-Sensitive Hashing)**: Ultra-fast approximate similarity search with configurable hash functions
-  - **📊 KNN (K-Nearest Neighbors)**: Exact nearest neighbor search with multi-threading and caching support
-  - **🔄 Hybrid Search**: Intelligent combination of multiple search methods for optimal performance
-  - **📦 Batch Search**: Efficient processing of multiple search queries with parallel execution
-
-### 💪 Technical Excellence
-- **📐 Multi-Dimensional Support**: Handles vectors of any dimension with dynamic dimension management
-- **🗜️ Intelligent Compression**: Advanced vector compression using Product Quantization and K-means clustering
-- **📊 Smart Clustering**: K-means clustering for organizing vectors and reducing search space
-- **🔄 Real-time Indexing**: Background index building and maintenance with progress tracking
-- **📈 Performance Monitoring**: Comprehensive metrics collection and system monitoring
-- **🔒 Production Ready**: Built-in security, rate limiting, and error handling
-
-## Installation
+## Building, Installing & Testing
 
 ```bash
-npm install @n2flowjs/nbase
+# Release build & install (builds libnbase.a, libnbase.so.1.0.0, nbased, nbase-cli, test_nbase, bench_nbase, libnbase.pc, nbase.hpp)
+cmake -S . -B /tmp/nbase-release -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/nbase-release -j
+ctest --test-dir /tmp/nbase-release --output-on-failure
+/tmp/nbase-release/bench_nbase
+cmake --install /tmp/nbase-release --prefix /tmp/nbase-stage
+
+# Debug build with AddressSanitizer + UndefinedBehaviorSanitizer
+cmake -S . -B /tmp/nbase-asan -DCMAKE_BUILD_TYPE=Debug -DNBASE_ENABLE_SANITIZERS=ON
+cmake --build /tmp/nbase-asan -j
+ctest --test-dir /tmp/nbase-asan --output-on-failure
+
+# Debug build with ThreadSanitizer (mutually exclusive with ASan)
+cmake -S . -B /tmp/nbase-tsan -DCMAKE_BUILD_TYPE=Debug -DNBASE_ENABLE_TSAN=ON
+cmake --build /tmp/nbase-tsan -j
+ctest --test-dir /tmp/nbase-tsan --output-on-failure
 ```
 
-## Quick Start
+## Running the REST Server (`nbased`) & Docker
 
-### Basic Usage
+```bash
+# Start natively with WAL persistence and LRU query cache
+./nbased --host 0.0.0.0 --port 1307 --data-dir ./database --dim 128 --workers 4 --cache-size 256
 
-```javascript
-const { Database } = require('@n2flowjs/nbase');
+# Or via Docker Compose (exposes port 1307 with persistent volume /data)
+docker compose up -d --build
+```
 
-// Initialize database with configuration
-const db = new Database({
-  vectorSize: 1536,  // Dimension size (e.g., OpenAI's text-embedding-ada-002)
-  partitioning: {
-    partitionsDir: './data/partitions',
-    partitionCapacity: 10000,  // Vectors per partition
-    autoCreatePartitions: true
-  },
-  indexing: {
-    buildOnStart: true,
-    hnswOptions: {
-      M: 16,  // HNSW parameter: connections per node
-      efConstruction: 200  // HNSW parameter: construction candidate list size
+## Example Usage (Metadata Filter & Parallel Batch Search)
+
+```c
+#include "nbase.h"
+#include <stdio.h>
+
+int main(void) {
+  nbase_config_t cfg = nbase_config_default(4);
+  nbase_db_t *db = NULL;
+  if (nbase_create(&cfg, &db) != NBASE_OK) return 1;
+
+  float v1[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  float v2[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+  nbase_add(db, 1, v1, 4);
+  nbase_add(db, 2, v2, 4);
+
+  nbase_meta_field_t meta1[2] = {
+      {"category", {.type = NBASE_META_STRING, .as = {.str = "ml"}}},
+      {"score", {.type = NBASE_META_INT64, .as = {.i64 = 95}}},
+  };
+  nbase_set_meta(db, 1, meta1, 2);
+
+  nbase_meta_cond_t cond = {"score", NBASE_OP_GTE, {.type = NBASE_META_INT64, .as = {.i64 = 90}}};
+  nbase_meta_filter_t filter = {&cond, 1};
+  nbase_search_opts_t opts = nbase_search_opts_default();
+  opts.meta_filter = &filter;
+  opts.num_threads = 4;
+
+  nbase_result_t hits[2];
+  uint32_t count = 0;
+  float query[4] = {0.9f, 0.1f, 0.0f, 0.0f};
+  if (nbase_search(db, query, 4, 2, &opts, hits, &count) == NBASE_OK) {
+    for (uint32_t i = 0; i < count; i++) {
+      printf("id=%llu dist=%.4f\n", (unsigned long long)hits[i].id, hits[i].distance);
     }
-  },
-  clustering: {
-    clusterSize: 1000,  // Target cluster size
-    distanceMetric: 'cosine'
-  },
-  cacheSize: 1000,  // Search result cache size
-  monitoring: {
-    enable: true,
-    enableSystemMetrics: true,
-    enableSearchMetrics: true
   }
-});
 
-// Wait for database to be ready
-await db.ready();
-
-// Add vectors with metadata
-await db.addVector('doc1', [0.1, 0.2, ...], {
-  title: 'Document 1',
-  category: 'science',
-  timestamp: Date.now()
-});
-
-await db.addVector('doc2', [0.3, 0.4, ...], {
-  title: 'Document 2',
-  category: 'technology',
-  timestamp: Date.now()
-});
-
-// Search for similar vectors
-const results = await db.search([0.15, 0.25, ...], {
-  k: 5,  // Number of results
-  includeMetadata: true,
-  distanceMetric: 'cosine',
-  useHNSW: true,  // Use HNSW index for faster search
-  rerank: true,   // Apply reranking for diversity
-  filter: (id, metadata) => metadata.category === 'science'  // Filter results
-});
-
-console.log('Search results:', results);
-// Output:
-// [
-//   {
-//     id: 'doc1',
-//     dist: 0.12,
-//     metadata: { title: 'Document 1', category: 'science', timestamp: 1234567890 }
-//   },
-//   ...
-// ]
-```
-
-### REST API Server
-
-```javascript
-const { createServer } = require('@n2flowjs/nbase');
-
-const server = createServer({
-  port: 1307,
-  host: 'localhost',
-  rateLimit: {
-    enable: true,
-    maxRequestsPerMinute: 1000
-  },
-  database: {
-    vectorSize: 1536,
-    partitioning: { partitionsDir: './data/partitions' },
-    indexing: { buildOnStart: true }
-  }
-});
-
-// Server starts automatically and provides REST endpoints
-console.log('NBase server running on http://localhost:1307');
-```
-
-## Architecture Overview
-
-NBase follows a layered architecture designed for scalability and performance:
-
-### Core Components
-
-1. **Database**: High-level interface providing a single API for all operations
-2. **PartitionedVectorDB**: Manages multiple partitions for horizontal scaling
-3. **ClusteredVectorDB**: Handles vector clustering within each partition
-4. **VectorDB**: Core vector storage and basic operations
-5. **Search**: Orchestrates search across different algorithms and partitions
-
-### Data Flow
-
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   REST API      │────│   Database       │────│ PartitionedDB   │
-│   (Express)     │    │   (High-level)   │    │ (Scaling)       │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         │                       │                       │
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│     Search      │────│  ClusteredDB     │────│   VectorDB      │
-│   (Algorithms)  │    │   (Clustering)   │    │   (Storage)     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-```
-
-## Configuration Options
-
-### Database Configuration
-
-```typescript
-interface DatabaseOptions {
-  // Vector dimensions
-  vectorSize?: number;
-
-  // Partitioning settings
-  partitioning: {
-    partitionsDir: string;           // Directory for partition storage
-    partitionCapacity: number;       // Max vectors per partition
-    autoCreatePartitions: boolean;   // Auto-create new partitions
-    maxActivePartitions: number;     // Max partitions in memory
-    autoLoadPartitions: boolean;     // Load partitions on startup
-  };
-
-  // Indexing configuration
-  indexing: {
-    buildOnStart: boolean;           // Build indexes on startup
-    autoSave: boolean;               // Auto-save indexes
-    hnswOptions?: {
-      M: number;                     // HNSW connections per node
-      efConstruction: number;        // Construction candidate list size
-      efSearch: number;              // Search candidate list size
-    };
-    lshOptions?: {
-      numberOfHashes: number;        // LSH hash functions
-      numberOfBuckets: number;       // LSH hash buckets
-    };
-  };
-
-  // Clustering settings
-  clustering: {
-    clusterSize: number;             // Target cluster size
-    distanceMetric: 'euclidean' | 'cosine';
-    useCompression: boolean;         // Enable vector compression
-    kmeansMaxIterations: number;     // K-means iterations
-  };
-
-  // Performance settings
-  cacheSize: number;                 // Search cache size
-  maxConcurrentSearches: number;     // Concurrent search limit
-
-  // Persistence
-  persistence: {
-    dbPath: string;                  // Database storage path
-    autoSave: boolean;               // Auto-save database
-    saveIntervalMs: number;          // Save interval
-  };
-
-  // Monitoring
-  monitoring: {
-    enable: boolean;                 // Enable monitoring
-    intervalMs: number;              // Metrics collection interval
-    enableSystemMetrics: boolean;    // System metrics
-    enableSearchMetrics: boolean;    // Search metrics
-    enableDatabaseMetrics: boolean;  // Database metrics
-  };
+  nbase_save(db, "/tmp/my_nbase_db");
+  nbase_close(db);
+  return 0;
 }
 ```
-
-## API Reference
-
-### Database Methods
-
-#### Vector Operations
-
-```typescript
-// Add single vector
-await db.addVector(id: string | number, vector: number[], metadata?: object): Promise<void>
-
-// Add multiple vectors
-await db.bulkAdd(vectors: VectorData[]): Promise<{ count: number }>
-
-// Delete vector
-await db.deleteVector(id: string | number): Promise<boolean>
-
-// Get vector
-await db.getVector(id: string | number): Promise<{ vector: number[], metadata?: object } | null>
-
-// Update metadata
-await db.updateMetadata(id: string | number, metadata: object): Promise<void>
-```
-
-#### Search Operations
-
-```typescript
-// Basic similarity search
-await db.search(query: number[], options?: SearchOptions): Promise<SearchResult[]>
-
-// Advanced search with options
-await db.findNearest(query: number[], k?: number, options?: SearchOptions): Promise<SearchResult[]>
-
-// Batch search. One result list per query, in order. A query that failed is
-// reported in `errors` with its index rather than returned as an empty list.
-await db.batchSearch(queries: BatchQuery[], options?: DatabaseBatchSearchOptions): Promise<{ results: SearchResult[][]; errors: { index: number; message: string }[] }>
-```
-
-#### Search Options
-
-```typescript
-interface SearchOptions {
-  k?: number;                    // Number of results (default: 10)
-  includeMetadata?: boolean;     // Include metadata in results
-  includeVectors?: boolean;      // Include vectors in results
-  distanceMetric?: 'euclidean' | 'cosine';  // Distance metric
-  filter?: (id: string | number, metadata?: object) => boolean;  // Result filter
-  useHNSW?: boolean;             // Use HNSW index
-  efSearch?: number;             // HNSW search parameter
-  rerank?: boolean;              // Apply reranking
-  rerankingMethod?: 'diversity' | 'standard';  // Reranking method
-  partitionIds?: string[];       // Limit to specific partitions
-  skipCache?: boolean;           // Skip result cache
-}
-```
-
-#### Management Operations
-
-```typescript
-// Build search indexes
-await db.buildIndexes(): Promise<void>
-
-// Get database statistics
-await db.getStats(): Promise<DatabaseStats>
-
-// Save database state
-await db.save(): Promise<void>
-
-// Close database
-await db.close(): Promise<void>
-```
-
-### REST API Endpoints
-
-The REST API provides HTTP access to all database operations:
-
-#### Vectors
-- `POST /vectors` - Add a vector
-- `GET /vectors/:id` - Get a vector
-- `DELETE /vectors/:id` - Delete a vector
-- `PATCH /vectors/:id/metadata` - Update metadata
-
-#### Search
-- `POST /search` - Similarity search
-- `POST /search/batch` - Batch search
-- `POST /search/metadata` - Search with metadata filtering
-- `POST /search/relationships` - Find vector relationships
-- `POST /search/communities` - Find vector communities
-
-#### Database Management
-- `GET /health` - Health check
-- `GET /stats` - Database statistics
-
-There is no HTTP route for saving or building indexes: both are
-library-side (`db.save()`, `db.buildIndexes()`) so that a request cannot pin a
-core for the duration of an index build.
-
-#### Example API Usage
-
-```bash
-# Add a vector
-curl -X POST http://localhost:1307/vectors \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "doc1",
-    "vector": [0.1, 0.2, 0.3, ...],
-    "metadata": { "title": "Example Document" }
-  }'
-
-# Search for similar vectors
-curl -X POST http://localhost:1307/search \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": [0.15, 0.25, 0.35, ...],
-    "k": 5,
-    "includeMetadata": true,
-    "distanceMetric": "cosine"
-  }'
-```
-
-## Advanced Features
-
-### Partitioning Strategy
-
-NBase uses intelligent partitioning to handle large datasets:
-
-- **Automatic Partition Creation**: New partitions are created when active partition reaches capacity
-- **LRU Cache**: Recently used partitions stay in memory, older ones are unloaded
-- **Parallel Processing**: Search queries can be executed across multiple partitions simultaneously
-- **Load Balancing**: Vectors are distributed evenly across partitions
-
-### Indexing System
-
-Multiple indexing algorithms for different use cases:
-
-- **HNSW**: Best for accuracy and moderate-speed searches
-- **LSH**: Best for ultra-fast approximate searches
-- **Flat**: Exact search for small datasets or high-accuracy requirements
-
-### Clustering and Compression
-
-- **K-means Clustering**: Groups similar vectors to reduce search space
-- **Product Quantization**: Compresses vectors to save memory and improve search speed
-- **Dynamic Compression**: Automatically adjusts compression based on data characteristics
-
-### Monitoring and Profiling
-
-Comprehensive monitoring system:
-
-```typescript
-// Enable monitoring
-const db = new Database({
-  monitoring: {
-    enable: true,
-    intervalMs: 5000,  // Collect metrics every 5 seconds
-    enableSystemMetrics: true,
-    enableSearchMetrics: true,
-    enableDatabaseMetrics: true
-  }
-});
-
-// Get metrics
-const metrics = await db.getStats();
-console.log('Database metrics:', metrics);
-```
-
-## Performance Optimization
-
-### Index Selection Guide
-
-| Use Case | Recommended Index | Configuration |
-|----------|------------------|---------------|
-| High Accuracy | HNSW | `M: 16-32, efConstruction: 200-500` |
-| Fast Search | LSH | `numberOfHashes: 10-20` |
-| Exact Search | Flat | No additional config needed |
-| Balanced | Hybrid | Combine HNSW + LSH |
-
-### Memory Management
-
-- **Partition LRU Cache**: Controls memory usage by limiting active partitions
-- **Search Result Cache**: Caches frequent search results
-- **Vector Compression**: Reduces memory footprint
-- **Background Cleanup**: Automatic cleanup of unused resources
-
-### Search Performance Tuning
-
-```typescript
-// Optimize for speed
-const results = await db.search(query, {
-  k: 10,
-  useHNSW: true,
-  efSearch: 100,  // Lower for faster search, higher for better accuracy
-  skipCache: false  // Use cache for repeated queries
-});
-
-// Optimize for accuracy
-const results = await db.search(query, {
-  k: 10,
-  useHNSW: true,
-  efSearch: 400,  // Higher efSearch for better recall
-  rerank: true,   // Apply reranking for diversity
-  distanceMetric: 'cosine'
-});
-```
-
-## Benchmarks
-
-Recent benchmark results show excellent performance:
-
-| Operation | Dataset Size | Time | Notes |
-|-----------|-------------|------|-------|
-| Single Search (HNSW) | 100K vectors | ~5ms | 1536 dimensions |
-| Bulk Add | 10K vectors | ~200ms | With indexing |
-| Batch Search | 100 queries | ~150ms | Parallel execution |
-| Index Build | 50K vectors | ~3s | HNSW construction |
-
-*Benchmarks performed on Intel i7-9700K, 32GB RAM, SSD storage*
-
-## Development
-
-### Building from Source
-
-```bash
-# Clone repository
-git clone https://github.com/N2FlowJS/nbase.git
-cd nbase
-
-# Install dependencies
-npm install
-
-# Build project
-npm run build
-
-# Run tests
-npm test
-
-# Start development server
-npm run dev
-```
-
-### Project Structure
-
-```
-nbase/
-├── src/
-│   ├── database/          # High-level Database class
-│   ├── vector/            # Vector database implementations
-│   │   ├── vector_db.ts          # Basic vector DB
-│   │   ├── clustered_vector_db.ts # With clustering
-│   │   └── partitioned_vector_db.ts # With partitioning
-│   ├── ann/               # Approximate nearest neighbor algorithms
-│   │   ├── hnsw.ts        # HNSW implementation
-│   │   └── lsh.ts         # LSH implementation
-│   ├── search/            # Search engines
-│   │   ├── search.ts              # Search interface
-│   │   ├── knn_search.ts         # KNN search
-│   │   └── hybrid_search.ts      # Hybrid search
-│   ├── compression/       # Vector compression
-│   │   ├── product_quantization.ts
-│   │   └── kmeans.ts
-│   ├── server/            # REST API server
-│   ├── utils/             # Utilities
-│   └── types.ts           # TypeScript definitions
-├── test/                  # Test suites
-├── docs/                  # Documentation
-└── package.json
-```
-
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
-
-### Development Setup
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass
-6. Submit a pull request
-
-### Code Style
-
-- Use TypeScript for all new code
-- Follow existing code style and patterns
-- Add JSDoc comments for public APIs
-- Include unit tests for new features
-- Update documentation for API changes
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Support
-
-- 📖 [Documentation](https://github.com/N2FlowJS/nbase/tree/main/docs)
-- 🐛 [Issues](https://github.com/N2FlowJS/nbase/issues)
-- 💬 [Discussions](https://github.com/N2FlowJS/nbase/discussions)
-- 📧 [Email](mailto:support@n2flowjs.com)
-
-## Roadmap
-
-### Upcoming Features
-
-- [ ] **Distributed Deployment**: Multi-node clustering support
-- [ ] **Advanced Compression**: More compression algorithms
-- [ ] **Query Optimization**: Automatic query planning
-- [ ] **Backup & Recovery**: Enhanced backup strategies
-- [ ] **GraphQL API**: Alternative API interface
-- [ ] **Plugin System**: Extensible architecture
-
-### Version History
-
-- **v0.1.9** (Current): Performance improvements, monitoring enhancements
-- **v0.1.8**: REST API stabilization, clustering improvements
-- **v0.1.7**: Hybrid search implementation, batch operations
-- **v0.1.6**: HNSW optimization, compression features
-- **v0.1.5**: Partitioning system, persistence layer
-- **v0.1.0**: Initial release with core functionality
-
----
-
-**Made with ❤️ by the N2FlowJS Team**

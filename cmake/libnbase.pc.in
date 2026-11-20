@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=@NBASE_PC_LIBDIR@
+includedir=@NBASE_PC_INCLUDEDIR@
+
+Name: libnbase
+Description: Pure-C11 embedded vector and graph database engine
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lnbase -lm -lpthread
+Libs.private: -lm -lpthread
+Cflags: -I${includedir}

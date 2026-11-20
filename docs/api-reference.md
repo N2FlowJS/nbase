@@ -1,622 +1,83 @@
-# NBase API Reference
-
-## Overview
-
-NBase provides a comprehensive API for vector database operations, including vector storage, similarity search, indexing, and clustering. The API is organized around the main `Database` class which provides a high-level interface to all functionality.
-
-## Database Class
-
-The `Database` class is the primary interface for interacting with NBase. It provides methods for vector operations, search, indexing, and database management.
-
-### Constructor
-
-```typescript
-const db = new Database(options: DatabaseOptions)
-```
-
-Creates a new Database instance with the specified configuration options.
-
-#### DatabaseOptions
-
-```typescript
-interface DatabaseOptions {
-  // Vector configuration
-  vectorSize?: number;                    // Default vector dimension
-  cacheSize?: number;                     // Search result cache size
-  maxConcurrentSearches?: number;         // Max concurrent search operations
-
-  // Core subsystems
-  indexing: IndexingConfiguration;        // Index configuration
-  partitioning: PartitioningConfiguration; // Partition configuration
-  clustering: ClusteringConfiguration;    // Clustering configuration
-  persistence: PersistenceOptions;        // Persistence configuration
-
-  // Optional features
-  monitoring?: MonitoringConfiguration;   // Performance monitoring
-  backup?: DatabaseBackUp;               // Backup configuration
-}
-```
-
-### Core Methods
-
-#### Vector Operations
-
-##### addVector
-```typescript
-async addVector(
-  id: string | number,
-  vector: number[] | Float32Array,
-  metadata?: Record<string, any>
-): Promise<void>
-```
-
-Adds a single vector to the database.
-
-**Parameters:**
-- `id`: Unique identifier for the vector
-- `vector`: Vector data as array or Float32Array
-- `metadata`: Optional metadata object
-
-**Example:**
-```typescript
-await db.addVector('doc1', [0.1, 0.2, 0.3], { title: 'Document 1' });
-```
-
-##### bulkAdd
-```typescript
-async bulkAdd(
-  vectors: VectorData[]
-): Promise<{ count: number; partitionIds: string[] }>
-```
-
-Adds multiple vectors to the database in a single operation.
-
-**Parameters:**
-- `vectors`: Array of vector data objects
-
-**Returns:**
-- `count`: Number of vectors added
-- `partitionIds`: IDs of partitions where vectors were added
-
-**Example:**
-```typescript
-const vectors = [
-  { id: 'doc1', vector: [0.1, 0.2, 0.3], metadata: { category: 'A' } },
-  { id: 'doc2', vector: [0.4, 0.5, 0.6], metadata: { category: 'B' } }
-];
-const result = await db.bulkAdd(vectors);
-console.log(`Added ${result.count} vectors`);
-```
-
-##### deleteVector
-```typescript
-async deleteVector(id: string | number): Promise<boolean>
-```
-
-Deletes a vector from the database.
-
-**Parameters:**
-- `id`: ID of the vector to delete
-
-**Returns:** `true` if vector was deleted, `false` if not found
-
-##### getVector
-```typescript
-async getVector(id: string | number): Promise<{ vector: Float32Array; metadata?: Record<string, any> } | null>
-```
-
-Retrieves a vector and its metadata from the database.
-
-**Parameters:**
-- `id`: ID of the vector to retrieve
-
-**Returns:** Vector data with metadata, or `null` if not found
-
-##### updateMetadata
-```typescript
-async updateMetadata(
-  id: string | number,
-  metadata: Record<string, any>
-): Promise<void>
-```
-
-Updates metadata for an existing vector.
-
-**Parameters:**
-- `id`: ID of the vector
-- `metadata`: New metadata object (replaces existing)
-
-#### Search Operations
-
-##### search / findNearest
-```typescript
-async search(
-  query: number[] | Float32Array,
-  options?: SearchOptions
-): Promise<SearchResult[]>
-```
-
-Performs similarity search to find nearest neighbors.
-
-**Parameters:**
-- `query`: Query vector
-- `options`: Search configuration options
-
-**Returns:** Array of search results with IDs, distances, and metadata
-
-**Example:**
-```typescript
-const results = await db.search([0.1, 0.2, 0.3], {
-  k: 10,
-  includeMetadata: true,
-  distanceMetric: 'cosine',
-  useHNSW: true
-});
-```
-
-##### batchSearch
-```typescript
-async batchSearch(
-  queries: BatchQuery[],
-  options?: BatchSearchOptions
-): Promise<SearchResult[][]>
-```
-
-Performs multiple search queries in parallel.
-
-**Parameters:**
-- `queries`: Array of search queries
-- `options`: Batch search configuration
-
-**Example:**
-```typescript
-const queries = [
-  { query: [0.1, 0.2, 0.3], k: 5 },
-  { query: [0.4, 0.5, 0.6], k: 3 }
-];
-const { results, errors } = await db.batchSearch(queries);
-// `errors` carries the index of any query that failed. A batch answers with an
-// empty list for a failed query only alongside that entry.
-```
-
-#### Metadata Operations
-
-##### getMetadata
-```typescript
-async getMetadata(id: string | number): Promise<Record<string, any> | null>
-```
-
-Retrieves metadata for a vector.
-
-**Parameters:**
-- `id`: Vector ID
-
-**Returns:** Metadata object or `null` if not found
-
-##### getMetadataWithFieldAcrossPartitions
-```typescript
-async getMetadataWithFieldAcrossPartitions(
-  criteria: string | string[] | Record<string, any>,
-  values?: any | any[],
-  option?: { limit: number }
-): Promise<Array<{ partitionId: string; vectorId: string | number; metadata: Record<string, any> }>>
-```
-
-Searches for vectors by metadata criteria across all partitions.
-
-**Parameters:**
-- `criteria`: Metadata field name(s) or criteria object
-- `values`: Values to match (when criteria is string/array)
-- `option`: Search options including result limit
-
-#### Index Management
-
-##### buildIndexes
-```typescript
-async buildIndexes(options?: BuildIndexHNSWOptions): Promise<void>
-```
-
-Builds search indexes for improved query performance.
-
-**Parameters:**
-- `options`: Index building configuration
-
-**Example:**
-```typescript
-await db.buildIndexes({
-  progressCallback: (progress) => console.log(`Progress: ${progress}%`)
-});
-```
-
-##### saveHNSWIndices
-```typescript
-async saveHNSWIndices(partitionId?: string): Promise<void>
-```
-
-Saves HNSW indexes to disk.
-
-**Parameters:**
-- `partitionId`: Specific partition to save (optional, saves all if not specified)
-
-##### loadHNSWIndices
-```typescript
-async loadHNSWIndices(partitionId?: string): Promise<void>
-```
-
-Loads HNSW indexes from disk.
-
-**Parameters:**
-- `partitionId`: Specific partition to load (optional, loads all if not specified)
-
-#### Database Management
-
-##### save
-```typescript
-async save(): Promise<void>
-```
-
-Saves the database state to disk.
-
-##### close
-```typescript
-async close(): Promise<void>
-```
-
-Closes the database and releases all resources.
-
-##### getStats
-```typescript
-async getStats(): Promise<DatabaseStats>
-```
-
-Retrieves comprehensive database statistics.
-
-**Returns:** Detailed statistics about database state, performance, and configuration
-
-#### Advanced Operations
-
-##### extractRelationships
-```typescript
-async extractRelationships(
-  threshold: number,
-  options?: {
-    metric?: DistanceMetric;
-    partitionIds?: string[];
-    includeMetadata?: boolean;
-  }
-): Promise<Array<{
-  vector1: { id: string | number; partitionId: string; metadata?: Record<string, any> };
-  vector2: { id: string | number; partitionId: string; metadata?: Record<string, any> };
-  distance: number;
-}>>
-```
-
-Finds relationships between vectors based on distance threshold.
-
-**Parameters:**
-- `threshold`: Maximum distance for relationship
-- `options`: Configuration for relationship extraction
-
-##### extractCommunities
-```typescript
-async extractCommunities(
-  threshold: number,
-  options?: {
-    metric?: DistanceMetric;
-    partitionIds?: string[];
-    includeMetadata?: boolean;
-  }
-): Promise<Array<Array<{
-  id: string | number;
-  partitionId: string;
-  metadata?: Record<string, any>;
-}>>>
-```
-
-Extracts communities (clusters) of closely related vectors.
-
-**Parameters:**
-- `threshold`: Distance threshold for community detection
-- `options`: Configuration options
-
-## Search Options
-
-### SearchOptions
-
-```typescript
-interface SearchOptions {
-  // Result control
-  k?: number;                          // Number of results to return
-  includeMetadata?: boolean;           // Include metadata in results
-  includeVectors?: boolean;            // Include vector data in results
-
-  // Search behavior
-  distanceMetric?: DistanceMetric;     // 'euclidean' | 'cosine'
-  filter?: (id: string | number, metadata?: Record<string, any>) => boolean;
-
-  // Algorithm selection
-  useHNSW?: boolean;                   // Use HNSW index
-  efSearch?: number;                   // HNSW search parameter
-
-  // Advanced features
-  rerank?: boolean;                    // Apply reranking
-  rerankingMethod?: RerankingMethod;   // 'diversity' | 'standard' | 'weighted'
-  rerankLambda?: number;               // Reranking parameter
-
-  // Partition control
-  partitionIds?: string[];             // Limit search to specific partitions
-
-  // Performance
-  skipCache?: boolean;                 // Skip result cache
-  searchTimeoutMs?: number;            // Search timeout
-}
-```
-
-### BatchSearchOptions
-
-```typescript
-interface BatchSearchOptions {
-  maxBatchSize?: number;               // Maximum queries per batch
-  prioritizeOrder?: boolean;           // Maintain result order
-  groupSimilarQueries?: boolean;       // Optimize similar queries
-  defaultSearchTimeout?: number;       // Timeout per query
-  maxWorkers?: number;                 // Maximum worker threads
-  useWorkers?: boolean;                // Enable worker threads
-}
-```
-
-## Configuration Types
-
-### IndexingConfiguration
-
-```typescript
-interface IndexingConfiguration {
-  indexPath?: string;                  // Directory for index files
-  buildOnStart?: boolean;              // Build indexes on startup
-  autoSave?: boolean;                  // Auto-save indexes
-  autoLoad?: boolean;                  // Auto-load indexes on startup
-  runKMeansOnLoad?: boolean;           // Run K-means after loading
-
-  // Index-specific options
-  hnsw?: HNSWIndexConfiguration;
-  lsh?: LSHIndexConfiguration;
-  pq?: PQIndexConfiguration;
-}
-```
-
-### PartitioningConfiguration
-
-```typescript
-interface PartitioningConfiguration {
-  partitionsDir?: string;              // Directory for partitions
-  partitionCapacity?: number;          // Max vectors per partition
-  autoCreatePartitions?: boolean;      // Auto-create new partitions
-  autoLoadPartitions?: boolean;        // Load partitions on startup
-  maxActivePartitions?: number;        // Max partitions in memory
-  defaultVectorSize?: number;          // Default vector dimension
-}
-```
-
-### ClusteringConfiguration
-
-```typescript
-interface ClusteringConfiguration {
-  clusterSize?: number;                // Target cluster size
-  distanceMetric?: DistanceMetric;     // Clustering distance metric
-  useCompression?: boolean;            // Enable vector compression
-  kmeansMaxIterations?: number;        // K-means iterations
-  newClusterThresholdFactor?: number;  // Cluster creation threshold
-}
-```
-
-### PersistenceOptions
-
-```typescript
-interface PersistenceOptions {
-  dbPath?: string;                     // Database storage path
-  autoSave?: boolean;                  // Auto-save database
-  saveIntervalMs?: number;             // Save interval in milliseconds
-}
-```
-
-### MonitoringConfiguration
-
-```typescript
-interface MonitoringConfiguration {
-  enable?: boolean;                    // Enable monitoring
-  intervalMs?: number;                 // Metrics collection interval
-  logToConsole?: boolean;              // Log to console
-  enableSystemMetrics?: boolean;       // System resource metrics
-  enableSearchMetrics?: boolean;       // Search performance metrics
-  enableDatabaseMetrics?: boolean;     // Database state metrics
-}
-```
-
-## Result Types
-
-### SearchResult
-
-```typescript
-interface SearchResult {
-  id: string | number;                 // Vector ID
-  dist: number;                        // Distance to query
-  metadata?: Record<string, any>;      // Vector metadata
-  vector?: number[];                   // Vector data (if requested)
-}
-```
-
-### DatabaseStats
-
-```typescript
-interface DatabaseStats {
-  database: PartitionedDBStats;         // Database-level statistics
-  search: SearchStats;                  // Search statistics
-  searchCache: {                       // Cache statistics
-    size: number;
-    capacity: number;
-    hits: number;
-    misses: number;
-    hitRate: number;
-  };
-  performance: {                       // Performance metrics
-    queries: number;
-    avgSearchTimeMs: number;
-    cacheHitRate: number;
-    concurrentSearches: number;
-  };
-  system?: ISystem;                    // System information
-  memoryUsage: NodeJS.MemoryUsage;     // Memory usage
-  state: {                             // Database state
-    isReady: boolean;
-    isClosed: boolean;
-    status: string;
-  };
-  options: DatabaseOptions;            // Current configuration
-}
-```
-
-## Events
-
-The Database class emits various events for monitoring and integration:
-
-### Database Events
-
-- `ready`: Database initialization completed
-- `close`: Database is closing
-- `error`: Error occurred during operation
-- `search:start`: Search operation started
-- `search:complete`: Search operation completed
-- `search:error`: Search operation failed
-- `index:progress`: Index building progress
-- `index:complete`: Index building completed
-- `index:error`: Index building failed
-- `save:complete`: Database save completed
-- `partition:created`: New partition created
-- `partition:loaded`: Partition loaded
-- `partition:unloaded`: Partition unloaded
-
-### Event Usage
-
-```typescript
-db.on('ready', () => {
-  console.log('Database is ready!');
-});
-
-db.on('search:complete', (data) => {
-  console.log(`Search completed in ${data.totalTime}ms`);
-});
-
-db.on('error', (error) => {
-  console.error('Database error:', error);
-});
-```
-
-## REST API
-
-NBase provides a REST API server for HTTP-based access to all database operations.
-
-### Server Configuration
-
-```typescript
-const { createServer } = require('@n2flowjs/nbase');
-
-const server = createServer({
-  port: 1307,
-  host: 'localhost',
-  rateLimit: {
-    enable: true,
-    maxRequestsPerMinute: 1000
-  },
-  database: {
-    vectorSize: 1536,
-    partitioning: { partitionsDir: './data/partitions' }
-  }
-});
-```
-
-### API Endpoints
-
-#### Vectors
-- `POST /vectors` - Add a vector
-- `GET /vectors/:id` - Get a vector
-- `DELETE /vectors/:id` - Delete a vector
-- `PATCH /vectors/:id/metadata` - Update metadata
-
-#### Search
-- `POST /search` - Similarity search
-- `POST /search/batch` - Batch search
-- `POST /search/metadata` - Search with metadata filtering
-- `POST /search/relationships` - Find vector relationships
-- `POST /search/communities` - Find vector communities
-
-#### Database Management
-- `GET /health` - Health check
-- `GET /stats` - Database statistics
-- Index building and saving are library-side (`db.buildIndexes()`, `db.save()`); neither has an HTTP route.
-
-#### Example API Usage
-
-```bash
-# Add a vector
-curl -X POST http://localhost:1307/vectors \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "doc1",
-    "vector": [0.1, 0.2, 0.3],
-    "metadata": { "title": "Example Document" }
-  }'
-
-# Search for similar vectors
-curl -X POST http://localhost:1307/search \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": [0.1, 0.2, 0.3],
-    "k": 5,
-    "includeMetadata": true
-  }'
-```
-
-## Error Handling
-
-NBase provides comprehensive error handling with detailed error messages:
-
-```typescript
-try {
-  await db.addVector('doc1', [0.1, 0.2, 0.3]);
-} catch (error) {
-  if (error.code === 'VECTOR_EXISTS') {
-    console.log('Vector already exists');
-  } else if (error.code === 'INVALID_DIMENSION') {
-    console.log('Vector dimension mismatch');
-  } else {
-    console.error('Unexpected error:', error);
-  }
-}
-```
-
-## Best Practices
-
-### Performance Optimization
-
-1. **Choose appropriate indexes**: Use HNSW for high-accuracy searches, LSH for speed
-2. **Configure partitions**: Set partition capacity based on your data size
-3. **Enable caching**: Use search result caching for repeated queries
-4. **Monitor performance**: Enable monitoring to track system performance
-5. **Batch operations**: Use bulk operations for multiple vectors
-
-### Memory Management
-
-1. **Limit active partitions**: Configure `maxActivePartitions` to control memory usage
-2. **Enable compression**: Use vector compression for large datasets
-3. **Regular cleanup**: Save and close database when not in use
-4. **Monitor memory usage**: Track memory usage through monitoring system
-
-### Search Optimization
-
-1. **Tune HNSW parameters**: Adjust `efSearch` based on accuracy vs speed requirements
-2. **Use appropriate distance metrics**: Choose cosine for text embeddings, euclidean for spatial data
-3. **Filter early**: Use metadata filters to reduce search space
-4. **Batch searches**: Process multiple queries together for better performance
-
-This API reference covers the core functionality of NBase. For more detailed examples and advanced usage patterns, refer to the examples directory and test files in the repository.
- 
+# API Reference (C11 `include/nbase.h` & C++17 `include/nbase.hpp`)
+
+All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t` (with `NBASE_OK == 0` on success) unless noted otherwise.
+
+## Status Codes & Enums
+
+- **`nbase_status_t`**:
+  `NBASE_OK (0)`, `NBASE_ERR_INVALID_ARG (-1)`, `NBASE_ERR_NOMEM (-2)`, `NBASE_ERR_NOT_FOUND (-3)`, `NBASE_ERR_ALREADY_EXISTS (-4)`, `NBASE_ERR_DIM_MISMATCH (-5)`, `NBASE_ERR_IO (-6)`, `NBASE_ERR_CORRUPT (-7)`, `NBASE_ERR_UNSUPPORTED (-8)`, `NBASE_ERR_INVALID_VECTOR (-9)`.
+- **`nbase_metric_t`**:
+  `NBASE_METRIC_EUCLIDEAN`, `NBASE_METRIC_SQUARED_EUCLIDEAN`, `NBASE_METRIC_COSINE`, `NBASE_METRIC_INNER_PRODUCT`, `NBASE_METRIC_MANHATTAN`, `NBASE_METRIC_CHEBYSHEV`, `NBASE_METRIC_HAMMING`.
+- **`nbase_search_mode_t`**: `NBASE_SEARCH_AUTO`, `NBASE_SEARCH_EXACT`, `NBASE_SEARCH_HNSW`.
+- **`nbase_meta_type_t`**: `NBASE_META_INT64`, `NBASE_META_DOUBLE`, `NBASE_META_BOOL`, `NBASE_META_STRING`.
+- **`nbase_meta_op_t`**: `NBASE_OP_EQ`, `NBASE_OP_NE`, `NBASE_OP_GT`, `NBASE_OP_GTE`, `NBASE_OP_LT`, `NBASE_OP_LTE`, `NBASE_OP_EXISTS`, `NBASE_OP_CONTAINS`.
+
+## Version, Diagnostics & Distance
+
+- `const char *nbase_version(void);` -> `"1.0.0"`
+- `const char *nbase_strerror(nbase_status_t status);`
+- `const char *nbase_simd_backend(void);` -> `"avx2+fma"`, `"neon"`, or `"scalar"`
+- `nbase_config_t nbase_config_default(uint32_t dim);` (`initial_capacity=64`, `enable_hnsw=true`, `hnsw_m=16`, `hnsw_ef_construction=200`, `hnsw_ef_search=50`, `cache_capacity=0`)
+- `nbase_search_opts_t nbase_search_opts_default(void);`
+- `float nbase_distance(nbase_metric_t metric, const float *a, const float *b, uint32_t dim);`
+- `float nbase_distance_scalar(nbase_metric_t metric, const float *a, const float *b, uint32_t dim);`
+
+## Single-Partition Embedded DB (`nbase_db_t`)
+
+- **Lifecycle & WAL**:
+  - `nbase_create`, `nbase_open`, `nbase_open_mmap`, `nbase_open_wal`
+  - `nbase_wal_enable`, `nbase_wal_checkpoint`, `nbase_save`, `nbase_close`
+- **Vectors & Batch Operations**:
+  - `nbase_add`, `nbase_add_batch`, `nbase_upsert`, `nbase_delete`, `nbase_delete_batch`, `nbase_delete_by_filter`, `nbase_get`, `nbase_contains`
+- **Metadata**:
+  - `nbase_set_meta`, `nbase_update_meta`, `nbase_get_meta`, `nbase_delete_meta`, `nbase_foreach_meta`, `nbase_query_meta`
+- **Vector, Text & Hybrid Search**:
+  - `nbase_search`, `nbase_find_similar`, `nbase_search_batch`
+  - `nbase_set_text`, `nbase_get_text`, `nbase_delete_text`, `nbase_search_text`, `nbase_search_hybrid`
+- **Index Maintenance, Query Cache & Telemetry**:
+  - `nbase_rebuild_hnsw`, `nbase_rebuild_hnsw_mt`, `nbase_compact`
+  - `nbase_cache_configure(db, max_entries)`, `nbase_cache_clear(db)`
+  - `nbase_stats(db, &out_stats)` populates `dim`, `metric`, `active_vectors`, `total_slots`, `tombstones`, `mmap_backed`, `hnsw_*`, `text_docs`, `memory_bytes`, `cache_capacity`, `cache_entries`, `cache_hits`, `cache_misses`.
+
+## Reranking & Graph Analytics
+
+- `nbase_rerank_mmr(db, candidates, candidate_count, k, lambda, out_results, &out_count)`
+- `nbase_rerank_weighted(db, candidates, candidate_count, weights, weight_count, k, out_results, &out_count)` (`nbase_rerank_weight_t { const char *key; float weight; }`)
+- `nbase_extract_relationships(db, k_neighbors, max_distance, &out_edges, &out_edge_count)` (`nbase_free_edges(edges)` to free)
+- `nbase_extract_communities(ids, node_count, edges, edge_count, out_labels, &out_community_count)`
+
+## Multi-Partition DB (`nbase_pdb_t`)
+
+- `nbase_pdb_config_default`, `nbase_pdb_search_opts_default`, `nbase_pdb_open`, `nbase_pdb_save`, `nbase_pdb_close`
+- `nbase_pdb_add`, `nbase_pdb_add_batch`, `nbase_pdb_upsert`, `nbase_pdb_delete`, `nbase_pdb_delete_batch`, `nbase_pdb_delete_by_filter`, `nbase_pdb_get`, `nbase_pdb_contains`
+- `nbase_pdb_set_meta`, `nbase_pdb_update_meta`, `nbase_pdb_get_meta`, `nbase_pdb_delete_meta`, `nbase_pdb_foreach_meta`, `nbase_pdb_query_meta`
+- `nbase_pdb_set_text`, `nbase_pdb_get_text`, `nbase_pdb_delete_text`
+- `nbase_pdb_search`, `nbase_pdb_search_batch`, `nbase_pdb_search_text`, `nbase_pdb_search_hybrid`, `nbase_pdb_find_similar`
+- `nbase_pdb_extract_relationships`, `nbase_pdb_compact`, `nbase_pdb_rebuild_hnsw_mt`, `nbase_pdb_stats` (`total_vectors`, `total_partitions`, `loaded_partitions`, `eviction_count`, `cache_hits`, `cache_misses`, `memory_bytes`)
+
+## Dynamic Online Clustered DB (`nbase_clustered_t`, `.nbcl`)
+
+- `nbase_clustered_config_default`, `nbase_clustered_create`, `nbase_clustered_destroy`
+- `nbase_clustered_add`, `nbase_clustered_upsert`, `nbase_clustered_delete`, `nbase_clustered_get`, `nbase_clustered_contains`
+- `nbase_clustered_recluster`, `nbase_clustered_search`, `nbase_clustered_stats`, `nbase_clustered_save`, `nbase_clustered_load`
+
+## Quantization, Approximate Indexes & Standalone BM25
+
+- **K-Means++**: `nbase_kmeans_train`
+- **Product Quantization (`nbase_pq_t`)**: `nbase_pq_train`, `destroy`, `dim`, `num_subvectors`, `num_centroids`, `encode`, `decode`, `build_lut`, `adc_distance`, `save`, `load`
+- **IVF-PQ (`nbase_ivfpq_t`, `.nbiv`)**: `nbase_ivfpq_config_default`, `train`, `add`, `search`, `save`, `load`, `stats`, `destroy`
+- **Scalar Quantization SQ8 (`nbase_sq8_t`, `.nbsq`)**: `nbase_sq8_train`, `destroy`, `dim`, `encode`, `decode`, `l2_sq_asymmetric`, `l2_sq_symmetric`, `save`, `load`
+- **Binary Quantization BQ (`nbase_bq_t`, `.nbbq`)**: `nbase_bq_train`, `destroy`, `dim`, `words_per_vec`, `encode`, `hamming`, `save`, `load`
+- **Multi-Probe LSH (`nbase_lsh_t`, `.nblh`)**: `nbase_lsh_config_default`, `create`, `destroy`, `add`, `delete`, `search`, `stats`, `save`, `load`
+- **Standalone BM25 & RRF (`nbase_bm25_t`, `.nbbm`)**: `nbase_bm25_create`, `destroy`, `doc_count`, `index`, `get`, `delete`, `search`, `search_filtered`, `save`, `load`, `nbase_hybrid_rrf`
+
+## Embeddable HTTP/1.1 Server (`nbase_http_server_t`)
+
+- `nbase_http_config_default`, `nbase_http_server_start`, `nbase_http_server_port`, `nbase_http_server_stop`
+
+## C++17 Header-Only Wrapper (`include/nbase.hpp`)
+
+All handles wrap C ownership with move semantics, RAII cleanup, and `nbase::Error` exceptions:
+- `nbase::Database` (`create`, `open`, `open_mmap`, `open_wal`, `add`, `add_batch`, `upsert`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `contains`, `set_meta`, `update_meta`, `delete_meta`, `query_meta`, `set_text`, `get_text`, `delete_text`, `search`, `find_similar`, `search_text`, `search_hybrid`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `extract_communities`, `compact`, `rebuild_hnsw_mt`, `cache_configure`, `cache_clear`, `stats`)
+- `nbase::PartitionedDatabase` (`open`, `save`, `add`, `add_batch`, `upsert`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `contains`, `set_meta`, `update_meta`, `delete_meta`, `query_meta`, `set_text`, `get_text`, `delete_text`, `search`, `search_batch`, `search_text`, `search_hybrid`, `find_similar`, `extract_relationships`, `compact`, `rebuild_hnsw_mt`, `stats`)
+- `nbase::ClusteredDatabase`, `nbase::IvfPq`, `nbase::Sq8`, `nbase::Bq`, `nbase::Lsh`, `nbase::Bm25`, `nbase::HttpServer`

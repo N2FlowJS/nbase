@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-# Only one run per ref; a newer push supersedes an in-progress one.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -15,41 +14,49 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: verify (node ${{ matrix.node }})
+  build-and-test:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     strategy:
       fail-fast: false
       matrix:
-        # Matches `engines.node` (>=20.11.0); lru-cache@11 and rimraf@6
-        # require Node 20+, so the previous ">=14" claim was never true.
-        node: ['20', '22', '24']
+        include:
+          - name: Release + C++17 Smoke
+            build_type: Release
+            flags: ''
+            cpp_smoke: true
+          - name: Debug + ASan + UBSan
+            build_type: Debug
+            flags: '-DNBASE_ENABLE_SANITIZERS=ON'
+            cpp_smoke: false
+          - name: Debug + TSan
+            build_type: Debug
+            flags: '-DNBASE_ENABLE_TSAN=ON'
+            cpp_smoke: false
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config
 
-      # `npm ci`, not `npm install`: honour the lockfile so CI tests exactly what
-      # is published.
-      - name: Install dependencies
-        run: npm ci
-
-      # Typecheck covers src + test with the full strict set
-      # (noUncheckedIndexedAccess, exactOptionalPropertyTypes, ...).
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.flags }}
 
       - name: Build
-        run: npm run build
+        run: cmake --build build -j
 
       - name: Test
-        run: npm test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: C++17 pkg-config Smoke
+        if: matrix.cpp_smoke
+        run: |
+          cmake --install build --prefix /tmp/nbase-stage
+          printf '#include "nbase.hpp"\nint main(){auto db=nbase::Database::create(4);return db.stats().dim==4?0:1;}\n' > /tmp/cpp_smoke.cpp
+          g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror /tmp/cpp_smoke.cpp \
+            $(PKG_CONFIG_PATH=/tmp/nbase-stage/lib/pkgconfig pkg-config --define-prefix --cflags --libs libnbase) \
+            -Wl,-rpath,/tmp/nbase-stage/lib -o /tmp/cpp_smoke
+          /tmp/cpp_smoke

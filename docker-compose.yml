@@ -1,0 +1,40 @@
+services:
+  nbase:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nbase:local
+    container_name: nbase
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    ports:
+      - '${PORT:-1307}:${PORT:-1307}'
+    environment:
+      NBASE_HOST: 0.0.0.0
+      NBASE_PORT: ${PORT:-1307}
+      NBASE_DATA_DIR: /data
+      NBASE_DIM: ${NBASE_DIM:-128}
+      NBASE_METRIC: ${NBASE_METRIC:-euclidean}
+      NBASE_WORKERS: ${NBASE_WORKERS:-4}
+      NBASE_CACHE_SIZE: ${NBASE_CACHE_SIZE:-256}
+      NBASE_API_KEY: ${NBASE_API_KEY:-}
+      NBASE_RATE_LIMIT: ${NBASE_RATE_LIMIT:-0}
+      NBASE_CORS_ORIGIN: ${NBASE_CORS_ORIGIN:-}
+    volumes:
+      - nbase_data:/data
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'curl',
+          '-fsS',
+          'http://127.0.0.1:${PORT:-1307}/health',
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  nbase_data:

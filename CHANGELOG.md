@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-20
+
+Complete transition from Node.js/TypeScript to the pure-C11/C++17 `nbase` engine promoted to the repository root.
+
+### Added
+- **Pure-C11 Core Engine (`include/nbase.h`, `src/`) & Header-Only C++17 RAII Wrapper (`include/nbase.hpp`)**:
+  - Zero runtime dependencies (`libm` + POSIX `pthreads`), compiled strictly with `-std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror`.
+  - Runtime-dispatched **AVX2+FMA** (`x86_64`), **NEON** (`ARM64`), and scalar distance kernels across 7 metrics (`euclidean`, `squared_euclidean`, `cosine`, `inner_product`, `manhattan`, `chebyshev`, `hamming`).
+  - Contiguous flat vector storage (`src/store.c`) with open-addressing `uint64_t` lookup, zero-copy `nbase_open_mmap`, tombstones, and physical `nbase_compact`.
+  - Slot-indexed HNSW (`src/hnsw.c`) with Algorithm 4 heuristic pruning, 256-stripe node locks for multi-threaded `nbase_add_batch` / `nbase_rebuild_hnsw_mt`, generation-stamped per-query search state, `ef_search` dial, and per-query metric override.
+  - Typed binary metadata (`int64`, `double`, `bool`, `string`) & predicate filtering (`EQ`, `NE`, `GT`, `GTE`, `LT`, `LTE`, `EXISTS`, `CONTAINS`), `nbase_delete_batch`, and `nbase_delete_by_filter`.
+  - CRC32-framed Write-Ahead Log (`wal.nbw` / `NBASEWL1`), torn-tail truncation, auto-replay, and atomic `nbase_wal_checkpoint`.
+  - Thread-safe LRU query result cache (`cache_capacity`, `skip_cache`, `nbase_cache_configure`, `nbase_cache_clear`, automatic invalidation on mutations, and `memory_bytes` footprint accounting).
+  - Integrated Okapi BM25 full-text index (`.nbbm`) and Reciprocal Rank Fusion (`nbase_search_hybrid`, `nbase_hybrid_rrf`).
+  - Maximal Marginal Relevance (`nbase_rerank_mmr`), metadata-weighted reranking (`nbase_rerank_weighted`), k-NN graph extraction (`nbase_extract_relationships`), and iterative Union-Find community detection (`nbase_extract_communities`).
+  - Quantization & approximate indexes: K-Means++, PQ (`.nbq`), IVF-PQ (`.nbiv`), SIMD SQ8 (`.nbsq`), 1-bit Binary Quantization (`.nbbq`), Multi-Probe LSH (`.nblh`), and Dynamic Online Clustered Vector Index (`.nbcl`).
+  - Multi-Partition DB (`nbase_pdb_t`) with durable LRU partition eviction, cross-partition batch insert/delete/filter-delete/search/text/hybrid/graph APIs, and `cache_hits`/`cache_misses`/`memory_bytes` stats.
+- **Standalone HTTP/1.1 Keep-Alive Daemon (`nbased`) & Streaming CLI (`nbase-cli`)**:
+  - Pure-POSIX `poll` worker pool HTTP/1.1 server (`src/http_server.c`) with strict RFC 8259 JSON parser (`src/json.c`), RFC 9112 lingering close on early rejects, Bearer authentication, CORS, per-second rate limiting, `/stats`, Prometheus `/metrics` (rolling 256-sample P50/P95/P99 latency, `nbase_memory_bytes`, `nbase_cache_*`), and `/api/admin/{save,checkpoint,compact,rebuild,cache}`.
+  - Backward-compatible `nbased` CLI/env fallbacks (`HOST`, `PORT`, `NBASE_DB_PATH`, `NBASE_VECTOR_SIZE`, `NBASE_API_KEYS`, `NBASE_CORS_ORIGINS`, plus `NBASE_CACHE_SIZE` / `--cache-size`).
+  - Offline CLI `nbase-cli` with NDJSON streaming `import`/`export`, `delete-batch`, `search-hybrid`, and `info`.
+- **Docker, Packaging & CI**:
+  - Multi-stage `debian:bookworm-slim` [Dockerfile](Dockerfile) exposing port `1307`, [docker-compose.yml](docker-compose.yml), CPack `.tar.gz` trial/release packaging, and GitHub Actions CMake CI (`Release`, `ASan+UBSan`, `TSan`).
+
+### Removed
+- Removed the legacy Node.js/TypeScript implementation (`src/*.ts`, `test/*.ts`, `package.json`, `tsconfig*.json`, `eslint.config.mjs`, `nodemon.json`, `.github/workflows/npm.yml`).
+
 ## [0.3.1] - 2026-10-20
 
 Five defects found reviewing the 0.3.0 release: two silent data-loss paths, one

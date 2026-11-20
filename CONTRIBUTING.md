@@ -1,74 +1,46 @@
 # Contributing to NBase
 
-Thank you for considering contributing to NBase! Your help is appreciated.
+Thank you for contributing to **NBase** (`v1.0.0`), written in pure C11 with a header-only C++17 RAII wrapper.
 
-## How to Contribute
+## Repository Layout
 
-1. **Fork the repository** and create your branch from `main`.
-2. **Clone your fork** and install dependencies:
+- `include/` — Public C11 API ([`include/nbase.h`](include/nbase.h)) and header-only C++17 wrapper ([`include/nbase.hpp`](include/nbase.hpp))
+- `src/` — Core engine modules (`distance.c`, `store.c`, `hnsw.c`, `meta.c`, `wal.c`, `bm25.c`, `rerank.c`, `kmeans.c`, `pq.c`, `ivfpq.c`, `sq8.c`, `bq.c`, `lsh.c`, `clustered.c`, `partitioned.c`, `json.c`, `http_server.c`, `nbase.c`)
+- `apps/` — CLI (`nbase_cli.c`) and HTTP/1.1 REST daemon (`nbased.c`)
+- `tests/` — C11 unit, integration, HTTP, sanitizer, and TSan test suite (`test_main.c`)
+- `bench/` — Performance benchmark suite (`bench_nbase.c`)
+- `cmake/` — `libnbase.pc.in` pkg-config template
+
+## Development Workflow
+
+1. **Fork and branch from `main`**:
    ```bash
    git clone https://github.com/your-username/nbase.git
    cd nbase
-   npm install
-   ```
-3. **Create a new branch** for your feature or bugfix:
-   ```bash
    git checkout -b my-feature
    ```
-4. **Make your changes** and add tests if applicable.
-5. **Run tests** to ensure nothing is broken:
+2. **Build & test across all three build profiles**:
    ```bash
-   npm test
+   # Release build + benchmark
+   cmake -S . -B /tmp/nbase-release -DCMAKE_BUILD_TYPE=Release
+   cmake --build /tmp/nbase-release -j
+   ctest --test-dir /tmp/nbase-release --output-on-failure
+   /tmp/nbase-release/bench_nbase
+
+   # Debug build with AddressSanitizer + UndefinedBehaviorSanitizer
+   cmake -S . -B /tmp/nbase-asan -DCMAKE_BUILD_TYPE=Debug -DNBASE_ENABLE_SANITIZERS=ON
+   cmake --build /tmp/nbase-asan -j
+   ctest --test-dir /tmp/nbase-asan --output-on-failure
+
+   # Debug build with ThreadSanitizer
+   cmake -S . -B /tmp/nbase-tsan -DCMAKE_BUILD_TYPE=Debug -DNBASE_ENABLE_TSAN=ON
+   cmake --build /tmp/nbase-tsan -j
+   ctest --test-dir /tmp/nbase-tsan --output-on-failure
    ```
-6. **Commit your changes** and push your branch:
-   ```bash
-   git add .
-   git commit -m "Describe your change"
-   git push origin my-feature
-   ```
-7. **Open a Pull Request** on [GitHub](https://github.com/N2FlowJS/nbase/pulls).
 
-## Guidelines
+## C11 / C++17 Coding Standards
 
-- Write clear, concise commit messages.
-- Add or update documentation as needed.
-- Ensure code passes linting and tests.
-- Be respectful and constructive in discussions.
-
-## TypeScript configuration
-
-`tsconfig.json` is stricter than the TypeScript defaults. On top of `strict`,
-these are enabled because each one surfaced real defects when turned on:
-
-| Option | Why |
-| --- | --- |
-| `noUncheckedIndexedAccess` | Array/record reads are `T \| undefined`. Required explicit handling in the distance kernels, HNSW traversal and k-means loops. |
-| `exactOptionalPropertyTypes` | An optional property is not the same as `prop: T \| undefined`. Passing a possibly-absent value means omitting the key — see `VectorStoreSearchOptions` in `src/types.ts`. |
-| `noPropertyAccessFromIndexSignature` | `process.env.FOO` and `req.body.foo` must use bracket access, so a typo is visible. |
-| `noImplicitOverride` | Overriding a base member requires the `override` keyword. |
-| `noUnusedLocals` / `noUnusedParameters` | Dead code and unused parameters are errors. |
-| `noImplicitReturns` / `noFallthroughCasesInSwitch` | Every code path returns; switch cases fall through deliberately or not at all. |
-| `allowUnreachableCode: false` / `allowUnusedLabels: false` | No dead branches or stray labels. |
-
-There are two configs: `tsconfig.build.json` (emits `dist/`) and
-`tsconfig.test.json` (typechecks `src` + `test`). Run the checks with:
-
-```bash
-npm run typecheck   # tsc -p tsconfig.test.json --noEmit
-npm run lint        # eslint . (type-aware; uses tsconfig.test.json)
-npm run build       # tsc -p tsconfig.build.json
-npm test
-```
-
-`npm run lint` uses the type-aware rules, so a type error is reported by both
-commands. Fix types first, then re-run lint.
-
-## Reporting Issues
-
-If you find a bug or have a feature request, please [open an issue](https://github.com/N2FlowJS/nbase/issues) and provide as much detail as possible.
-
-## Code of Conduct
-
-Please be respectful and follow the [GitHub Community Guidelines](https://docs.github.com/en/site-policy/github-terms/github-community-guidelines).
-
-Thank you for contributing!
+- **Zero compiler warnings**: All C files compile with `-std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror`. All additions to [`include/nbase.hpp`](include/nbase.hpp) must compile cleanly with `g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror`.
+- **Binary format invariants**: Do not modify existing 128-byte (or 64-byte WAL) persisted file headers or `header_crc32` byte offsets verified via `_Static_assert` in [`src/nbase_internal.h`](src/nbase_internal.h).
+- **Thread safety**: Lock ordering must always follow `db->rwlock` -> `db->cache_lock`, and `pdb->mu` -> per-partition `nbase_*` APIs. Every public change must pass under TSan with zero data races.
+- **No runtime dependencies**: Do not introduce external libraries beyond libc, libm, and POSIX `pthreads`.

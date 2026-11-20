@@ -1,0 +1,199 @@
+#include "test_common.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static void test_kmeans_synthetic_clusters_and_edge_cases(void) {
+  const uint32_t count = 400U;
+  const uint32_t dim = 8U;
+  const uint32_t k = 4U;
+
+  float *vecs = malloc((size_t)count * dim * sizeof(float));
+  float *noise = malloc((size_t)count * dim * sizeof(float));
+  float *c1 = malloc((size_t)k * dim * sizeof(float));
+  float *c2 = malloc((size_t)k * dim * sizeof(float));
+  uint32_t *a1 = malloc((size_t)count * sizeof(uint32_t));
+  uint32_t *a2 = malloc((size_t)count * sizeof(uint32_t));
+  ASSERT_TRUE(vecs != NULL && noise != NULL && c1 != NULL && c2 != NULL && a1 != NULL && a2 != NULL);
+
+  test_fill_vectors(noise, count, dim, 1111ULL);
+  static const float centers[4][2] = {{-5.0f, -5.0f}, {-5.0f, 5.0f}, {5.0f, -5.0f}, {5.0f, 5.0f}};
+  for (uint32_t i = 0U; i < count; i++) {
+    uint32_t grp = i % k;
+    for (uint32_t d = 0U; d < dim; d++) {
+      float base = (d < 2U) ? centers[grp][d] : 0.0f;
+      vecs[(size_t)i * dim + d] = base + (noise[(size_t)i * dim + d] - 0.5f) * 0.4f;
+    }
+  }
+
+  ASSERT_STATUS(nbase_kmeans_train(vecs, count, dim, k, 30U, 99ULL, c1, a1), NBASE_OK);
+  ASSERT_STATUS(nbase_kmeans_train(vecs, count, dim, k, 30U, 99ULL, c2, a2), NBASE_OK);
+
+  /* Deterministic reproducibility with identical seed. */
+  for (uint32_t i = 0U; i < count; i++) {
+    ASSERT_EQ_U64(a1[i], a2[i]);
+  }
+  for (uint32_t i = 0U; i < k * dim; i++) {
+    ASSERT_NEAR(c1[i], c2[i], 1e-6, 0.0);
+  }
+
+  /* Every true center is closely recovered by one learned centroid. */
+  for (uint32_t grp = 0U; grp < k; grp++) {
+    double best = 1e9;
+    for (uint32_t c = 0U; c < k; c++) {
+      double dx = (double)c1[c * dim] - (double)centers[grp][0];
+      double dy = (double)c1[c * dim + 1U] - (double)centers[grp][1];
+      double dist = sqrt(dx * dx + dy * dy);
+      if (dist < best) {
+        best = dist;
+      }
+    }
+    ASSERT_TRUE(best < 0.25);
+  }
+
+  /* Duplicate points with k == count must recover without NaN. */
+  float dup[4 * 4] = {1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4};
+  float dup_c[4 * 4];
+  ASSERT_STATUS(nbase_kmeans_train(dup, 4U, 4U, 4U, 10U, 1ULL, dup_c, NULL), NBASE_OK);
+  for (uint32_t i = 0U; i < 16U; i++) {
+    ASSERT_TRUE(isfinite(dup_c[i]));
+  }
+
+  free(vecs);
+  free(noise);
+  free(c1);
+  free(c2);
+  free(a1);
+  free(a2);
+}
+
+typedef struct pq_hit {
+  uint32_t idx;
+  float dist;
+} pq_hit_t;
+
+static int cmp_pq_hit(const void *pa, const void *pb) {
+  const pq_hit_t *a = (const pq_hit_t *)pa;
+  const pq_hit_t *b = (const pq_hit_t *)pb;
+  if (a->dist < b->dist) {
+    return -1;
+  }
+  if (a->dist > b->dist) {
+    return 1;
+  }
+  return (a->idx < b->idx) ? -1 : (a->idx > b->idx);
+}
+
+static void test_pq_encode_decode_adc_and_persistence(void) {
+  const uint32_t count = 500U;
+  const uint32_t dim = 32U;
+  const uint32_t m = 8U;
+  const uint32_t ks = 64U;
+
+  float *vecs = malloc((size_t)count * dim * sizeof(float));
+  float *noise = malloc((size_t)count * dim * sizeof(float));
+  uint8_t *codes = malloc((size_t)count * m * sizeof(uint8_t));
+  float *decoded = malloc((size_t)count * dim * sizeof(float));
+  float *lut = malloc((size_t)m * ks * sizeof(float));
+  ASSERT_TRUE(vecs != NULL && noise != NULL && codes != NULL && decoded != NULL && lut != NULL);
+
+  float *anchors = malloc((size_t)100U * dim * sizeof(float));
+  ASSERT_TRUE(anchors != NULL);
+  test_fill_vectors(anchors, 100U, dim, 3333ULL);
+  test_fill_vectors(noise, count, dim, 2222ULL);
+  for (uint32_t i = 0U; i < count; i++) {
+    uint32_t cluster = i % 100U;
+    for (uint32_t d = 0U; d < dim; d++) {
+      float anchor = anchors[(size_t)cluster * dim + d] * 3.0f;
+      vecs[(size_t)i * dim + d] = anchor + (noise[(size_t)i * dim + d] - 0.5f) * 0.25f;
+    }
+  }
+  free(anchors);
+
+  nbase_pq_t *pq = NULL;
+  ASSERT_STATUS(nbase_pq_train(vecs, count, dim, m, ks, 20U, 777ULL, &pq), NBASE_OK);
+  ASSERT_EQ_U64(nbase_pq_dim(pq), dim);
+  ASSERT_EQ_U64(nbase_pq_num_subvectors(pq), m);
+  ASSERT_EQ_U64(nbase_pq_num_centroids(pq), ks);
+
+  ASSERT_STATUS(nbase_pq_encode(pq, vecs, count, codes), NBASE_OK);
+  ASSERT_STATUS(nbase_pq_decode(pq, codes, count, decoded), NBASE_OK);
+
+  double mse = 0.0;
+  for (size_t i = 0U; i < (size_t)count * dim; i++) {
+    ASSERT_TRUE(isfinite(decoded[i]));
+    double diff = (double)vecs[i] - (double)decoded[i];
+    mse += diff * diff;
+  }
+  mse /= (double)((size_t)count * dim);
+  ASSERT_TRUE(mse < 0.05);
+
+  /* ADC distance must match exact squared L2 between query and decoded vector. */
+  const float *query = vecs + 17U * dim;
+  ASSERT_STATUS(nbase_pq_build_lut(pq, query, lut), NBASE_OK);
+  for (uint32_t i = 0U; i < 20U; i++) {
+    float adc = nbase_pq_adc_distance(pq, lut, codes + (size_t)i * m);
+    float exact_dec = nbase_distance(NBASE_METRIC_SQUARED_EUCLIDEAN, query, decoded + (size_t)i * dim, dim);
+    ASSERT_NEAR(adc, exact_dec, 1e-3, 1e-4);
+  }
+
+  /* ADC top-10 recall against exact squared L2 on the dataset. */
+  pq_hit_t *adc_hits = malloc(count * sizeof(pq_hit_t));
+  pq_hit_t *exact_hits = malloc(count * sizeof(pq_hit_t));
+  ASSERT_TRUE(adc_hits != NULL && exact_hits != NULL);
+  for (uint32_t i = 0U; i < count; i++) {
+    adc_hits[i].idx = i;
+    adc_hits[i].dist = nbase_pq_adc_distance(pq, lut, codes + (size_t)i * m);
+    exact_hits[i].idx = i;
+    exact_hits[i].dist = nbase_distance(NBASE_METRIC_SQUARED_EUCLIDEAN, query, vecs + (size_t)i * dim, dim);
+  }
+  qsort(adc_hits, count, sizeof(pq_hit_t), cmp_pq_hit);
+  qsort(exact_hits, count, sizeof(pq_hit_t), cmp_pq_hit);
+
+  uint32_t overlap = 0U;
+  for (uint32_t i = 0U; i < 10U; i++) {
+    for (uint32_t j = 0U; j < 10U; j++) {
+      if (exact_hits[i].idx == adc_hits[j].idx) {
+        overlap++;
+        break;
+      }
+    }
+  }
+  ASSERT_TRUE((double)overlap / 10.0 >= 0.70);
+
+  /* Save/load round trip + CRC32 corruption detection. */
+  char dir[128];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+  char pq_path[256];
+  snprintf(pq_path, sizeof(pq_path), "%s/codebook.nbq", dir);
+  ASSERT_STATUS(nbase_pq_save(pq, pq_path), NBASE_OK);
+  nbase_pq_destroy(pq);
+  pq = NULL;
+
+  ASSERT_STATUS(nbase_pq_load(pq_path, &pq), NBASE_OK);
+  float *lut2 = malloc((size_t)m * ks * sizeof(float));
+  ASSERT_TRUE(lut2 != NULL);
+  ASSERT_STATUS(nbase_pq_build_lut(pq, query, lut2), NBASE_OK);
+  for (uint32_t i = 0U; i < m * ks; i++) {
+    ASSERT_NEAR(lut2[i], lut[i], 1e-6, 0.0);
+  }
+  free(lut2);
+  nbase_pq_destroy(pq);
+
+  ASSERT_TRUE(test_flip_file_byte(pq_path, 160L));
+  ASSERT_STATUS(nbase_pq_load(pq_path, &pq), NBASE_ERR_CORRUPT);
+
+  test_rm_rf(dir);
+  free(adc_hits);
+  free(exact_hits);
+  free(vecs);
+  free(noise);
+  free(codes);
+  free(decoded);
+  free(lut);
+}
+
+void test_pq_run(void) {
+  RUN_TEST(test_kmeans_synthetic_clusters_and_edge_cases);
+  RUN_TEST(test_pq_encode_decode_adc_and_persistence);
+}

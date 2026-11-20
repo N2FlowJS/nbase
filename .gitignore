@@ -1,25 +1,40 @@
-node_modules
+# CMake & build artifacts
+build/
+cmake-build-*/
+/release
+*.o
+*.a
+*.so
+*.so.*
+nbased
+nbase-cli
+test_nbase
+bench_nbase
 
 # Local database state
 /database
-test-data
-/test/benchmarks/benchmark_db_data
+/data
+*.nbv
+*.nbi
+*.nbm
+*.nbw
+*.nbq
+*.nbp
+*.nbiv
+*.nbsq
+*.nblh
+*.nbbq
+*.nbbm
+*.nbcl
 
-# Logs & service artifacts
+# Logs
 logs
 *.log
-
-# Build output
-dist
 
 # Environment / secrets
 .env
 .env.*
 !.env.example
-
-# Coverage
-coverage
-.nyc_output
 
 # Editor / OS cruft
 .DS_Store
