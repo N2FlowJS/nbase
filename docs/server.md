@@ -23,12 +23,12 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 
 ### Endpoints
 
-- **`GET /health`**: returns `{"status":"ok","version":"1.8.0","simd":"..."}`.
+- **`GET /health` & `HEAD /health`**: `GET` returns `{"status":"ok","version":"1.9.0","simd":"..."}`; `HEAD` returns status `200` with empty body.
 - **`GET /stats`**: returns DB stats (`dim`, `metric`, `active_vectors`, `total_slots`, `tombstones`, `mmap_backed`, `hnsw_*`, `text_docs`, `memory_bytes`, `cache_capacity`, `cache_entries`, `cache_hits`, `cache_misses`, `search_p50_us`, `search_p95_us`, `search_p99_us`).
 - **`GET /metrics`**: Prometheus exposition format (`nbase_requests_total`, `nbase_errors_total`, `nbase_search_queries_total`, `nbase_search_latency_microseconds_sum`, `nbase_search_latency_p50_microseconds`, `nbase_search_latency_p95_microseconds`, `nbase_search_latency_p99_microseconds`, `nbase_keepalive_requests_total`, `nbase_vectors_active`, `nbase_vectors_tombstones`, `nbase_hnsw_nodes_active`, `nbase_text_docs_active`, `nbase_memory_bytes`, `nbase_cache_entries`, `nbase_cache_hits_total`, `nbase_cache_misses_total`).
 - **`GET /api/vectors`**: paginated sorted vector listing (`?offset=0&limit=50&includeVectors=false&includeMetadata=false&includeText=false`).
 - **`GET /api/vectors/count` & `POST /api/vectors/count`**: count active vectors (`POST` accepts optional `"filters"`).
-- **`GET /api/vectors/export`**: export active records as `application/x-ndjson` (`?includeVectors=true&includeMetadata=true&includeText=true`).
+- **`GET /api/vectors/export` & `POST /api/vectors/export`**: export active or metadata-filtered (`POST` `{"filters":..., "includeVectors":..., "includeMetadata":..., "includeText":...}`) records as `application/x-ndjson`.
 - **`POST /api/vectors/import`**: ingest NDJSON lines (`?upsert=true`, `?threads=4`) including `vector`, `metadata`, and `text`.
 - **`POST /api/vectors`**: single insert `{"id": 1, "vector": [...], "metadata": {...}, "text": "..."}` or bulk insert `{"vectors": [...], "threads": 4}`.
 - **`POST /api/vectors/upsert`**: single upsert `{"id": 1, "vector": [...], "metadata": {...}, "text": "..."}` or bulk upsert `{"vectors": [...], "threads": 4}`.
@@ -37,7 +37,7 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 - **`POST /api/vectors/metadata`** & **`PATCH /api/vectors/metadata`**: atomic bulk metadata replace (`POST` / `"mode":"set"`) or partial update (`PATCH` / `"mode":"update"`) via `{"items": [{"id": 1, "metadata": {...}}]}`.
 - **`POST /api/vectors/text`**: atomic bulk text indexing `{"items": [{"id": 1, "text": "..."}]}`.
 - **`POST /api/vectors/delete` & `DELETE /api/vectors`**: batch/filter delete via `{"ids": [1, 2]}` or `{"filters": [...]}`.
-- **`GET /api/vectors/:id`** (`?includeVector=true&includeMetadata=true&includeText=true`), **`PUT /api/vectors/:id`** (upsert), **`DELETE /api/vectors/:id`**.
+- **`GET /api/vectors/:id`** (`?includeVector=true&includeMetadata=true&includeText=true`), **`HEAD /api/vectors/:id`** (`200`/`404`), **`PUT /api/vectors/:id`** (upsert), **`DELETE /api/vectors/:id`**.
 - **`GET /api/vectors/:id/exists`**, **`GET/POST /api/vectors/:id/similar`** (`k`, `filters`, `metric`, `mode`, `efSearch`, `skipCache`, `include*`), **`GET/PUT/PATCH/DELETE /api/vectors/:id/metadata`**, **`GET/PUT/DELETE /api/vectors/:id/text`**.
 - **`POST /api/distance`**: computes 1-to-N distances (`{"metric":"euclidean|cosine|...", "query":[...], "vectors":[[...], ...]}`).
 - **`POST /api/rerank`**: standalone reranking over `candidates: [{"id": 1, "distance": 0.1}, ...]` supporting `method` (`"diversity"`, `"weighted"`, `"standard"`), `k`, `lambda`, `weights`, `includeMetadata`, `includeVectors`, and `includeText`.
@@ -55,7 +55,7 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 - `nbase-cli version`
 - `nbase-cli init <dir> --dim <D> [--metric <M>] [--no-hnsw]`
 - `nbase-cli info <dir>` — Prints DB dimensions, active count, tombstones, HNSW levels, `text_docs`, `memory_bytes`, and `cache_*` JSON
-- `nbase-cli add <dir> <id> <v0,v1,...>` / `upsert <dir> <id> <v0,v1,...>` / `get <dir> <id>` / `get-batch <dir> <id1,id2,...>` / `list <dir> [--offset <N>] [--limit <M>]` / `count <dir> [--filter <json>]` / `delete <dir> <id>` / `delete-batch <dir> <id1,id2,...>` / `delete-by-filter <dir> --filter <json>`
+- `nbase-cli add <dir> <id> <v0,v1,...>` / `upsert <dir> <id> <v0,v1,...>` / `get <dir> <id>` / `get-batch <dir> <id1,id2,...>` / `exists <dir> <id1,id2,...>` / `list <dir> [--offset <N>] [--limit <M>]` / `count <dir> [--filter <json>]` / `delete <dir> <id>` / `delete-batch <dir> <id1,id2,...>` / `delete-by-filter <dir> --filter <json>`
 - `nbase-cli set-meta <dir> <id> <json-object> [--update]` / `get-meta <dir> <id>` / `delete-meta <dir> <id>` / `set-text <dir> <id> <text>` / `get-text <dir> <id>` / `delete-text <dir> <id>`
 - `nbase-cli search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]`
 - `nbase-cli search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]`
@@ -66,4 +66,4 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 - `nbase-cli distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]`
 - `nbase-cli search-text <dir> <query> [--k <K>] [--filter <json>]` / `search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>]`
 - `nbase-cli rebuild <dir> [--threads <T>]` / `compact <dir>` / `checkpoint <dir>`
-- `nbase-cli import <dir> <file.ndjson|-> [--threads <T>]` / `export <dir> [file.ndjson|-]`
+- `nbase-cli import <dir> <file.ndjson|-> [--threads <T>]` / `export <dir> [file.ndjson|-] [--filter <json>]`

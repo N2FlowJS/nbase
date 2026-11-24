@@ -1424,7 +1424,7 @@ static void test_http_server_ndjson_import_export(void) {
   ASSERT_EQ_I64(r.status, 405);
   free(r.body);
 
-  ASSERT_TRUE(http_req(port1, "POST", "/api/vectors/export", NULL, NULL, &r));
+  ASSERT_TRUE(http_req(port1, "DELETE", "/api/vectors/export", NULL, NULL, &r));
   ASSERT_EQ_I64(r.status, 405);
   free(r.body);
 
@@ -1685,6 +1685,98 @@ static void test_http_server_exists_batch_and_radius_endpoint(void) {
   nbase_close(db);
 }
 
+static void test_http_server_head_and_filtered_export(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  uint64_t ids[3] = {10ULL, 20ULL, 30ULL};
+  float vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f
+  };
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 3U, 3U, 1U), NBASE_OK);
+  nbase_meta_field_t m10 = {"env", {.type = NBASE_META_STRING, .as = {.str = "prod"}}};
+  nbase_meta_field_t m20 = {"env", {.type = NBASE_META_STRING, .as = {.str = "dev"}}};
+  nbase_meta_field_t m30 = {"env", {.type = NBASE_META_STRING, .as = {.str = "prod"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, &m10, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 20ULL, &m20, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 30ULL, &m30, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 10ULL, "prod ten"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  hcfg.api_key = "secret123";
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. HEAD /health succeeds without auth and returns empty body */
+  ASSERT_TRUE(http_req(port, "HEAD", "/health", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  /* 2. HEAD /api/vectors/:id enforces auth and returns 200 / 404 */
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/10", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 401);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/10", "secret123", NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/999", "secret123", NULL, &r));
+  ASSERT_EQ_I64(r.status, 404);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  /* 3. POST /api/vectors/export with metadata filter and includeVectors=false */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/export",
+      "secret123",
+      "{\"filters\":{\"env\":\"prod\"},\"includeVectors\":false,\"includeMetadata\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"prod ten\"") != NULL);
+  free(r.body);
+
+  /* 4. Unfiltered POST export + error checks */
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/export", "secret123", "{}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/export",
+      "secret123",
+      "{\"filters\":[{\"bad\":1}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "DELETE", "/api/vectors/export", "secret123", NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1700,4 +1792,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_ndjson_import_export);
   RUN_TEST(test_http_server_rerank_endpoint);
   RUN_TEST(test_http_server_exists_batch_and_radius_endpoint);
+  RUN_TEST(test_http_server_head_and_filtered_export);
 }

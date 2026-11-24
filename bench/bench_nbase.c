@@ -772,6 +772,8 @@ int main(void) {
   bench_distance_batch_metric("Batch Cosine", NBASE_METRIC_COSINE, 128U, 10000U, 200U);
   bench_distance_batch_metric("Batch InnerProd", NBASE_METRIC_INNER_PRODUCT, 128U, 10000U, 200U);
   bench_distance_batch_metric("Batch Manhattan", NBASE_METRIC_MANHATTAN, 128U, 10000U, 200U);
+  bench_distance_batch_metric("Batch Chebyshev", NBASE_METRIC_CHEBYSHEV, 128U, 10000U, 200U);
+  bench_distance_batch_metric("Batch Hamming", NBASE_METRIC_HAMMING, 128U, 10000U, 200U);
 
   printf("\n[HNSW Index Build & Search (M=16, efConstruction=200, efSearch=100)]\n");
   bench_hnsw_dataset(2000U, 128U, 20U);

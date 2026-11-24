@@ -938,7 +938,33 @@ class Lsh {
 
   void remove(uint64_t id) { detail::check(nbase_lsh_delete(ptr_, id)); }
 
+  void upsert(uint64_t id, const float *vec, uint32_t dim) {
+    detail::check(nbase_lsh_upsert(ptr_, id, vec, dim));
+  }
+
+  void upsert(uint64_t id, const std::vector<float> &vec) {
+    upsert(id, vec.data(), static_cast<uint32_t>(vec.size()));
+  }
+
+  std::vector<float> get(uint64_t id, uint32_t dim) const {
+    std::vector<float> out(dim);
+    detail::check(nbase_lsh_get(ptr_, id, out.data(), dim));
+    return out;
+  }
+
   bool contains(uint64_t id) const { return nbase_lsh_contains(ptr_, id); }
+
+  std::vector<uint64_t> list_ids(
+      uint64_t offset, uint32_t limit, uint64_t *out_total = nullptr) const {
+    std::vector<uint64_t> ids(limit);
+    uint32_t got = 0U;
+    detail::check(nbase_lsh_list_ids(
+        ptr_, offset, limit, limit > 0U ? ids.data() : nullptr, &got, out_total));
+    ids.resize(got);
+    return ids;
+  }
+
+  void compact() { detail::check(nbase_lsh_compact(ptr_)); }
 
   nbase_lsh_stats_t stats() const {
     nbase_lsh_stats_t s{};

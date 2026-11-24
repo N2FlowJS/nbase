@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-25
+
+Full 7/7 AVX2+FMA batch distance coverage (`chebyshev_batch_avx2`, `hamming_batch_avx2`), HNSW neighbor software prefetching, LSH CRUD & compaction parity (`upsert`, `get`, `list_ids`, `compact`), HTTP `HEAD` & filtered `POST /api/vectors/export`, CLI `exists` & `export --filter`, and cross-format binary fuzz testing.
+
+### Added
+- **SIMD Distance Kernels & HNSW Search (`src/distance.c`, `src/hnsw.c`)**:
+  - Added 4-row unrolled AVX2+FMA `chebyshev_batch_avx2` and `hamming_batch_avx2` batch kernels, completing 7/7 metrics with SIMD unrolling.
+  - Added guarded next-neighbor software prefetching (`__builtin_prefetch`) on visited marks and flat vector slots in HNSW `search_layer`.
+- **LSH CRUD & Compaction Parity (`src/lsh.c`, `include/nbase.h`, `include/nbase.hpp`)**:
+  - Added `nbase_lsh_upsert`, `nbase_lsh_get`, sorted paginated `nbase_lsh_list_ids`, and `nbase_lsh_compact` (compacting flat store tombstones and re-indexing buckets in place), with C++17 `Lsh::{upsert, get, list_ids, compact}`.
+- **HTTP/1.1 & CLI Tooling (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `HEAD /health`, `HEAD /api/vectors/:id`, CORS `HEAD` method support, and filtered/selective `POST /api/vectors/export`.
+  - Added `nbase-cli exists <dir> <id1,id2,...>` and `--filter <json>` option for `nbase-cli export`.
+- **Fuzz, Sanitizer & Benchmark Coverage (`tests/*.c`, `bench/bench_nbase.c`)**:
+  - Added `test_binary_formats_fuzz_corruption_and_truncation` across DB (`.nbv`, `.nbi`, `.nbm`, `.nbbm`), `.nblh`, `.nbcl`, `.nbiv`, `.nbsq`, `.nbbq`, plus `test_lsh_upsert_get_list_compact_and_tsan`, `test_http_server_head_and_filtered_export`, extended `test_distance_batch_unrolled_edges`, and `Batch Chebyshev` / `Batch Hamming` benchmarks.
+
 ## [1.8.0] - 2026-11-25
 
 Cosine & Manhattan 4-row AVX2+FMA batch unrolling, Clustered DB compaction & multi-threaded batch search, SIMD-batched graph relationship extraction fallback, HTTP batch existence / dedicated radius search endpoints, and CLI `search-meta` & `rerank` commands.

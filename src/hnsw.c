@@ -206,6 +206,17 @@ static nbase_status_t search_layer(
     if (level <= hnsw->levels[curr.slot] && hnsw->adj[curr.slot] != NULL) {
       const nbase_adj_t *list = &hnsw->adj[curr.slot][level];
       for (uint32_t i = 0U; i < list->len; i++) {
+#if defined(__GNUC__) || defined(__clang__)
+        if (i + 1U < list->len) {
+          uint32_t next_nb = list->neighbors[i + 1U];
+          if (next_nb < hnsw->node_count && next_nb < vis->cap) {
+            __builtin_prefetch(&vis->marks[next_nb], 0, 1);
+            if (next_nb < store->slot_count && hnsw->states[next_nb] != NBASE_SLOT_EMPTY) {
+              __builtin_prefetch(store->vectors + (size_t)next_nb * (size_t)store->dim, 0, 1);
+            }
+          }
+        }
+#endif
         uint32_t nb = list->neighbors[i];
         if (nb >= hnsw->node_count || visited_test_and_set(vis, nb)) {
           continue;

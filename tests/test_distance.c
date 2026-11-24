@@ -130,6 +130,8 @@ static void test_distance_batch_unrolled_edges(void) {
       NBASE_METRIC_COSINE,
       NBASE_METRIC_INNER_PRODUCT,
       NBASE_METRIC_MANHATTAN,
+      NBASE_METRIC_CHEBYSHEV,
+      NBASE_METRIC_HAMMING,
   };
 
   float *query = malloc(129U * sizeof(float));
@@ -138,6 +140,12 @@ static void test_distance_batch_unrolled_edges(void) {
   ASSERT_TRUE(query != NULL && vecs != NULL && dists != NULL);
   test_fill_vectors(query, 1U, 129U, 711ULL);
   test_fill_vectors(vecs, 17U, 129U, 722ULL);
+  /* Match every 3rd lane so Hamming covers mixed equal and distinct floats across dims. */
+  for (uint32_t n = 0U; n < 17U; n++) {
+    for (uint32_t i = 0U; i < 129U; i += 3U) {
+      vecs[(size_t)n * 129U + i] = query[i];
+    }
+  }
   /* Include a zero-norm candidate in slot 2 to verify Cosine denom == 0 edge case. */
   memset(vecs + 2U * 129U, 0, 129U * sizeof(float));
 

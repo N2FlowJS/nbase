@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 8
+#define NBASE_VERSION_MINOR 9
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -524,8 +524,18 @@ nbase_status_t nbase_lsh_create(const nbase_lsh_config_t *cfg, nbase_lsh_t **out
 void nbase_lsh_destroy(nbase_lsh_t *lsh);
 nbase_status_t nbase_lsh_add(nbase_lsh_t *lsh, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_lsh_add_batch(nbase_lsh_t *lsh, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
+nbase_status_t nbase_lsh_upsert(nbase_lsh_t *lsh, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id);
+nbase_status_t nbase_lsh_get(const nbase_lsh_t *lsh, uint64_t id, float *out_vec, uint32_t dim);
 bool nbase_lsh_contains(const nbase_lsh_t *lsh, uint64_t id);
+nbase_status_t nbase_lsh_list_ids(
+    const nbase_lsh_t *lsh,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total);
+nbase_status_t nbase_lsh_compact(nbase_lsh_t *lsh);
 nbase_status_t nbase_lsh_search(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_lsh_search_filtered(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_lsh_search_batch(

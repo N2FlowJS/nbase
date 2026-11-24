@@ -23,6 +23,7 @@ static void print_usage(const char *prog) {
       "  upsert <dir> <id> <v0,v1,...>\n"
       "  get <dir> <id>\n"
       "  get-batch <dir> <id1,id2,...>\n"
+      "  exists <dir> <id1,id2,...>\n"
       "  list <dir> [--offset <N>] [--limit <M>]\n"
       "  count <dir> [--filter <json>]\n"
       "  delete <dir> <id>\n"
@@ -47,7 +48,7 @@ static void print_usage(const char *prog) {
       "  compact <dir>\n"
       "  checkpoint <dir>\n"
       "  import <dir> <file.ndjson|-> [--threads <T>]\n"
-      "  export <dir> [file.ndjson|-]\n",
+      "  export <dir> [file.ndjson|-] [--filter <json>]\n",
       prog);
 }
 
@@ -79,6 +80,63 @@ static bool parse_u64(const char *s, uint64_t *out) {
     return false;
   }
   *out = (uint64_t)v;
+  return true;
+}
+
+static bool parse_u64_list_csv(const char *csv, uint64_t **out_ids, uint32_t *out_count) {
+  *out_ids = NULL;
+  *out_count = 0U;
+  if (!csv || csv[0] == '\0') {
+    fprintf(stderr, "Empty uint64 id list\n");
+    return false;
+  }
+  uint32_t cap = 16U;
+  uint32_t cnt = 0U;
+  uint64_t *ids = malloc((size_t)cap * sizeof(uint64_t));
+  if (!ids) {
+    return false;
+  }
+  const char *p = csv;
+  while (*p != '\0') {
+    const char *comma = strchr(p, ',');
+    size_t tok_len = comma ? (size_t)(comma - p) : strlen(p);
+    if (tok_len == 0U || tok_len >= 32U || cnt >= 100000U) {
+      free(ids);
+      fprintf(stderr, "Invalid uint64 id list: %s\n", csv);
+      return false;
+    }
+    char buf[32];
+    memcpy(buf, p, tok_len);
+    buf[tok_len] = '\0';
+    uint64_t id = 0ULL;
+    if (!parse_u64(buf, &id)) {
+      free(ids);
+      fprintf(stderr, "Invalid uint64 id: %s\n", buf);
+      return false;
+    }
+    if (cnt == cap) {
+      uint32_t new_cap = cap * 2U;
+      uint64_t *grown = realloc(ids, (size_t)new_cap * sizeof(uint64_t));
+      if (!grown) {
+        free(ids);
+        return false;
+      }
+      ids = grown;
+      cap = new_cap;
+    }
+    ids[cnt++] = id;
+    if (!comma) {
+      break;
+    }
+    p = comma + 1;
+    if (*p == '\0') {
+      free(ids);
+      fprintf(stderr, "Trailing comma in id list: %s\n", csv);
+      return false;
+    }
+  }
+  *out_ids = ids;
+  *out_count = cnt;
   return true;
 }
 
@@ -718,61 +776,18 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (strcmp(cmd, "get-batch") == 0 || strcmp(cmd, "delete-batch") == 0) {
+  if (strcmp(cmd, "get-batch") == 0 || strcmp(cmd, "delete-batch") == 0 ||
+      strcmp(cmd, "exists") == 0) {
     bool is_get = (strcmp(cmd, "get-batch") == 0);
+    bool is_exists = (strcmp(cmd, "exists") == 0);
     if (argc != 4 || argv[3][0] == '\0') {
       print_usage(argv[0]);
       return 1;
     }
-    const char *csv = argv[3];
-    uint32_t cap = 16U;
+    uint64_t *ids = NULL;
     uint32_t cnt = 0U;
-    uint64_t *ids = malloc((size_t)cap * sizeof(uint64_t));
-    if (!ids) {
+    if (!parse_u64_list_csv(argv[3], &ids, &cnt)) {
       return 1;
-    }
-    const char *p = csv;
-    while (*p != '\0') {
-      const char *comma = strchr(p, ',');
-      size_t tok_len = comma ? (size_t)(comma - p) : strlen(p);
-      if (tok_len == 0U || tok_len >= 32U) {
-        free(ids);
-        fprintf(stderr, "Invalid uint64 id list: %s\n", csv);
-        return 1;
-      }
-      char buf[32];
-      memcpy(buf, p, tok_len);
-      buf[tok_len] = '\0';
-      uint64_t id = 0ULL;
-      if (!parse_u64(buf, &id)) {
-        free(ids);
-        fprintf(stderr, "Invalid uint64 id: %s\n", buf);
-        return 1;
-      }
-      if (cnt == cap) {
-        if (cap > UINT32_MAX / 2U) {
-          free(ids);
-          return 1;
-        }
-        uint32_t new_cap = cap * 2U;
-        uint64_t *grown = realloc(ids, (size_t)new_cap * sizeof(uint64_t));
-        if (!grown) {
-          free(ids);
-          return 1;
-        }
-        ids = grown;
-        cap = new_cap;
-      }
-      ids[cnt++] = id;
-      if (!comma) {
-        break;
-      }
-      p = comma + 1;
-      if (*p == '\0') {
-        free(ids);
-        fprintf(stderr, "Trailing comma in id list: %s\n", csv);
-        return 1;
-      }
     }
 
     nbase_db_t *db = NULL;
@@ -781,6 +796,25 @@ int main(int argc, char **argv) {
       free(ids);
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
+    }
+
+    if (is_exists) {
+      uint32_t existing_cnt = 0U;
+      printf("{\"count\":%u,\"results\":[", cnt);
+      for (uint32_t i = 0U; i < cnt; i++) {
+        bool ex = nbase_contains(db, ids[i]);
+        if (ex) {
+          existing_cnt++;
+        }
+        printf(
+            i == 0U ? "{\"id\":%llu,\"exists\":%s}" : ",{\"id\":%llu,\"exists\":%s}",
+            (unsigned long long)ids[i],
+            ex ? "true" : "false");
+      }
+      printf("],\"existingCount\":%u}\n", existing_cnt);
+      nbase_close(db);
+      free(ids);
+      return 0;
     }
 
     if (is_get) {
@@ -2444,22 +2478,52 @@ int main(int argc, char **argv) {
   }
 
   if (strcmp(cmd, "export") == 0) {
-    if (argc < 3 || argc > 4) {
+    if (argc < 3) {
       print_usage(argv[0]);
       return 1;
     }
+    const char *out_path = NULL;
+    const char *flt_json = NULL;
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else if ((argv[i][0] != '-' || strcmp(argv[i], "-") == 0) && !out_path) {
+        out_path = argv[i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+    }
+
     nbase_db_t *db = NULL;
     nbase_status_t st = nbase_open(argv[2], &db);
     if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
     }
     nbase_stats_t s;
     (void)nbase_stats(db, &s);
 
-    FILE *out = (argc == 4 && strcmp(argv[3], "-") != 0) ? fopen(argv[3], "w") : stdout;
+    FILE *out = (out_path != NULL && strcmp(out_path, "-") != 0) ? fopen(out_path, "w") : stdout;
     if (!out) {
-      fprintf(stderr, "Failed to open output %s\n", argv[3]);
+      fprintf(stderr, "Failed to open output %s\n", out_path ? out_path : "stdout");
+      free(conds);
+      nbase_json_free(flt_root);
       nbase_close(db);
       return 1;
     }
@@ -2478,7 +2542,11 @@ int main(int argc, char **argv) {
         ok = false;
       } else {
         uint32_t got = 0U;
-        st = nbase_query_meta(db, NULL, limit, ids, &got);
+        st = nbase_query_meta(db, flt.count > 0U ? &flt : NULL, limit, ids, &got);
+        free(conds);
+        conds = NULL;
+        nbase_json_free(flt_root);
+        flt_root = NULL;
         if (st != NBASE_OK) {
           fprintf(stderr, "query failed: %s\n", nbase_strerror(st));
           ok = false;
@@ -2534,6 +2602,8 @@ int main(int argc, char **argv) {
     if (out != stdout) {
       fclose(out);
     }
+    free(conds);
+    nbase_json_free(flt_root);
     nbase_close(db);
     return ok ? 0 : 1;
   }

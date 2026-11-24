@@ -363,7 +363,7 @@ static void test_db_query_lru_cache_and_invalidation(void) {
 }
 
 static void test_db_upsert_batch_and_get_batch(void) {
-  ASSERT_TRUE(strcmp(nbase_version(), "1.8.0") == 0);
+  ASSERT_TRUE(strcmp(nbase_version(), "1.9.0") == 0);
 
   const uint32_t dim = 3U;
   char dir[256];
@@ -560,6 +560,262 @@ static void test_db_count_filtered_and_unfiltered(void) {
   nbase_close(db);
 }
 
+static bool fuzz_file_len(const char *path, long *out_len) {
+  FILE *fp = fopen(path, "rb");
+  if (!fp) {
+    return false;
+  }
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    return false;
+  }
+  long sz = ftell(fp);
+  fclose(fp);
+  if (sz < 0) {
+    return false;
+  }
+  *out_len = sz;
+  return true;
+}
+
+static bool fuzz_copy_file(const char *src, const char *dst, long max_bytes) {
+  FILE *in = fopen(src, "rb");
+  if (!in) {
+    return false;
+  }
+  FILE *out = fopen(dst, "wb");
+  if (!out) {
+    fclose(in);
+    return false;
+  }
+  char buf[4096];
+  long rem = max_bytes;
+  bool ok = true;
+  while (max_bytes < 0L || rem > 0L) {
+    size_t want = sizeof(buf);
+    if (max_bytes >= 0L && (size_t)rem < want) {
+      want = (size_t)rem;
+    }
+    size_t n = fread(buf, 1U, want, in);
+    if (n == 0U) {
+      break;
+    }
+    if (fwrite(buf, 1U, n, out) != n) {
+      ok = false;
+      break;
+    }
+    if (max_bytes >= 0L) {
+      rem -= (long)n;
+    }
+  }
+  fclose(in);
+  fclose(out);
+  return ok;
+}
+
+static void fuzz_verify_standalone_format(
+    const char *orig_path,
+    const char *work_path,
+    nbase_status_t (*try_load)(const char *)) {
+  long fsz = 0L;
+  ASSERT_TRUE(fuzz_file_len(orig_path, &fsz));
+  ASSERT_TRUE(fsz >= 128L);
+
+  const long truncs[5] = {0L, 16L, 64L, 127L, fsz - 1L};
+  for (size_t ti = 0; ti < 5; ti++) {
+    ASSERT_TRUE(fuzz_copy_file(orig_path, work_path, truncs[ti]));
+    ASSERT_TRUE(try_load(work_path) != NBASE_OK);
+  }
+  if (fsz > 140L) {
+    ASSERT_TRUE(fuzz_copy_file(orig_path, work_path, 128L + (fsz - 128L) / 2L));
+    ASSERT_TRUE(try_load(work_path) != NBASE_OK);
+  }
+
+  const long flips[3] = {16L, 128L < fsz ? 128L : 32L, fsz - 4L};
+  for (size_t fi = 0; fi < 3; fi++) {
+    ASSERT_TRUE(fuzz_copy_file(orig_path, work_path, -1L));
+    ASSERT_TRUE(test_flip_file_byte(work_path, flips[fi]));
+    ASSERT_TRUE(try_load(work_path) != NBASE_OK);
+  }
+}
+
+static nbase_status_t fuzz_try_load_lsh(const char *path) {
+  nbase_lsh_t *p = NULL;
+  nbase_status_t st = nbase_lsh_load(path, &p);
+  if (p != NULL) {
+    nbase_lsh_destroy(p);
+    return NBASE_OK;
+  }
+  return st;
+}
+
+static nbase_status_t fuzz_try_load_clustered(const char *path) {
+  nbase_clustered_t *p = NULL;
+  nbase_status_t st = nbase_clustered_load(path, &p);
+  if (p != NULL) {
+    nbase_clustered_destroy(p);
+    return NBASE_OK;
+  }
+  return st;
+}
+
+static nbase_status_t fuzz_try_load_ivfpq(const char *path) {
+  nbase_ivfpq_t *p = NULL;
+  nbase_status_t st = nbase_ivfpq_load(path, &p);
+  if (p != NULL) {
+    nbase_ivfpq_destroy(p);
+    return NBASE_OK;
+  }
+  return st;
+}
+
+static nbase_status_t fuzz_try_load_sq8(const char *path) {
+  nbase_sq8_t *p = NULL;
+  nbase_status_t st = nbase_sq8_load(path, &p);
+  if (p != NULL) {
+    nbase_sq8_destroy(p);
+    return NBASE_OK;
+  }
+  return st;
+}
+
+static nbase_status_t fuzz_try_load_bq(const char *path) {
+  nbase_bq_t *p = NULL;
+  nbase_status_t st = nbase_bq_load(path, &p);
+  if (p != NULL) {
+    nbase_bq_destroy(p);
+    return NBASE_OK;
+  }
+  return st;
+}
+
+static void test_binary_formats_fuzz_corruption_and_truncation(void) {
+  char orig_dir[256];
+  char fuzz_dir[256];
+  ASSERT_TRUE(test_make_tmpdir(orig_dir, sizeof(orig_dir)));
+  ASSERT_TRUE(test_make_tmpdir(fuzz_dir, sizeof(fuzz_dir)));
+
+  const uint32_t dim = 16U;
+  const uint32_t n = 32U;
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL);
+  test_fill_vectors(vecs, n, dim, 9911ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = (uint64_t)i + 1ULL;
+  }
+
+  /* 1. Embedded DB directory snapshot (vectors.nbv, hnsw.nbi, meta.nbm, bm25.nbbm) */
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = true;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, n, dim, 1U), NBASE_OK);
+  nbase_meta_field_t fld = {"tag", {.type = NBASE_META_STRING, .as = {.str = "fuzz"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 1ULL, &fld, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 1ULL, "fuzz test bm25 snapshot"), NBASE_OK);
+  ASSERT_STATUS(nbase_save(db, orig_dir), NBASE_OK);
+  nbase_close(db);
+
+  static const char *db_files[4] = {"vectors.nbv", "hnsw.nbi", "meta.nbm", "bm25.nbbm"};
+  for (size_t target = 0; target < 4; target++) {
+    for (size_t c = 0; c < 4; c++) {
+      char sp[300], dp[300];
+      snprintf(sp, sizeof(sp), "%s/%s", orig_dir, db_files[c]);
+      snprintf(dp, sizeof(dp), "%s/%s", fuzz_dir, db_files[c]);
+      ASSERT_TRUE(fuzz_copy_file(sp, dp, -1L));
+    }
+    char tpath[300], opath[300];
+    snprintf(opath, sizeof(opath), "%s/%s", orig_dir, db_files[target]);
+    snprintf(tpath, sizeof(tpath), "%s/%s", fuzz_dir, db_files[target]);
+    long fsz = 0L;
+    ASSERT_TRUE(fuzz_file_len(opath, &fsz));
+
+    ASSERT_TRUE(fuzz_copy_file(opath, tpath, 32L));
+    nbase_db_t *bad_db = NULL;
+    ASSERT_TRUE(nbase_open(fuzz_dir, &bad_db) != NBASE_OK);
+    ASSERT_TRUE(bad_db == NULL);
+
+    ASSERT_TRUE(fuzz_copy_file(opath, tpath, fsz > 1L ? fsz - 1L : 0L));
+    ASSERT_TRUE(nbase_open(fuzz_dir, &bad_db) != NBASE_OK);
+    ASSERT_TRUE(bad_db == NULL);
+
+    ASSERT_TRUE(fuzz_copy_file(opath, tpath, -1L));
+    ASSERT_TRUE(test_flip_file_byte(tpath, 16L));
+    ASSERT_TRUE(nbase_open(fuzz_dir, &bad_db) != NBASE_OK);
+    ASSERT_TRUE(bad_db == NULL);
+
+    if (fsz > 132L) {
+      ASSERT_TRUE(fuzz_copy_file(opath, tpath, -1L));
+      ASSERT_TRUE(test_flip_file_byte(tpath, fsz - 4L));
+      ASSERT_TRUE(nbase_open(fuzz_dir, &bad_db) != NBASE_OK);
+      ASSERT_TRUE(bad_db == NULL);
+    }
+  }
+
+  /* 2. LSH (.nblh) */
+  char p_orig[300], p_work[300];
+  nbase_lsh_config_t lcfg = nbase_lsh_config_default(dim);
+  lcfg.num_tables = 4U;
+  lcfg.num_bits = 6U;
+  nbase_lsh_t *lsh = NULL;
+  ASSERT_STATUS(nbase_lsh_create(&lcfg, &lsh), NBASE_OK);
+  ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids, vecs, n, dim), NBASE_OK);
+  snprintf(p_orig, sizeof(p_orig), "%s/idx.nblh", orig_dir);
+  snprintf(p_work, sizeof(p_work), "%s/idx.nblh", fuzz_dir);
+  ASSERT_STATUS(nbase_lsh_save(lsh, p_orig), NBASE_OK);
+  nbase_lsh_destroy(lsh);
+  fuzz_verify_standalone_format(p_orig, p_work, fuzz_try_load_lsh);
+
+  /* 3. Clustered (.nbcl) */
+  nbase_clustered_config_t clcfg = nbase_clustered_config_default(dim);
+  clcfg.target_cluster_size = 8U;
+  nbase_clustered_t *cl = NULL;
+  ASSERT_STATUS(nbase_clustered_create(&clcfg, &cl), NBASE_OK);
+  ASSERT_STATUS(nbase_clustered_add_batch(cl, ids, vecs, n, dim), NBASE_OK);
+  snprintf(p_orig, sizeof(p_orig), "%s/idx.nbcl", orig_dir);
+  snprintf(p_work, sizeof(p_work), "%s/idx.nbcl", fuzz_dir);
+  ASSERT_STATUS(nbase_clustered_save(cl, p_orig), NBASE_OK);
+  nbase_clustered_destroy(cl);
+  fuzz_verify_standalone_format(p_orig, p_work, fuzz_try_load_clustered);
+
+  /* 4. IVF-PQ (.nbiv) */
+  nbase_ivfpq_config_t icfg = nbase_ivfpq_config_default(dim, 4U, 4U);
+  icfg.num_centroids = 4U;
+  icfg.max_iters = 5U;
+  nbase_ivfpq_t *ivf = NULL;
+  ASSERT_STATUS(nbase_ivfpq_train(&icfg, vecs, n, &ivf), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_add(ivf, ids, vecs, n), NBASE_OK);
+  snprintf(p_orig, sizeof(p_orig), "%s/idx.nbiv", orig_dir);
+  snprintf(p_work, sizeof(p_work), "%s/idx.nbiv", fuzz_dir);
+  ASSERT_STATUS(nbase_ivfpq_save(ivf, p_orig), NBASE_OK);
+  nbase_ivfpq_destroy(ivf);
+  fuzz_verify_standalone_format(p_orig, p_work, fuzz_try_load_ivfpq);
+
+  /* 5. SQ8 (.nbsq) */
+  nbase_sq8_t *sq8 = NULL;
+  ASSERT_STATUS(nbase_sq8_train(vecs, n, dim, &sq8), NBASE_OK);
+  snprintf(p_orig, sizeof(p_orig), "%s/idx.nbsq", orig_dir);
+  snprintf(p_work, sizeof(p_work), "%s/idx.nbsq", fuzz_dir);
+  ASSERT_STATUS(nbase_sq8_save(sq8, p_orig), NBASE_OK);
+  nbase_sq8_destroy(sq8);
+  fuzz_verify_standalone_format(p_orig, p_work, fuzz_try_load_sq8);
+
+  /* 6. BQ (.nbbq) */
+  nbase_bq_t *bq = NULL;
+  ASSERT_STATUS(nbase_bq_train(vecs, n, dim, &bq), NBASE_OK);
+  snprintf(p_orig, sizeof(p_orig), "%s/idx.nbbq", orig_dir);
+  snprintf(p_work, sizeof(p_work), "%s/idx.nbbq", fuzz_dir);
+  ASSERT_STATUS(nbase_bq_save(bq, p_orig), NBASE_OK);
+  nbase_bq_destroy(bq);
+  fuzz_verify_standalone_format(p_orig, p_work, fuzz_try_load_bq);
+
+  free(ids);
+  free(vecs);
+  test_rm_rf(orig_dir);
+  test_rm_rf(fuzz_dir);
+}
+
 void test_db_run(void) {
   RUN_TEST(test_db_upsert_with_and_without_hnsw);
   RUN_TEST(test_db_batch_search);
@@ -570,4 +826,5 @@ void test_db_run(void) {
   RUN_TEST(test_db_upsert_batch_and_get_batch);
   RUN_TEST(test_db_list_ids_and_search_radius);
   RUN_TEST(test_db_count_filtered_and_unfiltered);
+  RUN_TEST(test_binary_formats_fuzz_corruption_and_truncation);
 }

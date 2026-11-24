@@ -608,6 +608,117 @@ static __attribute__((target("avx2,fma"))) void manhattan_batch_avx2(
   }
 }
 
+static __attribute__((target("avx2,fma"))) void chebyshev_batch_avx2(
+    const float *query,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  const __m256 abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+  uint32_t n = 0U;
+  for (; n + 4U <= count; n += 4U) {
+    const float *v0 = vectors + (size_t)n * (size_t)dim;
+    const float *v1 = vectors + (size_t)(n + 1U) * (size_t)dim;
+    const float *v2 = vectors + (size_t)(n + 2U) * (size_t)dim;
+    const float *v3 = vectors + (size_t)(n + 3U) * (size_t)dim;
+    __m256 m0 = _mm256_setzero_ps();
+    __m256 m1 = _mm256_setzero_ps();
+    __m256 m2 = _mm256_setzero_ps();
+    __m256 m3 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      m0 = _mm256_max_ps(m0, _mm256_and_ps(_mm256_sub_ps(vq, _mm256_loadu_ps(v0 + i)), abs_mask));
+      m1 = _mm256_max_ps(m1, _mm256_and_ps(_mm256_sub_ps(vq, _mm256_loadu_ps(v1 + i)), abs_mask));
+      m2 = _mm256_max_ps(m2, _mm256_and_ps(_mm256_sub_ps(vq, _mm256_loadu_ps(v2 + i)), abs_mask));
+      m3 = _mm256_max_ps(m3, _mm256_and_ps(_mm256_sub_ps(vq, _mm256_loadu_ps(v3 + i)), abs_mask));
+    }
+    float r0 = hmax256_ps(m0);
+    float r1 = hmax256_ps(m1);
+    float r2 = hmax256_ps(m2);
+    float r3 = hmax256_ps(m3);
+    for (; i < dim; i++) {
+      float q = query[i];
+      float d0 = fabsf(q - v0[i]);
+      float d1 = fabsf(q - v1[i]);
+      float d2 = fabsf(q - v2[i]);
+      float d3 = fabsf(q - v3[i]);
+      if (d0 > r0) {
+        r0 = d0;
+      }
+      if (d1 > r1) {
+        r1 = d1;
+      }
+      if (d2 > r2) {
+        r2 = d2;
+      }
+      if (d3 > r3) {
+        r3 = d3;
+      }
+    }
+    out_distances[n] = r0;
+    out_distances[n + 1U] = r1;
+    out_distances[n + 2U] = r2;
+    out_distances[n + 3U] = r3;
+  }
+  for (; n < count; n++) {
+    out_distances[n] = chebyshev_avx2(query, vectors + (size_t)n * (size_t)dim, dim);
+  }
+}
+
+static __attribute__((target("avx2,fma"))) void hamming_batch_avx2(
+    const float *query,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  uint32_t n = 0U;
+  for (; n + 4U <= count; n += 4U) {
+    const float *v0 = vectors + (size_t)n * (size_t)dim;
+    const float *v1 = vectors + (size_t)(n + 1U) * (size_t)dim;
+    const float *v2 = vectors + (size_t)(n + 2U) * (size_t)dim;
+    const float *v3 = vectors + (size_t)(n + 3U) * (size_t)dim;
+    uint32_t c0 = 0U;
+    uint32_t c1 = 0U;
+    uint32_t c2 = 0U;
+    uint32_t c3 = 0U;
+    uint32_t i = 0U;
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      c0 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
+          _mm256_cmp_ps(vq, _mm256_loadu_ps(v0 + i), _CMP_NEQ_UQ)));
+      c1 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
+          _mm256_cmp_ps(vq, _mm256_loadu_ps(v1 + i), _CMP_NEQ_UQ)));
+      c2 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
+          _mm256_cmp_ps(vq, _mm256_loadu_ps(v2 + i), _CMP_NEQ_UQ)));
+      c3 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
+          _mm256_cmp_ps(vq, _mm256_loadu_ps(v3 + i), _CMP_NEQ_UQ)));
+    }
+    for (; i < dim; i++) {
+      float q = query[i];
+      if (q != v0[i]) {
+        c0++;
+      }
+      if (q != v1[i]) {
+        c1++;
+      }
+      if (q != v2[i]) {
+        c2++;
+      }
+      if (q != v3[i]) {
+        c3++;
+      }
+    }
+    out_distances[n] = (float)c0;
+    out_distances[n + 1U] = (float)c1;
+    out_distances[n + 2U] = (float)c2;
+    out_distances[n + 3U] = (float)c3;
+  }
+  for (; n < count; n++) {
+    out_distances[n] = hamming_avx2(query, vectors + (size_t)n * (size_t)dim, dim);
+  }
+}
+
 static __attribute__((target("avx2,fma"))) void distance_batch_avx2(
     nbase_metric_t metric,
     const float *query,
@@ -632,14 +743,10 @@ static __attribute__((target("avx2,fma"))) void distance_batch_avx2(
       manhattan_batch_avx2(query, vectors, count, dim, out_distances);
       break;
     case NBASE_METRIC_CHEBYSHEV:
-      for (uint32_t n = 0U; n < count; n++) {
-        out_distances[n] = chebyshev_avx2(query, vectors + (size_t)n * (size_t)dim, dim);
-      }
+      chebyshev_batch_avx2(query, vectors, count, dim, out_distances);
       break;
     case NBASE_METRIC_HAMMING:
-      for (uint32_t n = 0U; n < count; n++) {
-        out_distances[n] = hamming_avx2(query, vectors + (size_t)n * (size_t)dim, dim);
-      }
+      hamming_batch_avx2(query, vectors, count, dim, out_distances);
       break;
     default:
       euclidean_batch_avx2(query, vectors, count, dim, out_distances);

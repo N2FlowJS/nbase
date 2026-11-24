@@ -412,6 +412,29 @@ nbase_status_t nbase_lsh_add_batch(
   return st;
 }
 
+nbase_status_t nbase_lsh_upsert(nbase_lsh_t *lsh, uint64_t id, const float *vec, uint32_t dim) {
+  if (!lsh || !vec) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (dim != lsh->dim) {
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  if (!nbase_vec_is_finite(vec, dim)) {
+    return NBASE_ERR_INVALID_VECTOR;
+  }
+  pthread_rwlock_wrlock(&lsh->rwlock);
+  if (nbase_store_find_slot(lsh->store, id, NULL)) {
+    nbase_status_t dst = lsh_delete_unlocked(lsh, id);
+    if (dst != NBASE_OK) {
+      pthread_rwlock_unlock(&lsh->rwlock);
+      return dst;
+    }
+  }
+  nbase_status_t st = lsh_add_unlocked(lsh, id, vec, dim);
+  pthread_rwlock_unlock(&lsh->rwlock);
+  return st;
+}
+
 nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id) {
   if (!lsh) {
     return NBASE_ERR_INVALID_ARG;
@@ -419,6 +442,32 @@ nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id) {
   pthread_rwlock_wrlock(&lsh->rwlock);
   nbase_status_t st = lsh_delete_unlocked(lsh, id);
   pthread_rwlock_unlock(&lsh->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_lsh_get(const nbase_lsh_t *lsh, uint64_t id, float *out_vec, uint32_t dim) {
+  if (!lsh || !out_vec) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  nbase_lsh_t *mutable_lsh = (nbase_lsh_t *)(uintptr_t)lsh;
+  pthread_rwlock_rdlock(&mutable_lsh->rwlock);
+  nbase_status_t st = NBASE_OK;
+  if (dim != lsh->dim) {
+    st = NBASE_ERR_DIM_MISMATCH;
+  } else {
+    uint32_t slot = NBASE_INVALID_SLOT;
+    if (!nbase_store_find_slot(lsh->store, id, &slot)) {
+      st = NBASE_ERR_NOT_FOUND;
+    } else {
+      const float *v = nbase_store_get_vector(lsh->store, slot);
+      if (!v) {
+        st = NBASE_ERR_NOT_FOUND;
+      } else {
+        memcpy(out_vec, v, (size_t)dim * sizeof(float));
+      }
+    }
+  }
+  pthread_rwlock_unlock(&mutable_lsh->rwlock);
   return st;
 }
 
@@ -431,6 +480,121 @@ bool nbase_lsh_contains(const nbase_lsh_t *lsh, uint64_t id) {
   bool found = nbase_store_find_slot(lsh->store, id, NULL);
   pthread_rwlock_unlock(&mutable_lsh->rwlock);
   return found;
+}
+
+nbase_status_t nbase_lsh_list_ids(
+    const nbase_lsh_t *lsh,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total) {
+  if (!lsh || !out_count || (limit > 0U && !out_ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  if (out_total) {
+    *out_total = 0ULL;
+  }
+  nbase_lsh_t *mutable_lsh = (nbase_lsh_t *)(uintptr_t)lsh;
+  pthread_rwlock_rdlock(&mutable_lsh->rwlock);
+  uint64_t active = lsh->store->active_count;
+  if (out_total) {
+    *out_total = active;
+  }
+  if (active == 0ULL || limit == 0U || offset >= active) {
+    pthread_rwlock_unlock(&mutable_lsh->rwlock);
+    return NBASE_OK;
+  }
+  if (active > (uint64_t)(SIZE_MAX / sizeof(uint64_t))) {
+    pthread_rwlock_unlock(&mutable_lsh->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+  uint64_t *all = malloc((size_t)active * sizeof(uint64_t));
+  if (!all) {
+    pthread_rwlock_unlock(&mutable_lsh->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+  uint64_t pos = 0ULL;
+  for (uint32_t s = 0U; s < lsh->store->slot_count && pos < active; s++) {
+    if (lsh->store->slot_flags[s] == NBASE_SLOT_ACTIVE) {
+      all[pos++] = lsh->store->ids[s];
+    }
+  }
+  pthread_rwlock_unlock(&mutable_lsh->rwlock);
+
+  if (pos > 1ULL) {
+    qsort(all, (size_t)pos, sizeof(uint64_t), cmp_lsh_u64_asc);
+  }
+  if (out_total) {
+    *out_total = pos;
+  }
+  uint64_t rem = (offset < pos) ? (pos - offset) : 0ULL;
+  uint32_t copy_n = (rem > (uint64_t)limit) ? limit : (uint32_t)rem;
+  if (copy_n > 0U) {
+    memcpy(out_ids, all + offset, (size_t)copy_n * sizeof(uint64_t));
+  }
+  *out_count = copy_n;
+  free(all);
+  return NBASE_OK;
+}
+
+nbase_status_t nbase_lsh_compact(nbase_lsh_t *lsh) {
+  if (!lsh) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  pthread_rwlock_wrlock(&lsh->rwlock);
+  if (lsh->store->tombstone_count == 0ULL) {
+    pthread_rwlock_unlock(&lsh->rwlock);
+    return NBASE_OK;
+  }
+
+  nbase_status_t st = nbase_store_compact(lsh->store);
+  if (st != NBASE_OK) {
+    pthread_rwlock_unlock(&lsh->rwlock);
+    return st;
+  }
+
+  size_t total = (size_t)lsh->num_tables * (size_t)lsh->num_buckets;
+  for (size_t bi = 0U; bi < total; bi++) {
+    lsh->buckets[bi].len = 0U;
+  }
+
+  float ip_dists[NBASE_LSH_MAX_TABLES * NBASE_LSH_MAX_BITS] = {0.0f};
+  for (uint32_t slot = 0U; slot < lsh->store->slot_count; slot++) {
+    if (lsh->store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
+      continue;
+    }
+    const float *v = nbase_store_get_vector(lsh->store, slot);
+    if (!v) {
+      continue;
+    }
+    st = lsh_compute_all_ip_dists(lsh, v, ip_dists);
+    if (st != NBASE_OK) {
+      pthread_rwlock_unlock(&lsh->rwlock);
+      return st;
+    }
+    for (uint32_t t = 0U; t < lsh->num_tables; t++) {
+      uint32_t h = lsh_hash_from_ip_dists(
+          lsh, t, ip_dists + (size_t)t * (size_t)lsh->num_bits, NULL);
+      st = bucket_push(&lsh->buckets[(size_t)t * (size_t)lsh->num_buckets + h], slot);
+      if (st != NBASE_OK) {
+        pthread_rwlock_unlock(&lsh->rwlock);
+        return st;
+      }
+    }
+  }
+
+  for (size_t bi = 0U; bi < total; bi++) {
+    if (lsh->buckets[bi].len == 0U && lsh->buckets[bi].slots != NULL) {
+      free(lsh->buckets[bi].slots);
+      lsh->buckets[bi].slots = NULL;
+      lsh->buckets[bi].cap = 0U;
+    }
+  }
+
+  pthread_rwlock_unlock(&lsh->rwlock);
+  return NBASE_OK;
 }
 
 static nbase_status_t lsh_search_filtered_unlocked(
