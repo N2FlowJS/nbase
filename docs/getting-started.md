@@ -1,4 +1,4 @@
-# Getting Started with NBase (`v1.1.0`)
+# Getting Started with NBase (`v1.2.0`)
 
 Build and install `libnbase` once (see [Installation Guide](installation.md)), or run the compiled binaries directly from your build/install directory.
 

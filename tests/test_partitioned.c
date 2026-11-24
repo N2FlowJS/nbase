@@ -340,9 +340,54 @@ static void test_pdb_upsert_batch_get_batch_and_rerank(void) {
   test_rm_rf(dir);
 }
 
+static void test_pdb_list_ids_and_search_radius(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(3U);
+  cfg.partition_capacity = 2U;
+  cfg.max_active_partitions = 1U;
+  cfg.enable_hnsw = false;
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  uint64_t ids[5] = {50ULL, 10ULL, 30ULL, 20ULL, 40ULL};
+  float vecs[15] = {
+      1.0f, 0.0f, 0.0f,
+      1.02f, 0.0f, 0.0f,
+      1.15f, 0.0f, 0.0f,
+      3.0f, 0.0f, 0.0f,
+      4.0f, 0.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_pdb_add_batch(pdb, ids, vecs, 5U, 3U, 2U), NBASE_OK);
+
+  uint64_t page[2] = {0ULL, 0ULL};
+  uint32_t cnt = 0U;
+  uint64_t total = 0ULL;
+  ASSERT_STATUS(nbase_pdb_list_ids(pdb, 2ULL, 2U, page, &cnt, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 5ULL);
+  ASSERT_EQ_U64(cnt, 2ULL);
+  ASSERT_EQ_U64(page[0], 30ULL);
+  ASSERT_EQ_U64(page[1], 40ULL);
+
+  float q[3] = {1.0f, 0.0f, 0.0f};
+  nbase_pdb_search_opts_t sopts = nbase_pdb_search_opts_default();
+  sopts.search_all_partitions = true;
+  nbase_result_t hits[5];
+  ASSERT_STATUS(nbase_pdb_search_radius(pdb, q, 3U, 0.2f, 5U, &sopts, hits, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 3ULL);
+  ASSERT_EQ_U64(hits[0].id, 50ULL);
+  ASSERT_EQ_U64(hits[1].id, 10ULL);
+  ASSERT_EQ_U64(hits[2].id, 30ULL);
+
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
   RUN_TEST(test_pdb_delete_batch_filter_search_batch_and_graph);
   RUN_TEST(test_pdb_upsert_batch_get_batch_and_rerank);
+  RUN_TEST(test_pdb_list_ids_and_search_radius);
 }

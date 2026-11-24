@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-24
+
+Feature increment adding radius/range search, paginated deterministic ID listing, HTTP `GET /api/vectors` pagination, CLI `list` & `--max-distance`, and filtered/SIMD approximate indexes.
+
+### Added
+- **Radius / Range Search (`nbase_search_radius`, `nbase_pdb_search_radius`)**:
+  - Added exact SIMD-accelerated and HNSW-mode radius search (`nbase_store_exact_search_radius`, `nbase_search_radius`, `nbase_pdb_search_radius`) supporting metadata/predicate filters, metric overrides, and negative finite inner-product radii.
+  - Added optional `"maxDistance"` support in `POST /api/search` and `--max-distance <D>` in `nbase-cli search`.
+- **Paginated ID Enumeration (`nbase_list_ids`, `nbase_pdb_list_ids`)**:
+  - Added sorted active vector ID pagination (`offset`, `limit`, `total`) for both single and partitioned DBs (without reloading evicted partitions from disk).
+  - Added `GET /api/vectors?offset=0&limit=50&includeVectors=...&includeMetadata=...&includeText=...` in `src/http_server.c` and `nbase-cli list <dir> [--offset <N>] [--limit <M>]`.
+- **Filtered Approximate Indexes & SIMD Coarse Quantization (`src/ivfpq.c`, `src/lsh.c`)**:
+  - Added `nbase_ivfpq_search_filtered` and `nbase_lsh_search_filtered`, plus corresponding C++17 methods in `include/nbase.hpp` (`Database`, `PartitionedDatabase`, `IvfPq`, `Lsh`).
+  - Replaced scalar IVF-PQ coarse L2/dot loops with runtime-dispatched AVX2+FMA/NEON `nbase_get_distance_fn` kernels.
+
 ## [1.1.0] - 2026-11-23
 
 Feature completeness update adding thread-safe clustered indexing enhancements, high-throughput batch upsert/get & partitioned reranking, HTTP bulk upsert/get endpoints, CLI commands, and aligned shared library `SOVERSION`.

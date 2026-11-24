@@ -495,6 +495,7 @@ nbase_status_t nbase_store_compact(nbase_store_t *store);
 bool nbase_store_find_slot(const nbase_store_t *store, uint64_t id, uint32_t *out_slot);
 const float *nbase_store_get_vector(const nbase_store_t *store, uint32_t slot);
 nbase_status_t nbase_store_exact_search(const nbase_store_t *store, const float *query, uint32_t k, nbase_metric_t metric, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_store_exact_search_radius(const nbase_store_t *store, const float *query, uint32_t k, float max_distance, nbase_metric_t metric, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_store_save(const nbase_store_t *store, const char *file_path);
 nbase_status_t nbase_store_load(const char *file_path, bool mmap_mode, nbase_store_t **out_store);
 uint64_t nbase_store_memory_bytes(const nbase_store_t *store);

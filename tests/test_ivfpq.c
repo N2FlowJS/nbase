@@ -2,6 +2,11 @@
 
 #include <stdio.h>
 
+static bool ivfpq_even_filter(uint64_t id, void *ctx) {
+  (void)ctx;
+  return (id % 2ULL) == 0ULL;
+}
+
 static void make_clustered_vectors(
     float *out,
     uint32_t clusters,
@@ -72,6 +77,17 @@ static void test_ivfpq_train_add_search_euclidean_and_save_load(void) {
   }
   double recall = test_recall_at(hits, hit_cnt, oracle, oracle_cnt, 10U);
   ASSERT_TRUE(recall >= 0.6);
+
+  /* Filtered IVF-PQ search keeps only even IDs */
+  nbase_result_t fhits[10];
+  uint32_t fcnt = 0U;
+  ASSERT_STATUS(
+      nbase_ivfpq_search_filtered(idx, query, 10U, 4U, ivfpq_even_filter, NULL, fhits, &fcnt),
+      NBASE_OK);
+  ASSERT_TRUE(fcnt > 0U);
+  for (uint32_t i = 0U; i < fcnt; i++) {
+    ASSERT_TRUE((fhits[i].id % 2ULL) == 0ULL);
+  }
 
   ASSERT_STATUS(nbase_ivfpq_save(idx, path), NBASE_OK);
   nbase_ivfpq_destroy(idx);

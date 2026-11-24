@@ -14,7 +14,7 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 
 ## Version, Diagnostics & Distance
 
-- `const char *nbase_version(void);` -> `"1.1.0"`
+- `const char *nbase_version(void);` -> `"1.2.0"`
 - `const char *nbase_strerror(nbase_status_t status);`
 - `const char *nbase_simd_backend(void);` -> `"avx2+fma"`, `"neon"`, or `"scalar"`
 - `nbase_config_t nbase_config_default(uint32_t dim);` (`initial_capacity=64`, `enable_hnsw=true`, `hnsw_m=16`, `hnsw_ef_construction=200`, `hnsw_ef_search=50`, `cache_capacity=0`)
@@ -28,11 +28,11 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
   - `nbase_create`, `nbase_open`, `nbase_open_mmap`, `nbase_open_wal`
   - `nbase_wal_enable`, `nbase_wal_checkpoint`, `nbase_save`, `nbase_close`
 - **Vectors & Batch Operations**:
-  - `nbase_add`, `nbase_add_batch`, `nbase_upsert`, `nbase_upsert_batch`, `nbase_delete`, `nbase_delete_batch`, `nbase_delete_by_filter`, `nbase_get`, `nbase_get_batch`, `nbase_contains`
+  - `nbase_add`, `nbase_add_batch`, `nbase_upsert`, `nbase_upsert_batch`, `nbase_delete`, `nbase_delete_batch`, `nbase_delete_by_filter`, `nbase_get`, `nbase_get_batch`, `nbase_contains`, `nbase_list_ids`
 - **Metadata**:
   - `nbase_set_meta`, `nbase_update_meta`, `nbase_get_meta`, `nbase_delete_meta`, `nbase_foreach_meta`, `nbase_query_meta`
 - **Vector, Text & Hybrid Search**:
-  - `nbase_search`, `nbase_find_similar`, `nbase_search_batch`
+  - `nbase_search`, `nbase_search_radius`, `nbase_find_similar`, `nbase_search_batch`
   - `nbase_set_text`, `nbase_get_text`, `nbase_delete_text`, `nbase_search_text`, `nbase_search_hybrid`
 - **Index Maintenance, Query Cache & Telemetry**:
   - `nbase_rebuild_hnsw`, `nbase_rebuild_hnsw_mt`, `nbase_compact`
@@ -49,10 +49,10 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 ## Multi-Partition DB (`nbase_pdb_t`)
 
 - `nbase_pdb_config_default`, `nbase_pdb_search_opts_default`, `nbase_pdb_open`, `nbase_pdb_save`, `nbase_pdb_close`
-- `nbase_pdb_add`, `nbase_pdb_add_batch`, `nbase_pdb_upsert`, `nbase_pdb_upsert_batch`, `nbase_pdb_delete`, `nbase_pdb_delete_batch`, `nbase_pdb_delete_by_filter`, `nbase_pdb_get`, `nbase_pdb_get_batch`, `nbase_pdb_contains`
+- `nbase_pdb_add`, `nbase_pdb_add_batch`, `nbase_pdb_upsert`, `nbase_pdb_upsert_batch`, `nbase_pdb_delete`, `nbase_pdb_delete_batch`, `nbase_pdb_delete_by_filter`, `nbase_pdb_get`, `nbase_pdb_get_batch`, `nbase_pdb_contains`, `nbase_pdb_list_ids`
 - `nbase_pdb_set_meta`, `nbase_pdb_update_meta`, `nbase_pdb_get_meta`, `nbase_pdb_delete_meta`, `nbase_pdb_foreach_meta`, `nbase_pdb_query_meta`
 - `nbase_pdb_set_text`, `nbase_pdb_get_text`, `nbase_pdb_delete_text`
-- `nbase_pdb_search`, `nbase_pdb_search_batch`, `nbase_pdb_search_text`, `nbase_pdb_search_hybrid`, `nbase_pdb_find_similar`, `nbase_pdb_rerank_mmr`, `nbase_pdb_rerank_weighted`
+- `nbase_pdb_search`, `nbase_pdb_search_radius`, `nbase_pdb_search_batch`, `nbase_pdb_search_text`, `nbase_pdb_search_hybrid`, `nbase_pdb_find_similar`, `nbase_pdb_rerank_mmr`, `nbase_pdb_rerank_weighted`
 - `nbase_pdb_extract_relationships`, `nbase_pdb_compact`, `nbase_pdb_rebuild_hnsw_mt`, `nbase_pdb_stats` (`total_vectors`, `total_partitions`, `loaded_partitions`, `eviction_count`, `cache_hits`, `cache_misses`, `memory_bytes`)
 
 ## Dynamic Online Clustered DB (`nbase_clustered_t`, `.nbcl`)
@@ -65,10 +65,10 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 
 - **K-Means++**: `nbase_kmeans_train`
 - **Product Quantization (`nbase_pq_t`)**: `nbase_pq_train`, `destroy`, `dim`, `num_subvectors`, `num_centroids`, `encode`, `decode`, `build_lut`, `adc_distance`, `save`, `load`
-- **IVF-PQ (`nbase_ivfpq_t`, `.nbiv`)**: `nbase_ivfpq_config_default`, `train`, `add`, `search`, `save`, `load`, `stats`, `destroy`
+- **IVF-PQ (`nbase_ivfpq_t`, `.nbiv`)**: `nbase_ivfpq_config_default`, `train`, `add`, `search`, `search_filtered`, `save`, `load`, `stats`, `destroy`
 - **Scalar Quantization SQ8 (`nbase_sq8_t`, `.nbsq`)**: `nbase_sq8_train`, `destroy`, `dim`, `encode`, `decode`, `l2_sq_asymmetric`, `l2_sq_symmetric`, `save`, `load`
 - **Binary Quantization BQ (`nbase_bq_t`, `.nbbq`)**: `nbase_bq_train`, `destroy`, `dim`, `words_per_vec`, `encode`, `hamming`, `save`, `load`
-- **Multi-Probe LSH (`nbase_lsh_t`, `.nblh`)**: `nbase_lsh_config_default`, `create`, `destroy`, `add`, `delete`, `search`, `stats`, `save`, `load`
+- **Multi-Probe LSH (`nbase_lsh_t`, `.nblh`)**: `nbase_lsh_config_default`, `create`, `destroy`, `add`, `delete`, `search`, `search_filtered`, `stats`, `save`, `load`
 - **Standalone BM25 & RRF (`nbase_bm25_t`, `.nbbm`)**: `nbase_bm25_create`, `destroy`, `doc_count`, `index`, `get`, `delete`, `search`, `search_filtered`, `save`, `load`, `nbase_hybrid_rrf`
 
 ## Embeddable HTTP/1.1 Server (`nbase_http_server_t`)
@@ -78,6 +78,6 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 ## C++17 Header-Only Wrapper (`include/nbase.hpp`)
 
 All handles wrap C ownership with move semantics, RAII cleanup, and `nbase::Error` exceptions:
-- `nbase::Database` (`create`, `open`, `open_mmap`, `open_wal`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `set_meta`, `update_meta`, `delete_meta`, `query_meta`, `set_text`, `get_text`, `delete_text`, `search`, `find_similar`, `search_text`, `search_hybrid`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `extract_communities`, `compact`, `rebuild_hnsw_mt`, `cache_configure`, `cache_clear`, `stats`)
-- `nbase::PartitionedDatabase` (`open`, `save`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `set_meta`, `update_meta`, `delete_meta`, `query_meta`, `set_text`, `get_text`, `delete_text`, `search`, `search_batch`, `search_text`, `search_hybrid`, `find_similar`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `compact`, `rebuild_hnsw_mt`, `stats`)
-- `nbase::ClusteredDatabase` (`create`, `load`, `add`, `add_batch`, `upsert`, `remove`, `delete_batch`, `get`, `contains`, `recluster`, `search`, `search_filtered`, `stats`, `save`), `nbase::IvfPq`, `nbase::Sq8`, `nbase::Bq`, `nbase::Lsh`, `nbase::Bm25`, `nbase::HttpServer`
+- `nbase::Database` (`create`, `open`, `open_mmap`, `open_wal`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `list_ids`, `set_meta`, `update_meta`, `delete_meta`, `query_meta`, `set_text`, `get_text`, `delete_text`, `search`, `search_radius`, `find_similar`, `search_text`, `search_hybrid`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `extract_communities`, `compact`, `rebuild_hnsw_mt`, `cache_configure`, `cache_clear`, `stats`)
+- `nbase::PartitionedDatabase` (`open`, `save`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `list_ids`, `set_meta`, `update_meta`, `delete_meta`, `query_meta`, `set_text`, `get_text`, `delete_text`, `search`, `search_radius`, `search_batch`, `search_text`, `search_hybrid`, `find_similar`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `compact`, `rebuild_hnsw_mt`, `stats`)
+- `nbase::ClusteredDatabase`, `nbase::IvfPq` (`search_filtered`), `nbase::Lsh` (`search_filtered`), `nbase::Sq8`, `nbase::Bq`, `nbase::Bm25`, `nbase::HttpServer`

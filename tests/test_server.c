@@ -942,6 +942,68 @@ static void test_http_server_upsert_and_get_batch(void) {
   nbase_close(db);
 }
 
+static void test_http_server_list_vectors_and_radius_search(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/upsert",
+      NULL,
+      "{\"vectors\":["
+      "{\"id\":30,\"vector\":[1.2,0,0],\"metadata\":{\"slot\":\"c\"}},"
+      "{\"id\":10,\"vector\":[1,0,0],\"metadata\":{\"slot\":\"a\"}},"
+      "{\"id\":40,\"vector\":[3,0,0],\"metadata\":{\"slot\":\"d\"}},"
+      "{\"id\":20,\"vector\":[1.05,0,0],\"metadata\":{\"slot\":\"b\"}}"
+      "]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "GET",
+      "/api/vectors?offset=1&limit=2&includeVectors=true&includeMetadata=true",
+      NULL,
+      NULL,
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"total\":4") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"count\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"ids\":[20,30]") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"slot\":\"b\"") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search",
+      NULL,
+      "{\"query\":[1,0,0],\"k\":10,\"maxDistance\":0.25}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":40") == NULL);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -950,4 +1012,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_batch_delete_and_telemetry);
   RUN_TEST(test_http_server_weighted_rerank_and_cache);
   RUN_TEST(test_http_server_upsert_and_get_batch);
+  RUN_TEST(test_http_server_list_vectors_and_radius_search);
 }

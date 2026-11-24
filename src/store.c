@@ -544,8 +544,19 @@ const float *nbase_store_get_vector(const nbase_store_t *store, uint32_t slot) {
   return store->vectors + (size_t)slot * (size_t)store->dim;
 }
 
-nbase_status_t nbase_store_exact_search(const nbase_store_t *store, const float *query, uint32_t k, nbase_metric_t metric, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count) {
-  if (!store || !query || !out_count || (k > 0U && !out_results)) {
+static nbase_status_t store_exact_search_internal(
+    const nbase_store_t *store,
+    const float *query,
+    uint32_t k,
+    bool use_radius,
+    float max_distance,
+    nbase_metric_t metric,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!store || !query || !out_count || (k > 0U && !out_results) ||
+      (use_radius && !isfinite(max_distance))) {
     return NBASE_ERR_INVALID_ARG;
   }
   *out_count = 0;
@@ -566,6 +577,9 @@ nbase_status_t nbase_store_exact_search(const nbase_store_t *store, const float 
       continue;
     }
     float dist = dist_fn(query, store->vectors + (size_t)slot * (size_t)store->dim, store->dim);
+    if (use_radius && dist > max_distance) {
+      continue;
+    }
     if (heap.len < k) {
       if (!nbase_heap_push(&heap, (nbase_heap_item_t){slot, dist})) {
         nbase_heap_free(&heap);
@@ -593,6 +607,33 @@ nbase_status_t nbase_store_exact_search(const nbase_store_t *store, const float 
   qsort(out_results, n, sizeof(nbase_result_t), nbase_cmp_result_asc);
   *out_count = n;
   return NBASE_OK;
+}
+
+nbase_status_t nbase_store_exact_search(
+    const nbase_store_t *store,
+    const float *query,
+    uint32_t k,
+    nbase_metric_t metric,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return store_exact_search_internal(
+      store, query, k, false, 0.0f, metric, filter, filter_ctx, out_results, out_count);
+}
+
+nbase_status_t nbase_store_exact_search_radius(
+    const nbase_store_t *store,
+    const float *query,
+    uint32_t k,
+    float max_distance,
+    nbase_metric_t metric,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return store_exact_search_internal(
+      store, query, k, true, max_distance, metric, filter, filter_ctx, out_results, out_count);
 }
 
 nbase_status_t nbase_store_save(const nbase_store_t *store, const char *file_path) {

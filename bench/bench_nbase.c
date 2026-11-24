@@ -520,10 +520,17 @@ static void bench_batch_threads_and_pq(void) {
       (void)nbase_rerank_weighted(cdb, cands, cgot, &w, 1U, k, reranked, &rgot);
     }
     uint64_t w1 = now_ns();
-    printf("  lru_cache  miss=%6.2f us/query  hit=%5.2f us/query  weighted_rerank(20->10)=%5.2f us/call\n",
+    uint64_t rad0 = now_ns();
+    for (uint32_t q = 0U; q < nqueries; q++) {
+      (void)nbase_search_radius(
+          cdb, queries + (size_t)q * dim, dim, 2.5f, k, NULL, reranked, &rgot);
+    }
+    uint64_t rad1 = now_ns();
+    printf("  lru_cache  miss=%6.2f us/query  hit=%5.2f us/query  weighted_rerank(20->10)=%5.2f us/call  radius=%6.2f us/query\n",
            (double)(m1 - m0) / (double)nqueries / 1e3,
            (double)(h1 - h0) / (double)(10U * nqueries) / 1e3,
-           (double)(w1 - w0) / 200.0 / 1e3);
+           (double)(w1 - w0) / 200.0 / 1e3,
+           (double)(rad1 - rad0) / (double)nqueries / 1e3);
     nbase_close(cdb);
   }
 

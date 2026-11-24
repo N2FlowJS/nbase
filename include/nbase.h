@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 1
+#define NBASE_VERSION_MINOR 2
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -190,6 +190,7 @@ nbase_status_t nbase_delete_by_filter(nbase_db_t *db, const nbase_meta_filter_t 
 nbase_status_t nbase_get(const nbase_db_t *db, uint64_t id, float *out_vec, uint32_t dim);
 nbase_status_t nbase_get_batch(const nbase_db_t *db, const uint64_t *ids, uint32_t count, uint32_t dim, float *out_vectors, bool *out_found);
 bool nbase_contains(const nbase_db_t *db, uint64_t id);
+nbase_status_t nbase_list_ids(const nbase_db_t *db, uint64_t offset, uint32_t limit, uint64_t *out_ids, uint32_t *out_count, uint64_t *out_total);
 
 typedef bool (*nbase_meta_iter_fn)(const char *key, const nbase_meta_value_t *val, void *user_ctx);
 
@@ -201,6 +202,7 @@ nbase_status_t nbase_foreach_meta(const nbase_db_t *db, uint64_t id, nbase_meta_
 nbase_status_t nbase_query_meta(const nbase_db_t *db, const nbase_meta_filter_t *filter, uint32_t limit, uint64_t *out_ids, uint32_t *out_count);
 
 nbase_status_t nbase_search(const nbase_db_t *db, const float *query, uint32_t dim, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_search_radius(const nbase_db_t *db, const float *query, uint32_t dim, float max_distance, uint32_t max_results, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_find_similar(const nbase_db_t *db, uint64_t id, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_search_batch(const nbase_db_t *db, const float *queries, uint32_t query_count, uint32_t dim, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_counts);
 
@@ -292,6 +294,7 @@ nbase_status_t nbase_pdb_delete_by_filter(nbase_pdb_t *pdb, const nbase_meta_fil
 nbase_status_t nbase_pdb_get(nbase_pdb_t *pdb, uint64_t id, float *out_vec, uint32_t dim);
 nbase_status_t nbase_pdb_get_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t count, uint32_t dim, float *out_vectors, bool *out_found);
 bool nbase_pdb_contains(nbase_pdb_t *pdb, uint64_t id);
+nbase_status_t nbase_pdb_list_ids(nbase_pdb_t *pdb, uint64_t offset, uint32_t limit, uint64_t *out_ids, uint32_t *out_count, uint64_t *out_total);
 
 nbase_status_t nbase_pdb_set_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
 nbase_status_t nbase_pdb_update_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
@@ -305,6 +308,7 @@ nbase_status_t nbase_pdb_get_text(nbase_pdb_t *pdb, uint64_t id, char *out_buf, 
 nbase_status_t nbase_pdb_delete_text(nbase_pdb_t *pdb, uint64_t id);
 
 nbase_status_t nbase_pdb_search(nbase_pdb_t *pdb, const float *query, uint32_t dim, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_pdb_search_radius(nbase_pdb_t *pdb, const float *query, uint32_t dim, float max_distance, uint32_t max_results, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_search_batch(nbase_pdb_t *pdb, const float *queries, uint32_t query_count, uint32_t dim, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_pdb_search_text(nbase_pdb_t *pdb, const char *query, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_search_hybrid(nbase_pdb_t *pdb, const float *query_vec, uint32_t dim, const char *query_text, uint32_t k, float alpha, float rrf_k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
@@ -384,6 +388,7 @@ nbase_ivfpq_config_t nbase_ivfpq_config_default(uint32_t dim, uint32_t nlist, ui
 nbase_status_t nbase_ivfpq_train(const nbase_ivfpq_config_t *cfg, const float *train_vectors, uint32_t train_count, nbase_ivfpq_t **out_index);
 nbase_status_t nbase_ivfpq_add(nbase_ivfpq_t *index, const uint64_t *ids, const float *vectors, uint32_t count);
 nbase_status_t nbase_ivfpq_search(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_ivfpq_search_filtered(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_ivfpq_save(const nbase_ivfpq_t *index, const char *file_path);
 nbase_status_t nbase_ivfpq_load(const char *file_path, nbase_ivfpq_t **out_index);
 nbase_status_t nbase_ivfpq_stats(const nbase_ivfpq_t *index, nbase_ivfpq_stats_t *out_stats);
@@ -439,6 +444,7 @@ void nbase_lsh_destroy(nbase_lsh_t *lsh);
 nbase_status_t nbase_lsh_add(nbase_lsh_t *lsh, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id);
 nbase_status_t nbase_lsh_search(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_lsh_search_filtered(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_lsh_stats(const nbase_lsh_t *lsh, nbase_lsh_stats_t *out_stats);
 nbase_status_t nbase_lsh_save(const nbase_lsh_t *lsh, const char *file_path);
 nbase_status_t nbase_lsh_load(const char *file_path, nbase_lsh_t **out_lsh);

@@ -2,6 +2,11 @@
 
 #include <stdio.h>
 
+static bool lsh_even_filter(uint64_t id, void *ctx) {
+  (void)ctx;
+  return (id % 2ULL) == 0ULL;
+}
+
 static void make_clusters(float *out, uint32_t clusters, uint32_t per_cluster, uint32_t dim, uint64_t seed) {
   test_fill_vectors(out, clusters * per_cluster, dim, seed);
   for (uint32_t c = 0U; c < clusters; c++) {
@@ -56,6 +61,14 @@ static void test_lsh_cosine_and_multiprobe(void) {
   ASSERT_STATUS(nbase_lsh_search(lsh, vecs, dim, 10U, 2U, hits, &hn), NBASE_OK);
   for (uint32_t i = 0U; i < hn; i++) {
     ASSERT_TRUE(hits[i].id != 100ULL);
+  }
+
+  ASSERT_STATUS(
+      nbase_lsh_search_filtered(lsh, vecs, dim, 10U, 2U, lsh_even_filter, NULL, hits, &hn),
+      NBASE_OK);
+  ASSERT_TRUE(hn > 0U);
+  for (uint32_t i = 0U; i < hn; i++) {
+    ASSERT_TRUE((hits[i].id % 2ULL) == 0ULL);
   }
 
   nbase_lsh_destroy(lsh);

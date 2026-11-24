@@ -183,6 +183,16 @@ class Database {
 
   bool contains(uint64_t id) const noexcept { return nbase_contains(db_, id); }
 
+  std::vector<uint64_t> list_ids(
+      uint64_t offset, uint32_t limit, uint64_t *out_total = nullptr) const {
+    std::vector<uint64_t> ids(limit);
+    uint32_t count = 0U;
+    detail::check(nbase_list_ids(
+        db_, offset, limit, limit > 0U ? ids.data() : nullptr, &count, out_total));
+    ids.resize(count);
+    return ids;
+  }
+
   std::vector<nbase_result_t> search(
       const std::vector<float> &query,
       uint32_t k,
@@ -196,6 +206,26 @@ class Database {
         k,
         opts,
         k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> search_radius(
+      const std::vector<float> &query,
+      float max_distance,
+      uint32_t max_results,
+      const nbase_search_opts_t *opts = nullptr) const {
+    std::vector<nbase_result_t> out(max_results);
+    uint32_t count = 0U;
+    detail::check(nbase_search_radius(
+        db_,
+        query.data(),
+        static_cast<uint32_t>(query.size()),
+        max_distance,
+        max_results,
+        opts,
+        max_results > 0U ? out.data() : nullptr,
         &count));
     out.resize(count);
     return out;
@@ -664,6 +694,28 @@ class Lsh {
     return out;
   }
 
+  std::vector<nbase_result_t> search_filtered(
+      const std::vector<float> &query,
+      uint32_t k,
+      uint32_t multi_probe,
+      nbase_filter_fn filter,
+      void *filter_ctx = nullptr) const {
+    std::vector<nbase_result_t> out(k);
+    uint32_t count = 0U;
+    detail::check(nbase_lsh_search_filtered(
+        ptr_,
+        query.data(),
+        static_cast<uint32_t>(query.size()),
+        k,
+        multi_probe,
+        filter,
+        filter_ctx,
+        k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
   void save(const std::string &file_path) const {
     detail::check(nbase_lsh_save(ptr_, file_path.c_str()));
   }
@@ -797,6 +849,36 @@ class PartitionedDatabase {
   }
 
   bool contains(uint64_t id) const { return nbase_pdb_contains(pdb_, id); }
+
+  std::vector<uint64_t> list_ids(
+      uint64_t offset, uint32_t limit, uint64_t *out_total = nullptr) const {
+    std::vector<uint64_t> ids(limit);
+    uint32_t count = 0U;
+    detail::check(nbase_pdb_list_ids(
+        pdb_, offset, limit, limit > 0U ? ids.data() : nullptr, &count, out_total));
+    ids.resize(count);
+    return ids;
+  }
+
+  std::vector<nbase_result_t> search_radius(
+      const std::vector<float> &query,
+      float max_distance,
+      uint32_t max_results,
+      const nbase_pdb_search_opts_t *opts = nullptr) const {
+    std::vector<nbase_result_t> out(max_results);
+    uint32_t count = 0U;
+    detail::check(nbase_pdb_search_radius(
+        pdb_,
+        query.data(),
+        static_cast<uint32_t>(query.size()),
+        max_distance,
+        max_results,
+        opts,
+        max_results > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
 
   void set_meta(uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
     detail::check(nbase_pdb_set_meta(pdb_, id, fields, count));
@@ -1053,6 +1135,27 @@ class IvfPq {
         query.data(),
         k,
         nprobe,
+        k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> search_filtered(
+      const std::vector<float> &query,
+      uint32_t k,
+      uint32_t nprobe,
+      nbase_filter_fn filter,
+      void *filter_ctx = nullptr) const {
+    std::vector<nbase_result_t> out(k);
+    uint32_t count = 0U;
+    detail::check(nbase_ivfpq_search_filtered(
+        ptr_,
+        query.data(),
+        k,
+        nprobe,
+        filter,
+        filter_ctx,
         k > 0U ? out.data() : nullptr,
         &count));
     out.resize(count);

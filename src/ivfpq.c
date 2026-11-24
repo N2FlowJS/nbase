@@ -55,23 +55,6 @@ static bool ivf_metric_supported(nbase_metric_t metric) {
   return metric == NBASE_METRIC_EUCLIDEAN || metric == NBASE_METRIC_COSINE || metric == NBASE_METRIC_INNER_PRODUCT;
 }
 
-static float vec_l2_sq(const float *a, const float *b, uint32_t dim) {
-  float sum = 0.0f;
-  for (uint32_t i = 0U; i < dim; i++) {
-    float diff = a[i] - b[i];
-    sum += diff * diff;
-  }
-  return sum;
-}
-
-static float vec_dot(const float *a, const float *b, uint32_t dim) {
-  float sum = 0.0f;
-  for (uint32_t i = 0U; i < dim; i++) {
-    sum += a[i] * b[i];
-  }
-  return sum;
-}
-
 static void normalize_vec(const float *src, float *dst, uint32_t dim) {
   float norm2 = 0.0f;
   for (uint32_t i = 0U; i < dim; i++) {
@@ -87,11 +70,16 @@ static void normalize_vec(const float *src, float *dst, uint32_t dim) {
   }
 }
 
-static uint32_t find_nearest_coarse(const float *coarse, uint32_t nlist, uint32_t dim, const float *vec) {
+static uint32_t find_nearest_coarse(
+    const float *coarse,
+    uint32_t nlist,
+    uint32_t dim,
+    const float *vec,
+    nbase_dist_fn l2sq_fn) {
   uint32_t best = 0U;
   float best_d = FLT_MAX;
   for (uint32_t c = 0U; c < nlist; c++) {
-    float d = vec_l2_sq(vec, coarse + (size_t)c * (size_t)dim, dim);
+    float d = l2sq_fn(vec, coarse + (size_t)c * (size_t)dim, dim);
     if (d < best_d) {
       best_d = d;
       best = c;
@@ -311,6 +299,7 @@ nbase_status_t nbase_ivfpq_add(
     return NBASE_ERR_NOMEM;
   }
 
+  nbase_dist_fn l2sq_fn = nbase_get_distance_fn(NBASE_METRIC_SQUARED_EUCLIDEAN);
   nbase_status_t st = NBASE_OK;
   for (uint32_t i = 0U; i < count; i++) {
     const float *src = vectors + (size_t)i * (size_t)index->dim;
@@ -320,7 +309,7 @@ nbase_status_t nbase_ivfpq_add(
       memcpy(vec_buf, src, (size_t)index->dim * sizeof(float));
     }
 
-    uint32_t list_id = find_nearest_coarse(index->coarse_centroids, index->nlist, index->dim, vec_buf);
+    uint32_t list_id = find_nearest_coarse(index->coarse_centroids, index->nlist, index->dim, vec_buf, l2sq_fn);
     const float *c = index->coarse_centroids + (size_t)list_id * (size_t)index->dim;
     for (uint32_t d = 0U; d < index->dim; d++) {
       res_buf[d] = vec_buf[d] - c[d];
@@ -363,11 +352,13 @@ nbase_status_t nbase_ivfpq_add(
   return st;
 }
 
-nbase_status_t nbase_ivfpq_search(
+nbase_status_t nbase_ivfpq_search_filtered(
     const nbase_ivfpq_t *index,
     const float *query,
     uint32_t k,
     uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count) {
   if (!index || !query || !out_count || (k > 0U && !out_results)) {
@@ -403,13 +394,16 @@ nbase_status_t nbase_ivfpq_search(
     memcpy(q_buf, query, (size_t)index->dim * sizeof(float));
   }
 
+  nbase_dist_fn ip_fn = nbase_get_distance_fn(NBASE_METRIC_INNER_PRODUCT);
+  nbase_dist_fn l2sq_fn = nbase_get_distance_fn(NBASE_METRIC_SQUARED_EUCLIDEAN);
+
   for (uint32_t c = 0U; c < index->nlist; c++) {
     const float *cent = index->coarse_centroids + (size_t)c * (size_t)index->dim;
     probes[c].list_id = c;
     if (index->metric == NBASE_METRIC_INNER_PRODUCT) {
-      probes[c].dist = -vec_dot(q_buf, cent, index->dim);
+      probes[c].dist = ip_fn(q_buf, cent, index->dim);
     } else {
-      probes[c].dist = vec_l2_sq(q_buf, cent, index->dim);
+      probes[c].dist = l2sq_fn(q_buf, cent, index->dim);
     }
   }
   qsort(probes, index->nlist, sizeof(probe_cand_t), cmp_probe_asc);
@@ -430,10 +424,14 @@ nbase_status_t nbase_ivfpq_search(
 
     const float *cent = index->coarse_centroids + (size_t)list_id * (size_t)index->dim;
     if (index->metric == NBASE_METRIC_INNER_PRODUCT) {
-      float base_dot = vec_dot(q_buf, cent, index->dim);
+      float neg_base_dot = ip_fn(q_buf, cent, index->dim);
       for (uint32_t j = 0U; j < list->len; j++) {
+        uint64_t mid = list->ids[j];
+        if (filter && !filter(mid, filter_ctx)) {
+          continue;
+        }
         float res_dot = nbase_pq_adc_distance(index->pq, lut, list->codes + (size_t)j * (size_t)index->num_subvectors);
-        res_heap_push_bounded(&heap, list->ids[j], -(base_dot + res_dot));
+        res_heap_push_bounded(&heap, mid, neg_base_dot - res_dot);
       }
     } else {
       for (uint32_t d = 0U; d < index->dim; d++) {
@@ -444,9 +442,13 @@ nbase_status_t nbase_ivfpq_search(
         break;
       }
       for (uint32_t j = 0U; j < list->len; j++) {
+        uint64_t mid = list->ids[j];
+        if (filter && !filter(mid, filter_ctx)) {
+          continue;
+        }
         float l2_sq = nbase_pq_adc_distance(index->pq, lut, list->codes + (size_t)j * (size_t)index->num_subvectors);
         float d = (index->metric == NBASE_METRIC_COSINE) ? (0.5f * fmaxf(0.0f, l2_sq)) : sqrtf(fmaxf(0.0f, l2_sq));
-        res_heap_push_bounded(&heap, list->ids[j], d);
+        res_heap_push_bounded(&heap, mid, d);
       }
     }
   }
@@ -463,6 +465,16 @@ nbase_status_t nbase_ivfpq_search(
   free(lut);
   free(heap_buf);
   return st;
+}
+
+nbase_status_t nbase_ivfpq_search(
+    const nbase_ivfpq_t *index,
+    const float *query,
+    uint32_t k,
+    uint32_t nprobe,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return nbase_ivfpq_search_filtered(index, query, k, nprobe, NULL, NULL, out_results, out_count);
 }
 
 nbase_status_t nbase_ivfpq_save(const nbase_ivfpq_t *index, const char *file_path) {

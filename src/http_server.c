@@ -1278,6 +1278,119 @@ static void handle_get_vectors_batch(const http_conn_t *c, const char *body, siz
   nbase_sbuf_free(&sb);
 }
 
+static void handle_list_vectors(const http_conn_t *c, const char *query_str) {
+  nbase_http_server_t *srv = c->srv;
+  uint64_t offset = 0ULL;
+  uint32_t limit = 50U;
+  char obuf[32];
+  if (query_param_get(query_str, "offset", obuf, sizeof(obuf))) {
+    if (!parse_u64_str(obuf, strlen(obuf), &offset)) {
+      send_error_json(c, 400, "offset must be an unsigned 64-bit integer");
+      return;
+    }
+  }
+  char lbuf[32];
+  if (query_param_get(query_str, "limit", lbuf, sizeof(lbuf))) {
+    uint64_t lv = 0ULL;
+    if (!parse_u64_str(lbuf, strlen(lbuf), &lv) || lv == 0ULL || lv > 10000ULL) {
+      send_error_json(c, 400, "limit must be in 1..10000");
+      return;
+    }
+    limit = (uint32_t)lv;
+  }
+
+  bool inc_vec = query_param_bool(query_str, "includeVectors", false);
+  bool inc_meta = query_param_bool(query_str, "includeMetadata", false);
+  bool inc_text = query_param_bool(query_str, "includeText", false);
+
+  uint64_t *ids = malloc((size_t)limit * sizeof(uint64_t));
+  if (!ids) {
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+
+  uint32_t got = 0U;
+  uint64_t total = 0ULL;
+  nbase_status_t st = nbase_list_ids(srv->db, offset, limit, ids, &got, &total);
+  if (st != NBASE_OK) {
+    free(ids);
+    send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+
+  uint32_t dim = 0U;
+  float *vecs = NULL;
+  bool *found = NULL;
+  if (inc_vec && got > 0U) {
+    nbase_stats_t db_st;
+    st = nbase_stats(srv->db, &db_st);
+    if (st != NBASE_OK) {
+      free(ids);
+      send_error_json(c, 500, nbase_strerror(st));
+      return;
+    }
+    dim = db_st.dim;
+    vecs = malloc((size_t)got * (size_t)dim * sizeof(float));
+    found = malloc((size_t)got * sizeof(bool));
+    if (!vecs || !found) {
+      free(vecs);
+      free(found);
+      free(ids);
+      send_error_json(c, 500, "out of memory");
+      return;
+    }
+    st = nbase_get_batch(srv->db, ids, got, dim, vecs, found);
+    if (st != NBASE_OK) {
+      free(vecs);
+      free(found);
+      free(ids);
+      send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+      return;
+    }
+  }
+
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(
+      &sb,
+      "{\"success\":true,\"total\":%llu,\"offset\":%llu,\"limit\":%u,\"count\":%u,\"ids\":[",
+      (unsigned long long)total,
+      (unsigned long long)offset,
+      limit,
+      got);
+  for (uint32_t i = 0U; i < got; i++) {
+    nbase_sbuf_appendf(&sb, i == 0U ? "%llu" : ",%llu", (unsigned long long)ids[i]);
+  }
+  nbase_sbuf_append(&sb, "],\"results\":[");
+  for (uint32_t i = 0U; i < got; i++) {
+    nbase_sbuf_appendf(&sb, i == 0U ? "{\"id\":%llu" : ",{\"id\":%llu", (unsigned long long)ids[i]);
+    if (inc_vec && found != NULL && found[i]) {
+      nbase_sbuf_append(&sb, ",\"vector\":[");
+      const float *v = vecs + (size_t)i * (size_t)dim;
+      for (uint32_t d = 0U; d < dim; d++) {
+        nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+      }
+      nbase_sbuf_append_n(&sb, "]", 1U);
+    }
+    if (inc_meta) {
+      nbase_sbuf_append(&sb, ",\"metadata\":");
+      append_meta_json(&sb, srv->db, ids[i]);
+    }
+    if (inc_text) {
+      nbase_sbuf_append(&sb, ",\"text\":");
+      append_text_json(&sb, srv->db, ids[i]);
+    }
+    nbase_sbuf_append_n(&sb, "}", 1U);
+  }
+  nbase_sbuf_append(&sb, "]}");
+
+  free(vecs);
+  free(found);
+  free(ids);
+  send_sbuf_json(c, 200, &sb);
+  nbase_sbuf_free(&sb);
+}
+
 static void handle_put_vector_id(const http_conn_t *c, uint64_t id, const char *body, size_t body_len) {
   nbase_http_server_t *srv = c->srv;
   nbase_json_t *root = NULL;
@@ -1728,6 +1841,21 @@ static void handle_search(const http_conn_t *c, const char *body, size_t body_le
     return;
   }
 
+  bool use_radius = false;
+  float max_distance = 0.0f;
+  const nbase_json_t *jmd = nbase_json_obj_get(root, "maxDistance");
+  if (jmd != NULL) {
+    if (jmd->type != NBASE_JSON_NUMBER || !isfinite(jmd->num)) {
+      free(weights);
+      free(query);
+      nbase_json_free(root);
+      send_error_json(c, 400, "maxDistance must be a finite number");
+      return;
+    }
+    use_radius = true;
+    max_distance = (float)jmd->num;
+  }
+
   uint32_t fetch_k = do_rerank ? ((k <= 2500U) ? k * 4U : 10000U) : k;
   nbase_result_t *cands = malloc((size_t)fetch_k * sizeof(nbase_result_t));
   nbase_result_t *final_res = do_rerank ? malloc((size_t)k * sizeof(nbase_result_t)) : NULL;
@@ -1744,7 +1872,10 @@ static void handle_search(const http_conn_t *c, const char *body, size_t body_le
 
   uint64_t t0 = monotonic_us();
   uint32_t got = 0U;
-  nbase_status_t st = nbase_search(srv->db, query, dim, fetch_k, &opts, cands, &got);
+  nbase_status_t st = use_radius
+                          ? nbase_search_radius(
+                                srv->db, query, dim, max_distance, fetch_k, &opts, cands, &got)
+                          : nbase_search(srv->db, query, dim, fetch_k, &opts, cands, &got);
   free(conds);
   free(query);
 
@@ -2689,6 +2820,10 @@ static void dispatch_request(
   }
   if (strcmp(method, "GET") == 0 && strcmp(path, "/stats") == 0) {
     handle_stats(c);
+    return;
+  }
+  if (strcmp(method, "GET") == 0 && strcmp(path, "/api/vectors") == 0) {
+    handle_list_vectors(c, query_str);
     return;
   }
   if (strcmp(method, "POST") == 0 && strcmp(path, "/api/vectors") == 0) {

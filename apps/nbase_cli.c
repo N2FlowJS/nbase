@@ -22,10 +22,11 @@ static void print_usage(const char *prog) {
       "  upsert <dir> <id> <v0,v1,...>\n"
       "  get <dir> <id>\n"
       "  get-batch <dir> <id1,id2,...>\n"
+      "  list <dir> [--offset <N>] [--limit <M>]\n"
       "  delete <dir> <id>\n"
       "  delete-batch <dir> <id1,id2,...>\n"
       "  set-text <dir> <id> <text>\n"
-      "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact]\n"
+      "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--max-distance <D>]\n"
       "  search-text <dir> <query> [--k <K>]\n"
       "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>]\n"
       "  rebuild <dir> [--threads <T>]\n"
@@ -793,12 +794,70 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  if (strcmp(cmd, "list") == 0) {
+    if (argc < 3) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t offset = 0ULL;
+    uint32_t limit = 50U;
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc) {
+        if (!parse_u64(argv[++i], &offset)) {
+          fprintf(stderr, "Invalid --offset\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &limit) || limit == 0U || limit > 10000U) {
+          fprintf(stderr, "Invalid --limit\n");
+          return 1;
+        }
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    uint64_t *ids = malloc((size_t)limit * sizeof(uint64_t));
+    if (!ids) {
+      nbase_close(db);
+      return 1;
+    }
+    uint32_t got = 0U;
+    uint64_t total = 0ULL;
+    st = nbase_list_ids(db, offset, limit, ids, &got, &total);
+    nbase_close(db);
+    if (st != NBASE_OK) {
+      free(ids);
+      fprintf(stderr, "list failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"total\":%llu,\"offset\":%llu,\"limit\":%u,\"count\":%u,\"ids\":[",
+           (unsigned long long)total,
+           (unsigned long long)offset,
+           limit,
+           got);
+    for (uint32_t i = 0U; i < got; i++) {
+      printf(i == 0U ? "%llu" : ",%llu", (unsigned long long)ids[i]);
+    }
+    printf("]}\n");
+    free(ids);
+    return 0;
+  }
+
   if (strcmp(cmd, "search") == 0) {
     if (argc < 4) {
       print_usage(argv[0]);
       return 1;
     }
     uint32_t k = 10U;
+    bool use_radius = false;
+    float max_dist = 0.0f;
     nbase_search_opts_t opts = nbase_search_opts_default();
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--exact") == 0) {
@@ -813,6 +872,12 @@ int main(int argc, char **argv) {
           fprintf(stderr, "Invalid --ef\n");
           return 1;
         }
+      } else if (strcmp(argv[i], "--max-distance") == 0 && i + 1 < argc) {
+        if (!parse_float_arg(argv[++i], &max_dist)) {
+          fprintf(stderr, "Invalid --max-distance\n");
+          return 1;
+        }
+        use_radius = true;
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
@@ -840,7 +905,9 @@ int main(int argc, char **argv) {
       return 1;
     }
     uint32_t got = 0U;
-    st = nbase_search(db, q, s.dim, k, &opts, res, &got);
+    st = use_radius
+             ? nbase_search_radius(db, q, s.dim, max_dist, k, &opts, res, &got)
+             : nbase_search(db, q, s.dim, k, &opts, res, &got);
     free(q);
     nbase_close(db);
     if (st != NBASE_OK) {

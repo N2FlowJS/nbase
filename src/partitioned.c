@@ -1482,6 +1482,60 @@ bool nbase_pdb_contains(nbase_pdb_t *pdb, uint64_t id) {
   return found;
 }
 
+nbase_status_t nbase_pdb_list_ids(
+    nbase_pdb_t *pdb,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total) {
+  if (!pdb || !out_count || (limit > 0U && !out_ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  if (out_total) {
+    *out_total = 0ULL;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  uint64_t total = pdb->total_vectors;
+  if (out_total) {
+    *out_total = total;
+  }
+  if (limit == 0U || total == 0ULL || offset >= total || pdb->id_map.count == 0U) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_OK;
+  }
+
+  uint64_t *all = malloc(pdb->id_map.count * sizeof(uint64_t));
+  if (!all) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_ERR_NOMEM;
+  }
+
+  size_t pos = 0U;
+  for (size_t i = 0U; i < pdb->id_map.cap && pos < pdb->id_map.count; i++) {
+    if (pdb->id_map.states[i] == PDB_MAP_OCCUPIED) {
+      all[pos++] = pdb->id_map.keys[i];
+    }
+  }
+  pthread_mutex_unlock(&pdb->mu);
+
+  if (pos > 1U) {
+    qsort(all, pos, sizeof(uint64_t), cmp_pdb_u64_asc);
+  }
+  if (offset < (uint64_t)pos) {
+    uint64_t rem = (uint64_t)pos - offset;
+    uint32_t ret = (rem < (uint64_t)limit) ? (uint32_t)rem : limit;
+    if (ret > 0U) {
+      memcpy(out_ids, all + (size_t)offset, (size_t)ret * sizeof(uint64_t));
+    }
+    *out_count = ret;
+  }
+  free(all);
+  return NBASE_OK;
+}
+
 nbase_status_t nbase_pdb_set_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
   if (!pdb) {
     return NBASE_ERR_INVALID_ARG;
@@ -1803,11 +1857,13 @@ static nbase_status_t pdb_collect_targets(
   return NBASE_OK;
 }
 
-static nbase_status_t pdb_search_unlocked(
+static nbase_status_t pdb_search_common_unlocked(
     nbase_pdb_t *pdb,
     const float *query,
     uint32_t dim,
     uint32_t k,
+    bool use_radius,
+    float max_distance,
     const nbase_pdb_search_opts_t *eff,
     nbase_result_t *out_results,
     uint32_t *out_count) {
@@ -1846,7 +1902,10 @@ static nbase_status_t pdb_search_unlocked(
     }
 
     uint32_t part_n = 0U;
-    st = nbase_search(p->db, query, dim, k, &eff->search, part_buf, &part_n);
+    st = use_radius
+             ? nbase_search_radius(
+                   p->db, query, dim, max_distance, k, &eff->search, part_buf, &part_n)
+             : nbase_search(p->db, query, dim, k, &eff->search, part_buf, &part_n);
     if (st != NBASE_OK) {
       break;
     }
@@ -1888,6 +1947,17 @@ static nbase_status_t pdb_search_unlocked(
   return NBASE_OK;
 }
 
+static nbase_status_t pdb_search_unlocked(
+    nbase_pdb_t *pdb,
+    const float *query,
+    uint32_t dim,
+    uint32_t k,
+    const nbase_pdb_search_opts_t *eff,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return pdb_search_common_unlocked(pdb, query, dim, k, false, 0.0f, eff, out_results, out_count);
+}
+
 nbase_status_t nbase_pdb_search(
     nbase_pdb_t *pdb,
     const float *query,
@@ -1908,6 +1978,32 @@ nbase_status_t nbase_pdb_search(
 
   pthread_mutex_lock(&pdb->mu);
   nbase_status_t st = pdb_search_unlocked(pdb, query, dim, k, &eff, out_results, out_count);
+  pthread_mutex_unlock(&pdb->mu);
+  return st;
+}
+
+nbase_status_t nbase_pdb_search_radius(
+    nbase_pdb_t *pdb,
+    const float *query,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    const nbase_pdb_search_opts_t *opts,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!pdb || !query || !out_count || (max_results > 0U && !out_results) || !isfinite(max_distance)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+
+  nbase_pdb_search_opts_t eff = opts ? *opts : nbase_pdb_search_opts_default();
+  if (eff.partition_id_count > 0U && !eff.partition_ids) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  nbase_status_t st = pdb_search_common_unlocked(
+      pdb, query, dim, max_results, true, max_distance, &eff, out_results, out_count);
   pthread_mutex_unlock(&pdb->mu);
   return st;
 }

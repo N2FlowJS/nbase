@@ -1,5 +1,6 @@
 #include "test_common.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -362,7 +363,7 @@ static void test_db_query_lru_cache_and_invalidation(void) {
 }
 
 static void test_db_upsert_batch_and_get_batch(void) {
-  ASSERT_TRUE(strcmp(nbase_version(), "1.1.0") == 0);
+  ASSERT_TRUE(strcmp(nbase_version(), "1.2.0") == 0);
 
   const uint32_t dim = 3U;
   char dir[256];
@@ -433,6 +434,77 @@ static void test_db_upsert_batch_and_get_batch(void) {
   test_rm_rf(dir);
 }
 
+static void test_db_list_ids_and_search_radius(void) {
+  const uint32_t dim = 3U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = true;
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  uint64_t ids[5] = {50ULL, 10ULL, 40ULL, 20ULL, 30ULL};
+  float vecs[15] = {
+      1.0f, 0.0f, 0.0f,
+      1.05f, 0.0f, 0.0f,
+      1.20f, 0.0f, 0.0f,
+      2.0f, 0.0f, 0.0f,
+      5.0f, 0.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 5U, dim, 2U), NBASE_OK);
+
+  /* Metadata for filtered radius search */
+  nbase_meta_field_t mk = {"grp", {.type = NBASE_META_STRING, .as = {.str = "ok"}}};
+  nbase_meta_field_t mn = {"grp", {.type = NBASE_META_STRING, .as = {.str = "no"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, &mk, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 50ULL, &mn, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 40ULL, &mk, 1U), NBASE_OK);
+
+  /* Paginated deterministic sorted ID enumeration: 10, 20, 30, 40, 50 */
+  uint64_t page[2] = {0ULL, 0ULL};
+  uint32_t cnt = 0U;
+  uint64_t total = 0ULL;
+  ASSERT_STATUS(nbase_list_ids(db, 1ULL, 2U, page, &cnt, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 5ULL);
+  ASSERT_EQ_U64(cnt, 2ULL);
+  ASSERT_EQ_U64(page[0], 20ULL);
+  ASSERT_EQ_U64(page[1], 30ULL);
+
+  ASSERT_STATUS(nbase_list_ids(db, 10ULL, 2U, page, &cnt, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 5ULL);
+  ASSERT_EQ_U64(cnt, 0ULL);
+
+  /* Exact/Auto radius search around (1,0,0) within 0.25 -> ids 50 (0.0), 10 (0.05), 40 (0.20) */
+  float q[3] = {1.0f, 0.0f, 0.0f};
+  nbase_result_t hits[5];
+  ASSERT_STATUS(nbase_search_radius(db, q, dim, 0.25f, 5U, NULL, hits, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 3ULL);
+  ASSERT_EQ_U64(hits[0].id, 50ULL);
+  ASSERT_EQ_U64(hits[1].id, 10ULL);
+  ASSERT_EQ_U64(hits[2].id, 40ULL);
+
+  /* HNSW mode + metadata filter + max_results cap */
+  nbase_meta_cond_t cond = {"grp", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "ok"}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  nbase_search_opts_t opts = nbase_search_opts_default();
+  opts.mode = NBASE_SEARCH_HNSW;
+  opts.ef_search = 32U;
+  opts.meta_filter = &flt;
+  ASSERT_STATUS(nbase_search_radius(db, q, dim, 0.25f, 5U, &opts, hits, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 2ULL);
+  ASSERT_EQ_U64(hits[0].id, 10ULL);
+  ASSERT_EQ_U64(hits[1].id, 40ULL);
+
+  /* Negative finite max_distance allowed on inner product metric; NaN rejected */
+  opts = nbase_search_opts_default();
+  opts.use_metric_override = true;
+  opts.metric = NBASE_METRIC_INNER_PRODUCT;
+  ASSERT_STATUS(nbase_search_radius(db, q, dim, -1.1f, 5U, &opts, hits, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 3ULL);
+  ASSERT_STATUS(nbase_search_radius(db, q, dim, (float)NAN, 5U, NULL, hits, &cnt), NBASE_ERR_INVALID_ARG);
+
+  nbase_close(db);
+}
+
 void test_db_run(void) {
   RUN_TEST(test_db_upsert_with_and_without_hnsw);
   RUN_TEST(test_db_batch_search);
@@ -441,4 +513,5 @@ void test_db_run(void) {
   RUN_TEST(test_db_batch_and_filter_delete_and_memory);
   RUN_TEST(test_db_query_lru_cache_and_invalidation);
   RUN_TEST(test_db_upsert_batch_and_get_batch);
+  RUN_TEST(test_db_list_ids_and_search_radius);
 }

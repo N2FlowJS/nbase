@@ -93,7 +93,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.1.0";
+  return "1.2.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -1326,6 +1326,62 @@ bool nbase_contains(const nbase_db_t *db, uint64_t id) {
   return found;
 }
 
+nbase_status_t nbase_list_ids(
+    const nbase_db_t *db,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total) {
+  if (!db || !out_count || (limit > 0U && !out_ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  if (out_total) {
+    *out_total = 0ULL;
+  }
+
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+
+  uint64_t total = db->store->active_count;
+  if (out_total) {
+    *out_total = total;
+  }
+  if (limit == 0U || total == 0ULL || offset >= total) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_OK;
+  }
+
+  uint64_t *all = malloc((size_t)total * sizeof(uint64_t));
+  if (!all) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+
+  size_t pos = 0U;
+  for (uint32_t s = 0U; s < db->store->slot_count && pos < (size_t)total; s++) {
+    if (db->store->slot_flags[s] == NBASE_SLOT_ACTIVE) {
+      all[pos++] = db->store->ids[s];
+    }
+  }
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+
+  if (pos > 1U) {
+    qsort(all, pos, sizeof(uint64_t), cmp_u64);
+  }
+  if (offset < (uint64_t)pos) {
+    uint64_t rem = (uint64_t)pos - offset;
+    uint32_t ret = (rem < (uint64_t)limit) ? (uint32_t)rem : limit;
+    if (ret > 0U) {
+      memcpy(out_ids, all + (size_t)offset, (size_t)ret * sizeof(uint64_t));
+    }
+    *out_count = ret;
+  }
+  free(all);
+  return NBASE_OK;
+}
+
 nbase_status_t nbase_set_meta(nbase_db_t *db, uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
   if (!db) {
     return NBASE_ERR_INVALID_ARG;
@@ -1645,6 +1701,90 @@ nbase_status_t nbase_search(
   nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
   pthread_rwlock_rdlock(&mutable_db->rwlock);
   nbase_status_t st = db_search_unlocked(db, query, dim, k, &eff, out_results, out_count);
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_search_radius(
+    const nbase_db_t *db,
+    const float *query,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    const nbase_search_opts_t *opts,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!db || !query || !out_count || (max_results > 0U && !out_results) || !isfinite(max_distance)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+
+  nbase_search_opts_t eff = opts ? *opts : nbase_search_opts_default();
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+
+  if (dim != db->store->dim) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  if (!nbase_vec_is_finite(query, dim)) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_ERR_INVALID_VECTOR;
+  }
+
+  nbase_metric_t metric = eff.use_metric_override ? eff.metric : db->store->metric;
+  if (!nbase_metric_is_valid(metric) ||
+      (eff.mode != NBASE_SEARCH_EXACT && eff.mode != NBASE_SEARCH_HNSW && eff.mode != NBASE_SEARCH_AUTO)) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (max_results == 0U) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_OK;
+  }
+
+  combined_filter_ctx_t combined;
+  nbase_filter_fn filter = eff.filter;
+  void *filter_ctx = eff.filter_ctx;
+  if (eff.meta_filter != NULL && eff.meta_filter->count > 0U) {
+    combined.meta = db->meta;
+    combined.meta_filter = eff.meta_filter;
+    combined.user_filter = eff.filter;
+    combined.user_ctx = eff.filter_ctx;
+    filter = combined_filter_cb;
+    filter_ctx = &combined;
+  }
+
+  nbase_status_t st;
+  if (eff.mode == NBASE_SEARCH_HNSW) {
+    if (db->hnsw == NULL) {
+      st = NBASE_ERR_UNSUPPORTED;
+    } else {
+      uint32_t fetch_k = (eff.ef_search > max_results) ? eff.ef_search : max_results;
+      nbase_result_t *tmp = malloc((size_t)fetch_k * sizeof(nbase_result_t));
+      if (!tmp) {
+        st = NBASE_ERR_NOMEM;
+      } else {
+        uint32_t got = 0U;
+        st = nbase_hnsw_search(
+            db->hnsw, db->store, query, fetch_k, eff.ef_search, metric, filter, filter_ctx, tmp, &got);
+        if (st == NBASE_OK) {
+          uint32_t keep = 0U;
+          for (uint32_t i = 0U; i < got && keep < max_results; i++) {
+            if (tmp[i].distance <= max_distance) {
+              out_results[keep++] = tmp[i];
+            }
+          }
+          *out_count = keep;
+        }
+        free(tmp);
+      }
+    }
+  } else {
+    st = nbase_store_exact_search_radius(
+        db->store, query, max_results, max_distance, metric, filter, filter_ctx, out_results, out_count);
+  }
+
   pthread_rwlock_unlock(&mutable_db->rwlock);
   return st;
 }

@@ -308,12 +308,14 @@ nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id) {
   return nbase_store_delete(lsh->store, id, NULL);
 }
 
-nbase_status_t nbase_lsh_search(
+nbase_status_t nbase_lsh_search_filtered(
     const nbase_lsh_t *lsh,
     const float *query,
     uint32_t dim,
     uint32_t k,
     uint32_t multi_probe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count) {
   if (!lsh || !query || !out_count || (k > 0U && !out_results)) {
@@ -361,6 +363,9 @@ nbase_status_t nbase_lsh_search(
         if (lsh->store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
           continue;
         }
+        if (filter && !filter(lsh->store->ids[slot], filter_ctx)) {
+          continue;
+        }
 
         float d = dist_fn(query, nbase_store_get_vector(lsh->store, slot), dim);
         nbase_heap_item_t item = {slot, d};
@@ -392,6 +397,17 @@ nbase_status_t nbase_lsh_search(
   free(margins);
   free(seen);
   return NBASE_OK;
+}
+
+nbase_status_t nbase_lsh_search(
+    const nbase_lsh_t *lsh,
+    const float *query,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t multi_probe,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return nbase_lsh_search_filtered(lsh, query, dim, k, multi_probe, NULL, NULL, out_results, out_count);
 }
 
 nbase_status_t nbase_lsh_stats(const nbase_lsh_t *lsh, nbase_lsh_stats_t *out_stats) {
