@@ -47,9 +47,22 @@ static void print_usage(const char *prog) {
       "  rebuild <dir> [--threads <T>]\n"
       "  compact <dir>\n"
       "  checkpoint <dir>\n"
-      "  import <dir> <file.ndjson|-> [--threads <T>]\n"
-      "  export <dir> [file.ndjson|-] [--filter <json>]\n",
+      "  import <dir> <file.ndjson|-> [--upsert] [--threads <T>]\n"
+      "  export <dir> [file.ndjson|-] [--ids <id1,id2,...>] [--filter <json>]\n",
       prog);
+}
+
+static int cmp_cli_u64_asc(const void *pa, const void *pb) {
+  uint64_t a = *(const uint64_t *)pa;
+  uint64_t b = *(const uint64_t *)pb;
+  return (a > b) - (a < b);
+}
+
+static bool cli_u64_in_sorted(const uint64_t *arr, uint32_t len, uint64_t target) {
+  if (!arr || len == 0U) {
+    return false;
+  }
+  return bsearch(&target, arr, len, sizeof(uint64_t), cmp_cli_u64_asc) != NULL;
 }
 
 static int cmp_cli_res_asc(const void *pa, const void *pb) {
@@ -464,6 +477,7 @@ static nbase_status_t flush_import_batch(
     nbase_db_t *db,
     uint32_t dim,
     uint32_t threads,
+    bool upsert,
     const uint64_t *ids,
     const float *vecs,
     nbase_json_t **roots,
@@ -471,7 +485,8 @@ static nbase_status_t flush_import_batch(
   if (cnt == 0U) {
     return NBASE_OK;
   }
-  nbase_status_t st = nbase_add_batch(db, ids, vecs, cnt, dim, threads);
+  nbase_status_t st = upsert ? nbase_upsert_batch(db, ids, vecs, cnt, dim, threads)
+                             : nbase_add_batch(db, ids, vecs, cnt, dim, threads);
   nbase_meta_batch_item_t *meta_items = calloc(cnt, sizeof(*meta_items));
   nbase_meta_field_t **field_bufs = calloc(cnt, sizeof(*field_bufs));
   uint64_t *text_ids = malloc((size_t)cnt * sizeof(uint64_t));
@@ -2315,8 +2330,11 @@ int main(int argc, char **argv) {
       return 1;
     }
     uint32_t threads = 0U;
+    bool upsert = false;
     for (int i = 4; i < argc; i++) {
-      if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+      if (strcmp(argv[i], "--upsert") == 0) {
+        upsert = true;
+      } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &threads) || threads > 64U) {
           fprintf(stderr, "Invalid --threads\n");
           return 1;
@@ -2428,7 +2446,7 @@ int main(int argc, char **argv) {
       b_cnt++;
 
       if (b_cnt == NBASE_CLI_IMPORT_BATCH) {
-        st = flush_import_batch(db, s.dim, threads, b_ids, b_vecs, b_roots, b_cnt);
+        st = flush_import_batch(db, s.dim, threads, upsert, b_ids, b_vecs, b_roots, b_cnt);
         if (st != NBASE_OK) {
           fprintf(stderr, "import batch failed: %s\n", nbase_strerror(st));
           ok = false;
@@ -2441,7 +2459,7 @@ int main(int argc, char **argv) {
     }
 
     if (ok && b_cnt > 0U) {
-      st = flush_import_batch(db, s.dim, threads, b_ids, b_vecs, b_roots, b_cnt);
+      st = flush_import_batch(db, s.dim, threads, upsert, b_ids, b_vecs, b_roots, b_cnt);
       if (st != NBASE_OK) {
         fprintf(stderr, "import batch failed: %s\n", nbase_strerror(st));
         ok = false;
@@ -2484,9 +2502,12 @@ int main(int argc, char **argv) {
     }
     const char *out_path = NULL;
     const char *flt_json = NULL;
+    const char *ids_csv = NULL;
     for (int i = 3; i < argc; i++) {
       if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
+      } else if (strcmp(argv[i], "--ids") == 0 && i + 1 < argc) {
+        ids_csv = argv[++i];
       } else if ((argv[i][0] != '-' || strcmp(argv[i], "-") == 0) && !out_path) {
         out_path = argv[i];
       } else {
@@ -2495,12 +2516,19 @@ int main(int argc, char **argv) {
       }
     }
 
+    uint64_t *req_ids = NULL;
+    uint32_t req_cnt = 0U;
+    if (ids_csv != NULL && !parse_u64_list_csv(ids_csv, &req_ids, &req_cnt)) {
+      return 1;
+    }
+
     nbase_json_t *flt_root = NULL;
     nbase_meta_cond_t *conds = NULL;
     nbase_meta_filter_t flt = {NULL, 0U};
     if (flt_json != NULL) {
       if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
           cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(req_ids);
         free(conds);
         nbase_json_free(flt_root);
         fprintf(stderr, "Invalid --filter JSON\n");
@@ -2511,6 +2539,7 @@ int main(int argc, char **argv) {
     nbase_db_t *db = NULL;
     nbase_status_t st = nbase_open(argv[2], &db);
     if (st != NBASE_OK) {
+      free(req_ids);
       free(conds);
       nbase_json_free(flt_root);
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
@@ -2522,6 +2551,7 @@ int main(int argc, char **argv) {
     FILE *out = (out_path != NULL && strcmp(out_path, "-") != 0) ? fopen(out_path, "w") : stdout;
     if (!out) {
       fprintf(stderr, "Failed to open output %s\n", out_path ? out_path : "stdout");
+      free(req_ids);
       free(conds);
       nbase_json_free(flt_root);
       nbase_close(db);
@@ -2531,26 +2561,59 @@ int main(int argc, char **argv) {
     bool ok = true;
     if (s.active_vectors > 0ULL) {
       uint32_t limit = (s.active_vectors > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)s.active_vectors;
-      uint64_t *ids = malloc((size_t)limit * sizeof(uint64_t));
+      uint64_t *ids = NULL;
+      uint32_t got = 0U;
       float *vec = malloc((size_t)s.dim * sizeof(float));
       char *txt_buf = NULL;
       size_t txt_cap = 0U;
       nbase_sbuf_t sb;
       nbase_sbuf_init(&sb);
 
-      if (!ids || !vec) {
+      if (!vec) {
         ok = false;
-      } else {
-        uint32_t got = 0U;
-        st = nbase_query_meta(db, flt.count > 0U ? &flt : NULL, limit, ids, &got);
+      } else if (req_ids != NULL && flt.count == 0U) {
+        ids = req_ids;
+        req_ids = NULL;
+        for (uint32_t i = 0U; i < req_cnt; i++) {
+          if (nbase_contains(db, ids[i])) {
+            ids[got++] = ids[i];
+          }
+        }
         free(conds);
         conds = NULL;
         nbase_json_free(flt_root);
         flt_root = NULL;
-        if (st != NBASE_OK) {
-          fprintf(stderr, "query failed: %s\n", nbase_strerror(st));
+      } else {
+        ids = malloc((size_t)limit * sizeof(uint64_t));
+        if (!ids) {
           ok = false;
+        } else {
+          st = nbase_query_meta(db, flt.count > 0U ? &flt : NULL, limit, ids, &got);
+          free(conds);
+          conds = NULL;
+          nbase_json_free(flt_root);
+          flt_root = NULL;
+          if (st != NBASE_OK) {
+            fprintf(stderr, "query failed: %s\n", nbase_strerror(st));
+            ok = false;
+          } else if (req_ids != NULL) {
+            if (got > 1U) {
+              qsort(ids, got, sizeof(uint64_t), cmp_cli_u64_asc);
+            }
+            uint32_t filtered_cnt = 0U;
+            for (uint32_t i = 0U; i < req_cnt; i++) {
+              if (cli_u64_in_sorted(ids, got, req_ids[i])) {
+                req_ids[filtered_cnt++] = req_ids[i];
+              }
+            }
+            free(ids);
+            ids = req_ids;
+            req_ids = NULL;
+            got = filtered_cnt;
+          }
         }
+      }
+      if (ok && ids != NULL) {
         for (uint32_t i = 0U; i < got && ok; i++) {
           st = nbase_get(db, ids[i], vec, s.dim);
           if (st != NBASE_OK) {
@@ -2602,6 +2665,7 @@ int main(int argc, char **argv) {
     if (out != stdout) {
       fclose(out);
     }
+    free(req_ids);
     free(conds);
     nbase_json_free(flt_root);
     nbase_close(db);

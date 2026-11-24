@@ -215,7 +215,15 @@ static void test_pq_adc_distance_batch(void) {
 
     ASSERT_STATUS(nbase_pq_encode(pq, vecs, count, codes), NBASE_OK);
     ASSERT_STATUS(nbase_pq_build_lut(pq, vecs, lut), NBASE_OK);
-    ASSERT_STATUS(nbase_pq_adc_distance_batch(pq, lut, codes, 0U, batch_dists), NBASE_OK);
+    static const uint32_t sub_counts[7] = {0U, 1U, 2U, 3U, 4U, 5U, 7U};
+    for (uint32_t si = 0U; si < 7U; si++) {
+      uint32_t sc = sub_counts[si];
+      ASSERT_STATUS(nbase_pq_adc_distance_batch(pq, lut, codes, sc, batch_dists), NBASE_OK);
+      for (uint32_t i = 0U; i < sc; i++) {
+        float single = nbase_pq_adc_distance(pq, lut, codes + (size_t)i * m);
+        ASSERT_NEAR(batch_dists[i], single, 1e-6, 0.0);
+      }
+    }
     ASSERT_STATUS(nbase_pq_adc_distance_batch(pq, lut, codes, count, batch_dists), NBASE_OK);
 
     for (uint32_t i = 0U; i < count; i++) {

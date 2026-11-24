@@ -1777,6 +1777,151 @@ static void test_http_server_head_and_filtered_export(void) {
   nbase_close(db);
 }
 
+static void test_http_server_patch_vector_head_subresources_and_export_ids(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  const uint64_t ids[3] = {10ULL, 20ULL, 30ULL};
+  const float vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f,
+  };
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 3U, 3U, 1U), NBASE_OK);
+  nbase_meta_field_t m10[2] = {
+      {"env", {.type = NBASE_META_STRING, .as = {.str = "prod"}}},
+      {"tier", {.type = NBASE_META_INT64, .as = {.i64 = 1}}},
+  };
+  nbase_meta_field_t m20[1] = {
+      {"env", {.type = NBASE_META_STRING, .as = {.str = "staging"}}},
+  };
+  nbase_meta_field_t m30[1] = {
+      {"env", {.type = NBASE_META_STRING, .as = {.str = "prod"}}},
+  };
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, m10, 2U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 20ULL, m20, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 30ULL, m30, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 10ULL, "initial text ten"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. HEAD /api/vectors/:id/metadata and /text */
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/10/metadata", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/999/metadata", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 404);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/10/text", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/20/text", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 404);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  /* 2. PATCH /api/vectors/:id partial metadata + text update & preserve untouched keys */
+  ASSERT_TRUE(http_req(
+      port,
+      "PATCH",
+      "/api/vectors/10",
+      NULL,
+      "{\"metadata\":{\"tier\":2},\"text\":\"patched text ten\"}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/10?includeText=true", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"env\":\"prod\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"tier\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"patched text ten\"") != NULL);
+  free(r.body);
+
+  /* 3. PATCH vector + clear text via null */
+  ASSERT_TRUE(http_req(
+      port,
+      "PATCH",
+      "/api/vectors/10",
+      NULL,
+      "{\"vector\":[0.5,0.5,0],\"text\":null}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "HEAD", "/api/vectors/10/text", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 404);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  /* PATCH errors: missing id -> 404, empty/bad body -> 400 */
+  ASSERT_TRUE(http_req(port, "PATCH", "/api/vectors/999", NULL, "{\"metadata\":{\"a\":1}}", &r));
+  ASSERT_EQ_I64(r.status, 404);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "PATCH", "/api/vectors/10", NULL, "{}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "PATCH", "/api/vectors/10", NULL, "{\"text\":123}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  /* 4. Selective POST /api/vectors/export with ids and ids + filters */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/export",
+      NULL,
+      "{\"ids\":[30,10,999],\"includeMetadata\":false}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":999") == NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/export",
+      NULL,
+      "{\"ids\":[20,10],\"filters\":{\"env\":\"prod\"}}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") == NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/export", NULL, "{\"ids\":[]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_EQ_U64(r.body_len, 0ULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/export", NULL, "{\"ids\":[\"bad\"]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1793,4 +1938,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_rerank_endpoint);
   RUN_TEST(test_http_server_exists_batch_and_radius_endpoint);
   RUN_TEST(test_http_server_head_and_filtered_export);
+  RUN_TEST(test_http_server_patch_vector_head_subresources_and_export_ids);
 }

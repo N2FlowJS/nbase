@@ -264,12 +264,106 @@ nbase_status_t nbase_ivfpq_train(
   return NBASE_OK;
 }
 
+static int cmp_u64_asc(const void *pa, const void *pb) {
+  uint64_t a = *(const uint64_t *)pa;
+  uint64_t b = *(const uint64_t *)pb;
+  return (a > b) - (a < b);
+}
+
+static nbase_status_t ivfpq_encode_and_reserve(
+    nbase_ivfpq_t *index,
+    const float *src,
+    float *vec_buf,
+    float *res_buf,
+    float *coarse_dists,
+    uint8_t *code_buf,
+    uint32_t *out_list_id) {
+  if (index->metric == NBASE_METRIC_COSINE) {
+    normalize_vec(src, vec_buf, index->dim);
+  } else {
+    memcpy(vec_buf, src, (size_t)index->dim * sizeof(float));
+  }
+
+  nbase_status_t st = nbase_distance_batch(
+      NBASE_METRIC_SQUARED_EUCLIDEAN,
+      vec_buf,
+      index->coarse_centroids,
+      index->nlist,
+      index->dim,
+      coarse_dists);
+  if (st != NBASE_OK) {
+    return st;
+  }
+
+  uint32_t list_id = 0U;
+  float best_cd = FLT_MAX;
+  for (uint32_t c = 0U; c < index->nlist; c++) {
+    if (coarse_dists[c] < best_cd) {
+      best_cd = coarse_dists[c];
+      list_id = c;
+    }
+  }
+  const float *cent = index->coarse_centroids + (size_t)list_id * (size_t)index->dim;
+  for (uint32_t d = 0U; d < index->dim; d++) {
+    res_buf[d] = vec_buf[d] - cent[d];
+  }
+
+  st = nbase_pq_encode(index->pq, res_buf, 1U, code_buf);
+  if (st != NBASE_OK) {
+    return st;
+  }
+
+  ivf_list_t *list = &index->lists[list_id];
+  if (list->len == list->cap) {
+    uint32_t new_cap = list->cap == 0U ? 16U : list->cap * 2U;
+    uint64_t *next_ids = realloc(list->ids, (size_t)new_cap * sizeof(uint64_t));
+    if (next_ids) {
+      list->ids = next_ids;
+    }
+    uint8_t *next_codes = realloc(list->codes, (size_t)new_cap * (size_t)index->num_subvectors);
+    if (next_codes) {
+      list->codes = next_codes;
+    }
+    if (!next_ids || !next_codes) {
+      return NBASE_ERR_NOMEM;
+    }
+    list->cap = new_cap;
+  }
+
+  *out_list_id = list_id;
+  return NBASE_OK;
+}
+
+static uint64_t ivfpq_delete_unlocked(nbase_ivfpq_t *index, uint64_t id) {
+  uint64_t removed = 0ULL;
+  for (uint32_t c = 0U; c < index->nlist; c++) {
+    ivf_list_t *list = &index->lists[c];
+    for (uint32_t j = 0U; j < list->len;) {
+      if (list->ids[j] == id) {
+        uint32_t last = list->len - 1U;
+        if (j != last) {
+          list->ids[j] = list->ids[last];
+          memcpy(
+              list->codes + (size_t)j * (size_t)index->num_subvectors,
+              list->codes + (size_t)last * (size_t)index->num_subvectors,
+              index->num_subvectors);
+        }
+        list->len--;
+        index->count--;
+        removed++;
+      } else {
+        j++;
+      }
+    }
+  }
+  return removed;
+}
+
 static nbase_status_t ivfpq_add_unlocked(
     nbase_ivfpq_t *index,
     const uint64_t *ids,
     const float *vectors,
     uint32_t count) {
-
   float *vec_buf = malloc((size_t)index->dim * sizeof(float));
   float *res_buf = malloc((size_t)index->dim * sizeof(float));
   float *coarse_dists = malloc((size_t)index->nlist * sizeof(float));
@@ -285,60 +379,14 @@ static nbase_status_t ivfpq_add_unlocked(
   nbase_status_t st = NBASE_OK;
   for (uint32_t i = 0U; i < count; i++) {
     const float *src = vectors + (size_t)i * (size_t)index->dim;
-    if (index->metric == NBASE_METRIC_COSINE) {
-      normalize_vec(src, vec_buf, index->dim);
-    } else {
-      memcpy(vec_buf, src, (size_t)index->dim * sizeof(float));
-    }
-
-    st = nbase_distance_batch(
-        NBASE_METRIC_SQUARED_EUCLIDEAN,
-        vec_buf,
-        index->coarse_centroids,
-        index->nlist,
-        index->dim,
-        coarse_dists);
-    if (st != NBASE_OK) {
-      break;
-    }
     uint32_t list_id = 0U;
-    float best_cd = FLT_MAX;
-    for (uint32_t c = 0U; c < index->nlist; c++) {
-      if (coarse_dists[c] < best_cd) {
-        best_cd = coarse_dists[c];
-        list_id = c;
-      }
-    }
-    const float *c = index->coarse_centroids + (size_t)list_id * (size_t)index->dim;
-    for (uint32_t d = 0U; d < index->dim; d++) {
-      res_buf[d] = vec_buf[d] - c[d];
-    }
-
-    st = nbase_pq_encode(index->pq, res_buf, 1U, code_buf);
+    st = ivfpq_encode_and_reserve(
+        index, src, vec_buf, res_buf, coarse_dists, code_buf, &list_id);
     if (st != NBASE_OK) {
       break;
     }
 
     ivf_list_t *list = &index->lists[list_id];
-    if (list->len == list->cap) {
-      uint32_t new_cap = list->cap == 0U ? 16U : list->cap * 2U;
-      uint64_t *next_ids = realloc(list->ids, (size_t)new_cap * sizeof(uint64_t));
-      uint8_t *next_codes = realloc(list->codes, (size_t)new_cap * (size_t)index->num_subvectors);
-      if (!next_ids || !next_codes) {
-        if (next_ids) {
-          list->ids = next_ids;
-        }
-        if (next_codes) {
-          list->codes = next_codes;
-        }
-        st = NBASE_ERR_NOMEM;
-        break;
-      }
-      list->ids = next_ids;
-      list->codes = next_codes;
-      list->cap = new_cap;
-    }
-
     list->ids[list->len] = ids[i];
     memcpy(list->codes + (size_t)list->len * (size_t)index->num_subvectors, code_buf, index->num_subvectors);
     list->len++;
@@ -370,6 +418,175 @@ nbase_status_t nbase_ivfpq_add(
   }
   pthread_rwlock_wrlock(&index->rwlock);
   nbase_status_t st = ivfpq_add_unlocked(index, ids, vectors, count);
+  pthread_rwlock_unlock(&index->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_ivfpq_upsert(
+    nbase_ivfpq_t *index,
+    uint64_t id,
+    const float *vec,
+    uint32_t dim) {
+  if (!index || !vec) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (dim != index->dim) {
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  if (!nbase_vec_is_finite(vec, dim)) {
+    return NBASE_ERR_INVALID_VECTOR;
+  }
+
+  float *vec_buf = malloc((size_t)index->dim * sizeof(float));
+  float *res_buf = malloc((size_t)index->dim * sizeof(float));
+  float *coarse_dists = malloc((size_t)index->nlist * sizeof(float));
+  uint8_t *code_buf = malloc((size_t)index->num_subvectors);
+  if (!vec_buf || !res_buf || !coarse_dists || !code_buf) {
+    free(vec_buf);
+    free(res_buf);
+    free(coarse_dists);
+    free(code_buf);
+    return NBASE_ERR_NOMEM;
+  }
+
+  pthread_rwlock_wrlock(&index->rwlock);
+  uint32_t list_id = 0U;
+  nbase_status_t st = ivfpq_encode_and_reserve(
+      index, vec, vec_buf, res_buf, coarse_dists, code_buf, &list_id);
+  if (st == NBASE_OK) {
+    (void)ivfpq_delete_unlocked(index, id);
+    ivf_list_t *list = &index->lists[list_id];
+    list->ids[list->len] = id;
+    memcpy(list->codes + (size_t)list->len * (size_t)index->num_subvectors, code_buf, index->num_subvectors);
+    list->len++;
+    index->count++;
+  }
+  pthread_rwlock_unlock(&index->rwlock);
+
+  free(vec_buf);
+  free(res_buf);
+  free(coarse_dists);
+  free(code_buf);
+  return st;
+}
+
+nbase_status_t nbase_ivfpq_delete(nbase_ivfpq_t *index, uint64_t id) {
+  if (!index) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  pthread_rwlock_wrlock(&index->rwlock);
+  uint64_t removed = ivfpq_delete_unlocked(index, id);
+  pthread_rwlock_unlock(&index->rwlock);
+  return removed > 0ULL ? NBASE_OK : NBASE_ERR_NOT_FOUND;
+}
+
+bool nbase_ivfpq_contains(const nbase_ivfpq_t *index, uint64_t id) {
+  if (!index) {
+    return false;
+  }
+  nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
+  pthread_rwlock_rdlock(&mutable_idx->rwlock);
+  bool found = false;
+  for (uint32_t c = 0U; c < index->nlist && !found; c++) {
+    const ivf_list_t *list = &index->lists[c];
+    for (uint32_t j = 0U; j < list->len; j++) {
+      if (list->ids[j] == id) {
+        found = true;
+        break;
+      }
+    }
+  }
+  pthread_rwlock_unlock(&mutable_idx->rwlock);
+  return found;
+}
+
+nbase_status_t nbase_ivfpq_list_ids(
+    const nbase_ivfpq_t *index,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total) {
+  if (!index || !out_count || (limit > 0U && !out_ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+
+  nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
+  pthread_rwlock_rdlock(&mutable_idx->rwlock);
+  uint64_t total = index->count;
+  if (out_total) {
+    *out_total = total;
+  }
+  if (total == 0ULL || offset >= total || limit == 0U) {
+    pthread_rwlock_unlock(&mutable_idx->rwlock);
+    return NBASE_OK;
+  }
+  if (total > (uint64_t)(SIZE_MAX / sizeof(uint64_t))) {
+    pthread_rwlock_unlock(&mutable_idx->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+
+  uint64_t *all = malloc((size_t)total * sizeof(uint64_t));
+  if (!all) {
+    pthread_rwlock_unlock(&mutable_idx->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+
+  size_t pos = 0U;
+  for (uint32_t c = 0U; c < index->nlist && pos < (size_t)total; c++) {
+    const ivf_list_t *list = &index->lists[c];
+    for (uint32_t j = 0U; j < list->len && pos < (size_t)total; j++) {
+      all[pos++] = list->ids[j];
+    }
+  }
+  pthread_rwlock_unlock(&mutable_idx->rwlock);
+
+  if (pos > 1U) {
+    qsort(all, pos, sizeof(uint64_t), cmp_u64_asc);
+  }
+  if (offset < (uint64_t)pos) {
+    uint64_t avail = (uint64_t)pos - offset;
+    uint32_t take = (avail > (uint64_t)limit) ? limit : (uint32_t)avail;
+    memcpy(out_ids, all + (size_t)offset, (size_t)take * sizeof(uint64_t));
+    *out_count = take;
+  }
+  free(all);
+  return NBASE_OK;
+}
+
+nbase_status_t nbase_ivfpq_compact(nbase_ivfpq_t *index) {
+  if (!index) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  pthread_rwlock_wrlock(&index->rwlock);
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t c = 0U; c < index->nlist; c++) {
+    ivf_list_t *list = &index->lists[c];
+    if (list->len == 0U) {
+      free(list->ids);
+      free(list->codes);
+      list->ids = NULL;
+      list->codes = NULL;
+      list->cap = 0U;
+    } else if (list->cap > list->len) {
+      uint64_t *new_ids = realloc(list->ids, (size_t)list->len * sizeof(uint64_t));
+      uint8_t *new_codes = realloc(list->codes, (size_t)list->len * (size_t)index->num_subvectors);
+      if (new_ids) {
+        list->ids = new_ids;
+      }
+      if (new_codes) {
+        list->codes = new_codes;
+      }
+      if (new_ids || new_codes) {
+        list->cap = list->len;
+      }
+      if (!new_ids || !new_codes) {
+        st = NBASE_ERR_NOMEM;
+        break;
+      }
+    }
+  }
   pthread_rwlock_unlock(&index->rwlock);
   return st;
 }

@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 9
+#define NBASE_VERSION_MINOR 10
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -451,6 +451,17 @@ typedef struct nbase_ivfpq_stats {
 nbase_ivfpq_config_t nbase_ivfpq_config_default(uint32_t dim, uint32_t nlist, uint32_t num_subvectors);
 nbase_status_t nbase_ivfpq_train(const nbase_ivfpq_config_t *cfg, const float *train_vectors, uint32_t train_count, nbase_ivfpq_t **out_index);
 nbase_status_t nbase_ivfpq_add(nbase_ivfpq_t *index, const uint64_t *ids, const float *vectors, uint32_t count);
+nbase_status_t nbase_ivfpq_upsert(nbase_ivfpq_t *index, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_ivfpq_delete(nbase_ivfpq_t *index, uint64_t id);
+bool nbase_ivfpq_contains(const nbase_ivfpq_t *index, uint64_t id);
+nbase_status_t nbase_ivfpq_list_ids(
+    const nbase_ivfpq_t *index,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total);
+nbase_status_t nbase_ivfpq_compact(nbase_ivfpq_t *index);
 nbase_status_t nbase_ivfpq_search(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_ivfpq_search_filtered(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_ivfpq_search_batch(

@@ -325,9 +325,148 @@ static void test_ivfpq_search_batch_mt_and_tsan(void) {
   free(vecs);
 }
 
+static void *ivfpq_crud_reader_fn(void *raw) {
+  ivfpq_tsan_ctx_t *ctx = (ivfpq_tsan_ctx_t *)raw;
+  uint64_t page[16];
+  for (uint32_t i = 0U; i < 40U && !atomic_load_explicit(&ctx->stop, memory_order_relaxed); i++) {
+    nbase_result_t hits[5];
+    uint32_t got = 0U;
+    if (nbase_ivfpq_search(ctx->index, ctx->query, 5U, 4U, hits, &got) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    uint32_t lcnt = 0U;
+    uint64_t ltot = 0ULL;
+    if (nbase_ivfpq_list_ids(ctx->index, 0ULL, 16U, page, &lcnt, &ltot) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t j = 1U; j < lcnt; j++) {
+      if (page[j - 1U] >= page[j]) {
+        atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+        break;
+      }
+    }
+    (void)nbase_ivfpq_contains(ctx->index, 1ULL);
+  }
+  return NULL;
+}
+
+static void test_ivfpq_crud_upsert_delete_list_compact_and_tsan(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+  char path[300];
+  snprintf(path, sizeof(path), "%s/crud.nbiv", dir);
+
+  const uint32_t dim = 16U;
+  const uint32_t n = 128U;
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL);
+  make_clustered_vectors(vecs, 4U, 32U, dim, 6060ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = (uint64_t)(n - i) * 10ULL;
+  }
+
+  nbase_ivfpq_config_t cfg = nbase_ivfpq_config_default(dim, 8U, 4U);
+  cfg.num_centroids = 32U;
+  cfg.max_iters = 10U;
+  nbase_ivfpq_t *idx = NULL;
+  ASSERT_STATUS(nbase_ivfpq_train(&cfg, vecs, n, &idx), NBASE_OK);
+
+  /* Insert unsorted initial IDs */
+  ASSERT_STATUS(nbase_ivfpq_add(idx, ids, vecs, 40U), NBASE_OK);
+  ASSERT_TRUE(nbase_ivfpq_contains(idx, ids[0]));
+  ASSERT_TRUE(!nbase_ivfpq_contains(idx, 999999ULL));
+  ASSERT_TRUE(!nbase_ivfpq_contains(NULL, 10ULL));
+
+  /* Error guards */
+  ASSERT_STATUS(nbase_ivfpq_delete(NULL, 10ULL), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_ivfpq_delete(idx, 999999ULL), NBASE_ERR_NOT_FOUND);
+  ASSERT_STATUS(nbase_ivfpq_upsert(idx, 10ULL, vecs, dim - 1U), NBASE_ERR_DIM_MISMATCH);
+  float bad_vec[16];
+  memcpy(bad_vec, vecs, sizeof(bad_vec));
+  bad_vec[2] = (float)INFINITY;
+  ASSERT_STATUS(nbase_ivfpq_upsert(idx, 10ULL, bad_vec, dim), NBASE_ERR_INVALID_VECTOR);
+  ASSERT_STATUS(nbase_ivfpq_compact(NULL), NBASE_ERR_INVALID_ARG);
+
+  /* Upsert replaces existing ID (moving across centroids cleanly) & inserts new ID */
+  nbase_ivfpq_stats_t st;
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, 40ULL);
+
+  ASSERT_STATUS(nbase_ivfpq_upsert(idx, ids[0], vecs + (size_t)99U * dim, dim), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, 40ULL);
+
+  ASSERT_STATUS(nbase_ivfpq_upsert(idx, 5ULL, vecs + (size_t)50U * dim, dim), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, 41ULL);
+  ASSERT_TRUE(nbase_ivfpq_contains(idx, 5ULL));
+
+  /* Sorted paginated list_ids */
+  uint64_t page[16];
+  uint32_t got = 0U;
+  uint64_t total = 0ULL;
+  ASSERT_STATUS(nbase_ivfpq_list_ids(idx, 0ULL, 10U, page, &got, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 41ULL);
+  ASSERT_EQ_U64(got, 10ULL);
+  ASSERT_EQ_U64(page[0], 5ULL);
+  for (uint32_t i = 1U; i < got; i++) {
+    ASSERT_TRUE(page[i - 1U] < page[i]);
+  }
+  ASSERT_STATUS(nbase_ivfpq_list_ids(idx, 100ULL, 10U, page, &got, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 41ULL);
+  ASSERT_EQ_U64(got, 0ULL);
+
+  /* Delete half and compact, verify save/load preservation */
+  for (uint32_t i = 0U; i < 20U; i++) {
+    ASSERT_STATUS(nbase_ivfpq_delete(idx, ids[i]), NBASE_OK);
+    ASSERT_TRUE(!nbase_ivfpq_contains(idx, ids[i]));
+  }
+  ASSERT_STATUS(nbase_ivfpq_compact(idx), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, 21ULL);
+
+  ASSERT_STATUS(nbase_ivfpq_save(idx, path), NBASE_OK);
+  nbase_ivfpq_destroy(idx);
+  idx = NULL;
+  ASSERT_STATUS(nbase_ivfpq_load(path, &idx), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, 21ULL);
+  ASSERT_TRUE(nbase_ivfpq_contains(idx, 5ULL));
+
+  /* Concurrent readers (search/list_ids/contains) + writer (upsert/delete/compact) under TSan */
+  ivfpq_tsan_ctx_t ctx = {idx, vecs, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, ivfpq_crud_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, ivfpq_crud_reader_fn, &ctx) == 0);
+  for (uint32_t round = 0U; round < 20U; round++) {
+    uint64_t tid = 5000ULL + (uint64_t)round;
+    ASSERT_STATUS(nbase_ivfpq_upsert(idx, tid, vecs + (size_t)(round % n) * dim, dim), NBASE_OK);
+    ASSERT_STATUS(nbase_ivfpq_upsert(idx, tid, vecs + (size_t)((round + 1U) % n) * dim, dim), NBASE_OK);
+    if ((round % 2U) == 1U) {
+      ASSERT_STATUS(nbase_ivfpq_delete(idx, tid), NBASE_OK);
+    }
+    if ((round % 5U) == 4U) {
+      ASSERT_STATUS(nbase_ivfpq_compact(idx), NBASE_OK);
+    }
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  nbase_ivfpq_destroy(idx);
+  free(ids);
+  free(vecs);
+  test_rm_rf(dir);
+}
+
 void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_train_add_search_euclidean_and_save_load);
   RUN_TEST(test_ivfpq_cosine_and_inner_product);
   RUN_TEST(test_ivfpq_concurrent_readers_writer_tsan);
   RUN_TEST(test_ivfpq_search_batch_mt_and_tsan);
+  RUN_TEST(test_ivfpq_crud_upsert_delete_list_compact_and_tsan);
 }

@@ -222,7 +222,63 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_asymmetric_batch_avx2(
     const uint8_t *codes,
     uint32_t count,
     float *out_distances) {
-  for (uint32_t i = 0U; i < count; i++) {
+  uint32_t i = 0U;
+  for (; i + 3U < count; i += 4U) {
+    const uint8_t *c0 = codes + (size_t)i * (size_t)dim;
+    const uint8_t *c1 = c0 + dim;
+    const uint8_t *c2 = c1 + dim;
+    const uint8_t *c3 = c2 + dim;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    uint32_t d = 0U;
+    for (; d + 8U <= dim; d += 8U) {
+      __m256 vs = _mm256_loadu_ps(scales + d);
+      __m256 vq = _mm256_loadu_ps(q_shifted + d);
+      uint64_t r0 = 0ULL;
+      uint64_t r1 = 0ULL;
+      uint64_t r2 = 0ULL;
+      uint64_t r3 = 0ULL;
+      memcpy(&r0, c0 + d, 8U);
+      memcpy(&r1, c1 + d, 8U);
+      memcpy(&r2, c2 + d, 8U);
+      memcpy(&r3, c3 + d, 8U);
+      __m256 vf0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r0)));
+      __m256 vf1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r1)));
+      __m256 vf2 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r2)));
+      __m256 vf3 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r3)));
+      __m256 df0 = _mm256_fnmadd_ps(vf0, vs, vq);
+      __m256 df1 = _mm256_fnmadd_ps(vf1, vs, vq);
+      __m256 df2 = _mm256_fnmadd_ps(vf2, vs, vq);
+      __m256 df3 = _mm256_fnmadd_ps(vf3, vs, vq);
+      acc0 = _mm256_fmadd_ps(df0, df0, acc0);
+      acc1 = _mm256_fmadd_ps(df1, df1, acc1);
+      acc2 = _mm256_fmadd_ps(df2, df2, acc2);
+      acc3 = _mm256_fmadd_ps(df3, df3, acc3);
+    }
+    float s0 = sq8_hsum256_ps(acc0);
+    float s1 = sq8_hsum256_ps(acc1);
+    float s2 = sq8_hsum256_ps(acc2);
+    float s3 = sq8_hsum256_ps(acc3);
+    for (; d < dim; d++) {
+      float qd = q_shifted[d];
+      float sd = scales[d];
+      float diff0 = qd - (float)c0[d] * sd;
+      float diff1 = qd - (float)c1[d] * sd;
+      float diff2 = qd - (float)c2[d] * sd;
+      float diff3 = qd - (float)c3[d] * sd;
+      s0 += diff0 * diff0;
+      s1 += diff1 * diff1;
+      s2 += diff2 * diff2;
+      s3 += diff3 * diff3;
+    }
+    out_distances[i] = s0;
+    out_distances[i + 1U] = s1;
+    out_distances[i + 2U] = s2;
+    out_distances[i + 3U] = s3;
+  }
+  for (; i < count; i++) {
     const uint8_t *code = codes + (size_t)i * (size_t)dim;
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();
@@ -266,7 +322,73 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_symmetric_batch_avx2(
     float *out_distances) {
   const uint32_t dim = sq8->dim;
   const float *scales = sq8->scales;
-  for (uint32_t i = 0U; i < count; i++) {
+  uint32_t i = 0U;
+  for (; i + 3U < count; i += 4U) {
+    const uint8_t *c0 = codes + (size_t)i * (size_t)dim;
+    const uint8_t *c1 = c0 + dim;
+    const uint8_t *c2 = c1 + dim;
+    const uint8_t *c3 = c2 + dim;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    uint32_t d = 0U;
+    for (; d + 8U <= dim; d += 8U) {
+      uint64_t rqa = 0ULL;
+      uint64_t r0 = 0ULL;
+      uint64_t r1 = 0ULL;
+      uint64_t r2 = 0ULL;
+      uint64_t r3 = 0ULL;
+      memcpy(&rqa, query_code + d, 8U);
+      memcpy(&r0, c0 + d, 8U);
+      memcpy(&r1, c1 + d, 8U);
+      memcpy(&r2, c2 + d, 8U);
+      memcpy(&r3, c3 + d, 8U);
+      __m256i vqa = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)rqa));
+      __m256 vs = _mm256_loadu_ps(scales + d);
+      __m256 df0 = _mm256_mul_ps(
+          _mm256_cvtepi32_ps(_mm256_sub_epi32(
+              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r0)))),
+          vs);
+      __m256 df1 = _mm256_mul_ps(
+          _mm256_cvtepi32_ps(_mm256_sub_epi32(
+              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r1)))),
+          vs);
+      __m256 df2 = _mm256_mul_ps(
+          _mm256_cvtepi32_ps(_mm256_sub_epi32(
+              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r2)))),
+          vs);
+      __m256 df3 = _mm256_mul_ps(
+          _mm256_cvtepi32_ps(_mm256_sub_epi32(
+              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r3)))),
+          vs);
+      acc0 = _mm256_fmadd_ps(df0, df0, acc0);
+      acc1 = _mm256_fmadd_ps(df1, df1, acc1);
+      acc2 = _mm256_fmadd_ps(df2, df2, acc2);
+      acc3 = _mm256_fmadd_ps(df3, df3, acc3);
+    }
+    float s0 = sq8_hsum256_ps(acc0);
+    float s1 = sq8_hsum256_ps(acc1);
+    float s2 = sq8_hsum256_ps(acc2);
+    float s3 = sq8_hsum256_ps(acc3);
+    for (; d < dim; d++) {
+      float qd = (float)query_code[d];
+      float sd = scales[d];
+      float diff0 = (qd - (float)c0[d]) * sd;
+      float diff1 = (qd - (float)c1[d]) * sd;
+      float diff2 = (qd - (float)c2[d]) * sd;
+      float diff3 = (qd - (float)c3[d]) * sd;
+      s0 += diff0 * diff0;
+      s1 += diff1 * diff1;
+      s2 += diff2 * diff2;
+      s3 += diff3 * diff3;
+    }
+    out_distances[i] = s0;
+    out_distances[i + 1U] = s1;
+    out_distances[i + 2U] = s2;
+    out_distances[i + 3U] = s3;
+  }
+  for (; i < count; i++) {
     const uint8_t *code = codes + (size_t)i * (size_t)dim;
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();

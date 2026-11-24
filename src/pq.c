@@ -249,21 +249,59 @@ nbase_status_t nbase_pq_build_lut(const nbase_pq_t *pq, const float *query, floa
 static inline float pq_adc_one_256(const float *lut, const uint8_t *code, uint32_t m_cnt) {
   float s0 = 0.0f;
   float s1 = 0.0f;
-  float s2 = 0.0f;
-  float s3 = 0.0f;
   uint32_t m = 0U;
-  for (; m + 3U < m_cnt; m += 4U) {
-    const float *row = lut + (size_t)m * 256U;
-    s0 += row[code[m]];
-    s1 += row[256U + (size_t)code[m + 1U]];
-    s2 += row[512U + (size_t)code[m + 2U]];
-    s3 += row[768U + (size_t)code[m + 3U]];
+  for (; m + 1U < m_cnt; m += 2U) {
+    const float *row0 = lut + (size_t)m * 256U;
+    s0 += row0[code[m]];
+    s1 += row0[256U + (size_t)code[m + 1U]];
   }
-  float sum = (s0 + s1) + (s2 + s3);
+  float sum = s0 + s1;
   for (; m < m_cnt; m++) {
     sum += lut[(size_t)m * 256U + (size_t)code[m]];
   }
   return sum;
+}
+
+static inline void pq_adc_four_256(
+    const float *lut,
+    const uint8_t *c0,
+    const uint8_t *c1,
+    const uint8_t *c2,
+    const uint8_t *c3,
+    uint32_t m_cnt,
+    float *out4) {
+  float a0 = 0.0f, b0 = 0.0f;
+  float a1 = 0.0f, b1 = 0.0f;
+  float a2 = 0.0f, b2 = 0.0f;
+  float a3 = 0.0f, b3 = 0.0f;
+  uint32_t m = 0U;
+  for (; m + 1U < m_cnt; m += 2U) {
+    const float *row0 = lut + (size_t)m * 256U;
+    const float *row1 = row0 + 256U;
+    a0 += row0[c0[m]];
+    b0 += row1[c0[m + 1U]];
+    a1 += row0[c1[m]];
+    b1 += row1[c1[m + 1U]];
+    a2 += row0[c2[m]];
+    b2 += row1[c2[m + 1U]];
+    a3 += row0[c3[m]];
+    b3 += row1[c3[m + 1U]];
+  }
+  float s0 = a0 + b0;
+  float s1 = a1 + b1;
+  float s2 = a2 + b2;
+  float s3 = a3 + b3;
+  for (; m < m_cnt; m++) {
+    const float *row = lut + (size_t)m * 256U;
+    s0 += row[c0[m]];
+    s1 += row[c1[m]];
+    s2 += row[c2[m]];
+    s3 += row[c3[m]];
+  }
+  out4[0] = s0;
+  out4[1] = s1;
+  out4[2] = s2;
+  out4[3] = s3;
 }
 
 float nbase_pq_adc_distance(const nbase_pq_t *pq, const float *lut, const uint8_t *code) {
@@ -298,7 +336,24 @@ nbase_status_t nbase_pq_adc_distance_batch(
   const uint32_t m_cnt = pq->num_subvectors;
   const uint32_t nc = pq->num_centroids;
   if (nc == 256U) {
-    for (uint32_t i = 0U; i < count; i++) {
+    uint32_t i = 0U;
+    for (; i + 3U < count; i += 4U) {
+#if defined(__GNUC__) || defined(__clang__)
+      if (i + 7U < count) {
+        __builtin_prefetch(codes + (size_t)(i + 8U) * (size_t)m_cnt, 0, 1);
+      }
+#endif
+      const uint8_t *c0 = codes + (size_t)i * (size_t)m_cnt;
+      pq_adc_four_256(
+          lut,
+          c0,
+          c0 + m_cnt,
+          c0 + (size_t)2U * m_cnt,
+          c0 + (size_t)3U * m_cnt,
+          m_cnt,
+          out_distances + i);
+    }
+    for (; i < count; i++) {
       out_distances[i] = pq_adc_one_256(lut, codes + (size_t)i * (size_t)m_cnt, m_cnt);
     }
     return NBASE_OK;

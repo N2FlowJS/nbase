@@ -363,7 +363,7 @@ static void test_db_query_lru_cache_and_invalidation(void) {
 }
 
 static void test_db_upsert_batch_and_get_batch(void) {
-  ASSERT_TRUE(strcmp(nbase_version(), "1.9.0") == 0);
+  ASSERT_TRUE(strcmp(nbase_version(), "1.10.0") == 0);
 
   const uint32_t dim = 3U;
   char dir[256];

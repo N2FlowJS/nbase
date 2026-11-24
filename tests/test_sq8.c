@@ -106,11 +106,12 @@ static void test_sq8_persistence_and_corruption(void) {
 }
 
 static void test_sq8_l2_sq_asymmetric_batch(void) {
-  /* Cover scalar tail, 8-dim AVX2 chunk, 16-dim AVX2 unroll, and heap q_shifted (>512). */
-  static const uint32_t dims[7] = {1U, 7U, 13U, 16U, 64U, 128U, 600U};
+  /* Cover scalar tail, 8-dim AVX2 chunk, 16-dim AVX2 unroll, 4-row unroll tails, and heap q_shifted (>512). */
+  static const uint32_t dims[9] = {1U, 7U, 13U, 16U, 17U, 35U, 64U, 128U, 600U};
+  static const uint32_t sub_counts[8] = {0U, 1U, 2U, 3U, 4U, 5U, 7U, 13U};
   const uint32_t count = 40U;
 
-  for (uint32_t di = 0U; di < 7U; di++) {
+  for (uint32_t di = 0U; di < 9U; di++) {
     uint32_t dim = dims[di];
     float *vecs = malloc((size_t)count * dim * sizeof(float));
     uint8_t *codes = malloc((size_t)count * dim);
@@ -124,7 +125,14 @@ static void test_sq8_l2_sq_asymmetric_batch(void) {
     nbase_sq8_t *sq8 = NULL;
     ASSERT_STATUS(nbase_sq8_train(vecs, count, dim, &sq8), NBASE_OK);
     ASSERT_STATUS(nbase_sq8_encode(sq8, vecs, count, codes), NBASE_OK);
-    ASSERT_STATUS(nbase_sq8_l2_sq_asymmetric_batch(sq8, query, codes, 0U, batch_d), NBASE_OK);
+    for (uint32_t si = 0U; si < 8U; si++) {
+      uint32_t sc = sub_counts[si];
+      ASSERT_STATUS(nbase_sq8_l2_sq_asymmetric_batch(sq8, query, codes, sc, batch_d), NBASE_OK);
+      for (uint32_t i = 0U; i < sc; i++) {
+        float single = nbase_sq8_l2_sq_asymmetric(sq8, query, codes + (size_t)i * dim);
+        ASSERT_NEAR(batch_d[i], single, 1e-4, 1e-4);
+      }
+    }
     ASSERT_STATUS(nbase_sq8_l2_sq_asymmetric_batch(sq8, query, codes, count, batch_d), NBASE_OK);
 
     for (uint32_t i = 0U; i < count; i++) {
@@ -145,10 +153,11 @@ static void test_sq8_l2_sq_asymmetric_batch(void) {
 }
 
 static void test_sq8_l2_sq_symmetric_batch(void) {
-  static const uint32_t dims[7] = {1U, 7U, 13U, 16U, 64U, 128U, 600U};
+  static const uint32_t dims[9] = {1U, 7U, 13U, 16U, 17U, 35U, 64U, 128U, 600U};
+  static const uint32_t sub_counts[8] = {0U, 1U, 2U, 3U, 4U, 5U, 7U, 13U};
   const uint32_t count = 40U;
 
-  for (uint32_t di = 0U; di < 7U; di++) {
+  for (uint32_t di = 0U; di < 9U; di++) {
     uint32_t dim = dims[di];
     float *vecs = malloc((size_t)count * dim * sizeof(float));
     uint8_t *codes = malloc((size_t)count * dim);
@@ -160,7 +169,14 @@ static void test_sq8_l2_sq_symmetric_batch(void) {
     nbase_sq8_t *sq8 = NULL;
     ASSERT_STATUS(nbase_sq8_train(vecs, count, dim, &sq8), NBASE_OK);
     ASSERT_STATUS(nbase_sq8_encode(sq8, vecs, count, codes), NBASE_OK);
-    ASSERT_STATUS(nbase_sq8_l2_sq_symmetric_batch(sq8, codes, codes, 0U, batch_d), NBASE_OK);
+    for (uint32_t si = 0U; si < 8U; si++) {
+      uint32_t sc = sub_counts[si];
+      ASSERT_STATUS(nbase_sq8_l2_sq_symmetric_batch(sq8, codes, codes, sc, batch_d), NBASE_OK);
+      for (uint32_t i = 0U; i < sc; i++) {
+        float single = nbase_sq8_l2_sq_symmetric(sq8, codes, codes + (size_t)i * dim);
+        ASSERT_NEAR(batch_d[i], single, 1e-4, 1e-4);
+      }
+    }
     ASSERT_STATUS(nbase_sq8_l2_sq_symmetric_batch(sq8, codes, codes, count, batch_d), NBASE_OK);
 
     ASSERT_NEAR(batch_d[0], 0.0, 1e-6, 0.0);

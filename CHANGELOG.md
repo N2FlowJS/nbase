@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-25
+
+IVF-PQ mutable CRUD & lifecycle parity (`upsert`, `delete`, `contains`, `list_ids`, `compact`), 4-row unrolled AVX2+FMA SQ8 asymmetric/symmetric batch kernels, 4-code interleaved PQ ADC batch lookup with prefetch, HTTP `PATCH /api/vectors/:id`, `HEAD /api/vectors/:id/{metadata,text}`, selective `ids` export, and CLI `import --upsert` / `export --ids`.
+
+### Added
+- **IVF-PQ Mutable CRUD & Compaction Parity (`src/ivfpq.c`, `include/nbase.h`, `include/nbase.hpp`)**:
+  - Added thread-safe (`pthread_rwlock_t`) `nbase_ivfpq_upsert`, `nbase_ivfpq_delete` (O(1) swap-with-last inside inverted lists), `nbase_ivfpq_contains`, sorted paginated `nbase_ivfpq_list_ids`, and `nbase_ivfpq_compact`.
+  - Exposed corresponding C++17 `nbase::IvfPq` methods: `upsert` (pointer and `std::vector` overloads), `remove`, `contains`, `list_ids`, and `compact`.
+- **SIMD SQ8 & PQ ADC Batch Acceleration (`src/sq8.c`, `src/pq.c`)**:
+  - Upgraded `sq8_l2_sq_asymmetric_batch_avx2` and `sq8_l2_sq_symmetric_batch_avx2` to 4-row unrolled AVX2+FMA accumulation sharing query/scale YMM register loads across 4 codes.
+  - Added `pq_adc_four_256` 4-code interleaved LUT accumulation with guarded software prefetch (`__builtin_prefetch`) and bit-exact summation order inside `nbase_pq_adc_distance_batch`.
+- **HTTP/1.1 Server & CLI Enhancements (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `PATCH /api/vectors/:id` for partial updates (`vector`, partial-merge `metadata`, and `text` set/`null` clear), plus `HEAD /api/vectors/:id/metadata` and `HEAD /api/vectors/:id/text`.
+  - Extended `POST /api/vectors/export` to support optional `"ids": [...]` selection alongside `"filters"`.
+  - Added `--upsert` to `nbase-cli import` and `--ids <id1,id2,...>` to `nbase-cli export` (combinable with `--filter`).
+- **Tests (`tests/test_ivfpq.c`, `tests/test_sq8.c`, `tests/test_pq.c`, `tests/test_server.c`, `tests/test_db.c`)**:
+  - Added `test_ivfpq_crud_upsert_delete_list_compact_and_tsan` (CRUD, cross-cluster upsert, pagination, compact + save/load, TSan concurrent readers/writer).
+  - Extended `test_sq8_l2_sq_{asymmetric,symmetric}_batch` and `test_pq_adc_distance_batch` to cover 4-row/4-code unroll tail lengths (`0..7`, `13`) and additional unaligned dimensions (`17`, `35`).
+  - Added `test_http_server_patch_vector_head_subresources_and_export_ids`.
+
 ## [1.9.0] - 2026-11-25
 
 Full 7/7 AVX2+FMA batch distance coverage (`chebyshev_batch_avx2`, `hamming_batch_avx2`), HNSW neighbor software prefetching, LSH CRUD & compaction parity (`upsert`, `get`, `list_ids`, `compact`), HTTP `HEAD` & filtered `POST /api/vectors/export`, CLI `exists` & `export --filter`, and cross-format binary fuzz testing.

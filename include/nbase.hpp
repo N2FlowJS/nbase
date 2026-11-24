@@ -1498,6 +1498,30 @@ class IvfPq {
         ptr_, ids.data(), vectors.data(), static_cast<uint32_t>(ids.size())));
   }
 
+  void upsert(uint64_t id, const float *vec, uint32_t dim) {
+    detail::check(nbase_ivfpq_upsert(ptr_, id, vec, dim));
+  }
+
+  void upsert(uint64_t id, const std::vector<float> &vec) {
+    upsert(id, vec.data(), static_cast<uint32_t>(vec.size()));
+  }
+
+  void remove(uint64_t id) { detail::check(nbase_ivfpq_delete(ptr_, id)); }
+
+  bool contains(uint64_t id) const { return nbase_ivfpq_contains(ptr_, id); }
+
+  std::vector<uint64_t> list_ids(
+      uint64_t offset, uint32_t limit, uint64_t *out_total = nullptr) const {
+    std::vector<uint64_t> ids(limit);
+    uint32_t got = 0U;
+    detail::check(nbase_ivfpq_list_ids(
+        ptr_, offset, limit, limit > 0U ? ids.data() : nullptr, &got, out_total));
+    ids.resize(got);
+    return ids;
+  }
+
+  void compact() { detail::check(nbase_ivfpq_compact(ptr_)); }
+
   std::vector<nbase_result_t> search(
       const std::vector<float> &query, uint32_t k, uint32_t nprobe = 8U) const {
     std::vector<nbase_result_t> out(k);
