@@ -93,7 +93,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.0.0";
+  return "1.1.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -1034,6 +1034,115 @@ nbase_status_t nbase_upsert(nbase_db_t *db, uint64_t id, const float *vec, uint3
   return st;
 }
 
+nbase_status_t nbase_upsert_batch(
+    nbase_db_t *db,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim,
+    uint32_t num_threads) {
+  if (!db || (count > 0U && (!ids || !vectors))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&db->rwlock);
+
+  if (dim != db->store->dim) {
+    pthread_rwlock_unlock(&db->rwlock);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  if (db->store->mmap_backed) {
+    pthread_rwlock_unlock(&db->rwlock);
+    return NBASE_ERR_UNSUPPORTED;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)dim, dim)) {
+      pthread_rwlock_unlock(&db->rwlock);
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+
+  uint64_t *sorted_ids = malloc((size_t)count * sizeof(uint64_t));
+  uint32_t *hnsw_slots = malloc((size_t)count * sizeof(uint32_t));
+  if (!sorted_ids || !hnsw_slots) {
+    free(sorted_ids);
+    free(hnsw_slots);
+    pthread_rwlock_unlock(&db->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+  memcpy(sorted_ids, ids, (size_t)count * sizeof(uint64_t));
+  qsort(sorted_ids, count, sizeof(uint64_t), cmp_u64);
+  for (uint32_t i = 1U; i < count; i++) {
+    if (sorted_ids[i] == sorted_ids[i - 1U]) {
+      free(sorted_ids);
+      free(hnsw_slots);
+      pthread_rwlock_unlock(&db->rwlock);
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+  free(sorted_ids);
+
+  nbase_status_t st = NBASE_OK;
+  uint32_t hnsw_cnt = 0U;
+  uint32_t applied = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    const float *v = vectors + (size_t)i * (size_t)dim;
+    uint32_t existing_slot = NBASE_INVALID_SLOT;
+    if (!nbase_store_find_slot(db->store, ids[i], &existing_slot)) {
+      uint32_t new_slot = NBASE_INVALID_SLOT;
+      st = nbase_store_add(db->store, ids[i], v, &new_slot);
+      if (st != NBASE_OK) {
+        break;
+      }
+      if (db->hnsw != NULL) {
+        hnsw_slots[hnsw_cnt++] = new_slot;
+      }
+    } else if (db->hnsw == NULL) {
+      st = nbase_store_update_inplace(db->store, existing_slot, v);
+      if (st != NBASE_OK) {
+        break;
+      }
+    } else {
+      uint32_t del_slot = NBASE_INVALID_SLOT;
+      st = nbase_store_delete(db->store, ids[i], &del_slot);
+      if (st != NBASE_OK) {
+        break;
+      }
+      nbase_hnsw_mark_deleted(db->hnsw, del_slot);
+      uint32_t new_slot = NBASE_INVALID_SLOT;
+      st = nbase_store_add(db->store, ids[i], v, &new_slot);
+      if (st != NBASE_OK) {
+        break;
+      }
+      hnsw_slots[hnsw_cnt++] = new_slot;
+    }
+    applied++;
+  }
+
+  if (db->wal != NULL && applied > 0U) {
+    nbase_status_t wal_st = nbase_wal_append_vec_batch_op(
+        db->wal, NBASE_WAL_OP_UPSERT, ids, vectors, applied, dim);
+    if (st == NBASE_OK) {
+      st = wal_st;
+    }
+  }
+
+  if (st == NBASE_OK && db->hnsw != NULL && hnsw_cnt > 0U) {
+    uint32_t workers = default_worker_count(num_threads);
+    st = nbase_hnsw_insert_batch_mt(db->hnsw, db->store, hnsw_slots, hnsw_cnt, workers);
+  }
+
+  if (applied > 0U) {
+    db_cache_invalidate(db);
+  }
+  free(hnsw_slots);
+  pthread_rwlock_unlock(&db->rwlock);
+  return st;
+}
+
 nbase_status_t nbase_delete(nbase_db_t *db, uint64_t id) {
   if (!db) {
     return NBASE_ERR_INVALID_ARG;
@@ -1157,6 +1266,48 @@ nbase_status_t nbase_get(const nbase_db_t *db, uint64_t id, float *out_vec, uint
       } else {
         memcpy(out_vec, vec, (size_t)dim * sizeof(float));
       }
+    }
+  }
+
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_get_batch(
+    const nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t dim,
+    float *out_vectors,
+    bool *out_found) {
+  if (!db || (count > 0U && (!ids || !out_vectors || !out_found))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+
+  nbase_status_t st = NBASE_OK;
+  if (dim != db->store->dim) {
+    st = NBASE_ERR_DIM_MISMATCH;
+  } else {
+    size_t vec_bytes = (size_t)dim * sizeof(float);
+    for (uint32_t i = 0U; i < count; i++) {
+      uint32_t slot = NBASE_INVALID_SLOT;
+      float *dst = out_vectors + (size_t)i * (size_t)dim;
+      if (nbase_store_find_slot(db->store, ids[i], &slot)) {
+        const float *vec = nbase_store_get_vector(db->store, slot);
+        if (vec != NULL) {
+          memcpy(dst, vec, vec_bytes);
+          out_found[i] = true;
+          continue;
+        }
+      }
+      memset(dst, 0, vec_bytes);
+      out_found[i] = false;
     }
   }
 

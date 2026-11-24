@@ -361,6 +361,78 @@ static void test_db_query_lru_cache_and_invalidation(void) {
   nbase_close(db);
 }
 
+static void test_db_upsert_batch_and_get_batch(void) {
+  ASSERT_TRUE(strcmp(nbase_version(), "1.1.0") == 0);
+
+  const uint32_t dim = 3U;
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = true;
+  cfg.cache_capacity = 8U;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_save(db, dir), NBASE_OK);
+  nbase_close(db);
+
+  /* Reopen with WAL enabled and insert initial vectors */
+  ASSERT_STATUS(nbase_open_wal(dir, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_cache_configure(db, 8U), NBASE_OK);
+  uint64_t init_ids[2] = {1ULL, 2ULL};
+  float init_vecs[6] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_add_batch(db, init_ids, init_vecs, 2U, dim, 2U), NBASE_OK);
+  ASSERT_STATUS(nbase_wal_checkpoint(db), NBASE_OK);
+
+  /* Populate query cache, then run mixed upsert_batch (existing 2 + new 3) */
+  nbase_result_t res[2];
+  uint32_t cnt = 0U;
+  float q[3] = {0.0f, 1.0f, 0.0f};
+  ASSERT_STATUS(nbase_search(db, q, dim, 2U, NULL, res, &cnt), NBASE_OK);
+  nbase_stats_t st;
+  ASSERT_STATUS(nbase_stats(db, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.cache_entries, 1ULL);
+
+  /* Duplicate ID inside upsert_batch is rejected cleanly without mutation */
+  uint64_t dup_ids[2] = {5ULL, 5ULL};
+  float dup_vecs[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+  ASSERT_STATUS(nbase_upsert_batch(db, dup_ids, dup_vecs, 2U, dim, 0U), NBASE_ERR_INVALID_ARG);
+
+  uint64_t up_ids[3] = {2ULL, 3ULL, 4ULL};
+  float up_vecs[9] = {
+      0.0f, 0.5f, 0.5f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f
+  };
+  ASSERT_STATUS(nbase_upsert_batch(db, up_ids, up_vecs, 3U, dim, 2U), NBASE_OK);
+  ASSERT_STATUS(nbase_stats(db, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.active_vectors, 4ULL);
+  ASSERT_EQ_U64(st.cache_entries, 0ULL);
+
+  /* Simulate crash (close without save) and replay WAL */
+  nbase_close(db);
+  ASSERT_STATUS(nbase_open_wal(dir, &db), NBASE_OK);
+
+  uint64_t get_ids[4] = {1ULL, 2ULL, 999ULL, 3ULL};
+  float got_vecs[12];
+  bool got_found[4] = {false, false, false, false};
+  ASSERT_STATUS(nbase_get_batch(db, get_ids, 4U, dim, got_vecs, got_found), NBASE_OK);
+  ASSERT_TRUE(got_found[0]);
+  ASSERT_TRUE(got_found[1]);
+  ASSERT_TRUE(!got_found[2]);
+  ASSERT_TRUE(got_found[3]);
+  ASSERT_NEAR(got_vecs[0], 1.0, 1e-6, 0.0);
+  ASSERT_NEAR(got_vecs[4], 0.5, 1e-6, 0.0);
+  ASSERT_NEAR(got_vecs[6], 0.0, 1e-6, 0.0);
+  ASSERT_NEAR(got_vecs[10], 1.0, 1e-6, 0.0);
+
+  nbase_close(db);
+  test_rm_rf(dir);
+}
+
 void test_db_run(void) {
   RUN_TEST(test_db_upsert_with_and_without_hnsw);
   RUN_TEST(test_db_batch_search);
@@ -368,4 +440,5 @@ void test_db_run(void) {
   RUN_TEST(test_db_compact);
   RUN_TEST(test_db_batch_and_filter_delete_and_memory);
   RUN_TEST(test_db_query_lru_cache_and_invalidation);
+  RUN_TEST(test_db_upsert_batch_and_get_batch);
 }

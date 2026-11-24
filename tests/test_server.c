@@ -880,6 +880,68 @@ static void test_http_server_weighted_rerank_and_cache(void) {
   nbase_close(db);
 }
 
+static void test_http_server_upsert_and_get_batch(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+
+  /* Single upsert inserts new ID */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/upsert",
+      NULL,
+      "{\"id\":1,\"vector\":[1,0,0],\"metadata\":{\"tag\":\"v1\"},\"text\":\"alpha doc\"}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"upserted\":1") != NULL);
+  free(r.body);
+
+  /* Bulk upsert updates ID 1 and inserts ID 2 */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/upsert",
+      NULL,
+      "{\"vectors\":["
+      "{\"id\":1,\"vector\":[0.5,0.5,0],\"metadata\":{\"tag\":\"v2\"},\"text\":\"beta doc\"},"
+      "{\"id\":2,\"vector\":[0,1,0],\"metadata\":{\"tag\":\"new\"},\"text\":\"gamma doc\"}"
+      "]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"upserted\":2") != NULL);
+  free(r.body);
+
+  /* Batch get returns 2 found and 1 missing */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/get",
+      NULL,
+      "{\"ids\":[1,999,2],\"includeVectors\":true,\"includeMetadata\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"foundCount\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"found\":false") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"tag\":\"v2\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"gamma doc\"") != NULL);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -887,4 +949,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_keepalive_and_hybrid);
   RUN_TEST(test_http_server_batch_delete_and_telemetry);
   RUN_TEST(test_http_server_weighted_rerank_and_cache);
+  RUN_TEST(test_http_server_upsert_and_get_batch);
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(libnbase VERSION 1.0.0 LANGUAGES C)
+project(libnbase VERSION 1.1.0 LANGUAGES C)
 
 include(GNUInstallDirs)
 
@@ -74,7 +74,7 @@ add_library(nbase_shared SHARED $<TARGET_OBJECTS:nbase_obj>)
 set_target_properties(nbase_shared PROPERTIES
   OUTPUT_NAME nbase
   VERSION ${PROJECT_VERSION}
-  SOVERSION 0
+  SOVERSION 1
 )
 target_include_directories(nbase_shared PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(nbase_shared PRIVATE m Threads::Threads)

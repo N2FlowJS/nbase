@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 0
+#define NBASE_VERSION_MINOR 1
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -58,6 +58,11 @@ typedef struct nbase_edge {
   uint64_t dst_id;
   float weight;
 } nbase_edge_t;
+
+typedef struct nbase_rerank_weight {
+  const char *key;
+  float weight;
+} nbase_rerank_weight_t;
 
 typedef bool (*nbase_filter_fn)(uint64_t id, void *user_ctx);
 
@@ -178,10 +183,12 @@ void nbase_close(nbase_db_t *db);
 nbase_status_t nbase_add(nbase_db_t *db, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_add_batch(nbase_db_t *db, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim, uint32_t num_threads);
 nbase_status_t nbase_upsert(nbase_db_t *db, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_upsert_batch(nbase_db_t *db, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim, uint32_t num_threads);
 nbase_status_t nbase_delete(nbase_db_t *db, uint64_t id);
 nbase_status_t nbase_delete_batch(nbase_db_t *db, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_delete_by_filter(nbase_db_t *db, const nbase_meta_filter_t *filter, uint32_t *out_deleted);
 nbase_status_t nbase_get(const nbase_db_t *db, uint64_t id, float *out_vec, uint32_t dim);
+nbase_status_t nbase_get_batch(const nbase_db_t *db, const uint64_t *ids, uint32_t count, uint32_t dim, float *out_vectors, bool *out_found);
 bool nbase_contains(const nbase_db_t *db, uint64_t id);
 
 typedef bool (*nbase_meta_iter_fn)(const char *key, const nbase_meta_value_t *val, void *user_ctx);
@@ -278,10 +285,12 @@ nbase_status_t nbase_pdb_close(nbase_pdb_t *pdb);
 nbase_status_t nbase_pdb_add(nbase_pdb_t *pdb, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_pdb_add_batch(nbase_pdb_t *pdb, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim, uint32_t num_threads);
 nbase_status_t nbase_pdb_upsert(nbase_pdb_t *pdb, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_pdb_upsert_batch(nbase_pdb_t *pdb, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim, uint32_t num_threads);
 nbase_status_t nbase_pdb_delete(nbase_pdb_t *pdb, uint64_t id);
 nbase_status_t nbase_pdb_delete_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_pdb_delete_by_filter(nbase_pdb_t *pdb, const nbase_meta_filter_t *filter, uint32_t *out_deleted);
 nbase_status_t nbase_pdb_get(nbase_pdb_t *pdb, uint64_t id, float *out_vec, uint32_t dim);
+nbase_status_t nbase_pdb_get_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t count, uint32_t dim, float *out_vectors, bool *out_found);
 bool nbase_pdb_contains(nbase_pdb_t *pdb, uint64_t id);
 
 nbase_status_t nbase_pdb_set_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
@@ -300,6 +309,8 @@ nbase_status_t nbase_pdb_search_batch(nbase_pdb_t *pdb, const float *queries, ui
 nbase_status_t nbase_pdb_search_text(nbase_pdb_t *pdb, const char *query, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_search_hybrid(nbase_pdb_t *pdb, const float *query_vec, uint32_t dim, const char *query_text, uint32_t k, float alpha, float rrf_k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_find_similar(nbase_pdb_t *pdb, uint64_t id, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_pdb_rerank_mmr(nbase_pdb_t *pdb, const nbase_result_t *candidates, uint32_t candidate_count, uint32_t k, float lambda, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_pdb_rerank_weighted(nbase_pdb_t *pdb, const nbase_result_t *candidates, uint32_t candidate_count, const nbase_rerank_weight_t *weights, uint32_t weight_count, uint32_t k, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_extract_relationships(nbase_pdb_t *pdb, uint32_t k_neighbors, float max_distance, const nbase_pdb_search_opts_t *opts, nbase_edge_t **out_edges, uint64_t *out_edge_count);
 nbase_status_t nbase_pdb_compact(nbase_pdb_t *pdb);
 nbase_status_t nbase_pdb_rebuild_hnsw_mt(nbase_pdb_t *pdb, uint32_t num_threads);
@@ -326,18 +337,22 @@ typedef struct nbase_clustered_stats {
   uint32_t max_clusters;
   uint32_t cluster_count;
   uint64_t active_vectors;
+  uint64_t memory_bytes;
 } nbase_clustered_stats_t;
 
 nbase_clustered_config_t nbase_clustered_config_default(uint32_t dim);
 nbase_status_t nbase_clustered_create(const nbase_clustered_config_t *cfg, nbase_clustered_t **out_cl);
 void nbase_clustered_destroy(nbase_clustered_t *cl);
 nbase_status_t nbase_clustered_add(nbase_clustered_t *cl, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_clustered_add_batch(nbase_clustered_t *cl, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
 nbase_status_t nbase_clustered_upsert(nbase_clustered_t *cl, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_clustered_delete(nbase_clustered_t *cl, uint64_t id);
+nbase_status_t nbase_clustered_delete_batch(nbase_clustered_t *cl, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_clustered_get(const nbase_clustered_t *cl, uint64_t id, float *out_vec, uint32_t dim);
 bool nbase_clustered_contains(const nbase_clustered_t *cl, uint64_t id);
 nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clusters);
 nbase_status_t nbase_clustered_search(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_clustered_search_filtered(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_clustered_stats(const nbase_clustered_t *cl, nbase_clustered_stats_t *out_stats);
 nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *file_path);
 nbase_status_t nbase_clustered_load(const char *file_path, nbase_clustered_t **out_cl);
@@ -375,11 +390,6 @@ nbase_status_t nbase_ivfpq_stats(const nbase_ivfpq_t *index, nbase_ivfpq_stats_t
 void nbase_ivfpq_destroy(nbase_ivfpq_t *index);
 
 /* --- MMR Diversity Reranking & Graph Analytics --- */
-
-typedef struct nbase_rerank_weight {
-  const char *key;
-  float weight;
-} nbase_rerank_weight_t;
 
 nbase_status_t nbase_rerank_mmr(const nbase_db_t *db, const nbase_result_t *candidates, uint32_t candidate_count, uint32_t k, float lambda, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_rerank_weighted(const nbase_db_t *db, const nbase_result_t *candidates, uint32_t candidate_count, const nbase_rerank_weight_t *weights, uint32_t weight_count, uint32_t k, nbase_result_t *out_results, uint32_t *out_count);

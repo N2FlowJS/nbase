@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <float.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -24,6 +25,8 @@ struct nbase_clustered {
   uint32_t cluster_cap;
   uint32_t *slot_cluster;
   uint32_t slot_cap;
+  pthread_rwlock_t rwlock;
+  bool rwlock_init;
 };
 
 typedef struct cl_probe {
@@ -36,6 +39,18 @@ typedef struct cl_maxheap {
   uint32_t len;
   uint32_t cap;
 } cl_maxheap_t;
+
+static int cmp_cl_u64_asc(const void *pa, const void *pb) {
+  uint64_t a = *(const uint64_t *)pa;
+  uint64_t b = *(const uint64_t *)pb;
+  if (a < b) {
+    return -1;
+  }
+  if (a > b) {
+    return 1;
+  }
+  return 0;
+}
 
 static int cmp_cl_probe_asc(const void *pa, const void *pb) {
   const cl_probe_t *a = (const cl_probe_t *)pa;
@@ -208,8 +223,15 @@ nbase_status_t nbase_clustered_create(const nbase_clustered_config_t *cfg, nbase
     cl->cfg.seed = 0x434C555354455231ULL;
   }
 
+  if (pthread_rwlock_init(&cl->rwlock, NULL) != 0) {
+    free(cl);
+    return NBASE_ERR_NOMEM;
+  }
+  cl->rwlock_init = true;
+
   nbase_status_t st = nbase_store_create(cl->cfg.dim, cl->cfg.metric, 64U, &cl->store);
   if (st != NBASE_OK) {
+    pthread_rwlock_destroy(&cl->rwlock);
     free(cl);
     return st;
   }
@@ -230,17 +252,17 @@ void nbase_clustered_destroy(nbase_clustered_t *cl) {
   free_cluster_array(cl->clusters, cl->cluster_count);
   free(cl->slot_cluster);
   nbase_store_destroy(cl->store);
+  if (cl->rwlock_init) {
+    pthread_rwlock_destroy(&cl->rwlock);
+  }
   free(cl);
 }
 
-nbase_status_t nbase_clustered_add(
+static nbase_status_t cl_add_unlocked(
     nbase_clustered_t *cl,
     uint64_t id,
     const float *vec,
     uint32_t dim) {
-  if (!cl || !vec) {
-    return NBASE_ERR_INVALID_ARG;
-  }
   if (dim != cl->cfg.dim) {
     return NBASE_ERR_DIM_MISMATCH;
   }
@@ -332,10 +354,7 @@ nbase_status_t nbase_clustered_add(
   return NBASE_OK;
 }
 
-nbase_status_t nbase_clustered_delete(nbase_clustered_t *cl, uint64_t id) {
-  if (!cl) {
-    return NBASE_ERR_INVALID_ARG;
-  }
+static nbase_status_t cl_delete_unlocked(nbase_clustered_t *cl, uint64_t id) {
   uint32_t slot = NBASE_INVALID_SLOT;
   if (!nbase_store_find_slot(cl->store, id, &slot)) {
     return NBASE_ERR_NOT_FOUND;
@@ -377,6 +396,133 @@ nbase_status_t nbase_clustered_delete(nbase_clustered_t *cl, uint64_t id) {
   return nbase_store_delete(cl->store, id, NULL);
 }
 
+nbase_status_t nbase_clustered_add(
+    nbase_clustered_t *cl,
+    uint64_t id,
+    const float *vec,
+    uint32_t dim) {
+  if (!cl || !vec) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  pthread_rwlock_wrlock(&cl->rwlock);
+  nbase_status_t st = cl_add_unlocked(cl, id, vec, dim);
+  pthread_rwlock_unlock(&cl->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_clustered_add_batch(
+    nbase_clustered_t *cl,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim) {
+  if (!cl || (count > 0U && (!ids || !vectors))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&cl->rwlock);
+  if (dim != cl->cfg.dim) {
+    pthread_rwlock_unlock(&cl->rwlock);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)dim, dim)) {
+      pthread_rwlock_unlock(&cl->rwlock);
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+
+  uint64_t *sorted = malloc((size_t)count * sizeof(uint64_t));
+  if (!sorted) {
+    pthread_rwlock_unlock(&cl->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (nbase_store_find_slot(cl->store, ids[i], NULL)) {
+      free(sorted);
+      pthread_rwlock_unlock(&cl->rwlock);
+      return NBASE_ERR_ALREADY_EXISTS;
+    }
+    sorted[i] = ids[i];
+  }
+  qsort(sorted, count, sizeof(uint64_t), cmp_cl_u64_asc);
+  for (uint32_t i = 1U; i < count; i++) {
+    if (sorted[i] == sorted[i - 1U]) {
+      free(sorted);
+      pthread_rwlock_unlock(&cl->rwlock);
+      return NBASE_ERR_ALREADY_EXISTS;
+    }
+  }
+  free(sorted);
+
+  nbase_status_t st = NBASE_OK;
+  uint32_t added = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    st = cl_add_unlocked(cl, ids[i], vectors + (size_t)i * (size_t)dim, dim);
+    if (st != NBASE_OK) {
+      break;
+    }
+    added++;
+  }
+  if (st != NBASE_OK) {
+    for (uint32_t j = 0U; j < added; j++) {
+      (void)cl_delete_unlocked(cl, ids[j]);
+    }
+  }
+
+  pthread_rwlock_unlock(&cl->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_clustered_delete(nbase_clustered_t *cl, uint64_t id) {
+  if (!cl) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  pthread_rwlock_wrlock(&cl->rwlock);
+  nbase_status_t st = cl_delete_unlocked(cl, id);
+  pthread_rwlock_unlock(&cl->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_clustered_delete_batch(
+    nbase_clustered_t *cl,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  if (!cl || (count > 0U && !ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (out_deleted) {
+    *out_deleted = 0U;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&cl->rwlock);
+  uint32_t deleted = 0U;
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = 0U; i < count; i++) {
+    nbase_status_t ds = cl_delete_unlocked(cl, ids[i]);
+    if (ds == NBASE_ERR_NOT_FOUND) {
+      continue;
+    }
+    if (ds != NBASE_OK) {
+      st = ds;
+      break;
+    }
+    deleted++;
+  }
+  pthread_rwlock_unlock(&cl->rwlock);
+  if (out_deleted) {
+    *out_deleted = deleted;
+  }
+  return st;
+}
+
 nbase_status_t nbase_clustered_upsert(
     nbase_clustered_t *cl,
     uint64_t id,
@@ -385,19 +531,25 @@ nbase_status_t nbase_clustered_upsert(
   if (!cl || !vec) {
     return NBASE_ERR_INVALID_ARG;
   }
+  pthread_rwlock_wrlock(&cl->rwlock);
   if (dim != cl->cfg.dim) {
+    pthread_rwlock_unlock(&cl->rwlock);
     return NBASE_ERR_DIM_MISMATCH;
   }
   if (!nbase_vec_is_finite(vec, dim)) {
+    pthread_rwlock_unlock(&cl->rwlock);
     return NBASE_ERR_INVALID_VECTOR;
   }
   if (nbase_store_find_slot(cl->store, id, NULL)) {
-    nbase_status_t st = nbase_clustered_delete(cl, id);
+    nbase_status_t st = cl_delete_unlocked(cl, id);
     if (st != NBASE_OK) {
+      pthread_rwlock_unlock(&cl->rwlock);
       return st;
     }
   }
-  return nbase_clustered_add(cl, id, vec, dim);
+  nbase_status_t st = cl_add_unlocked(cl, id, vec, dim);
+  pthread_rwlock_unlock(&cl->rwlock);
+  return st;
 }
 
 nbase_status_t nbase_clustered_get(
@@ -408,40 +560,54 @@ nbase_status_t nbase_clustered_get(
   if (!cl || !out_vec) {
     return NBASE_ERR_INVALID_ARG;
   }
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+  nbase_status_t st = NBASE_OK;
   if (dim != cl->cfg.dim) {
-    return NBASE_ERR_DIM_MISMATCH;
+    st = NBASE_ERR_DIM_MISMATCH;
+  } else {
+    uint32_t slot = NBASE_INVALID_SLOT;
+    if (!nbase_store_find_slot(cl->store, id, &slot)) {
+      st = NBASE_ERR_NOT_FOUND;
+    } else {
+      const float *v = nbase_store_get_vector(cl->store, slot);
+      if (!v) {
+        st = NBASE_ERR_NOT_FOUND;
+      } else {
+        memcpy(out_vec, v, (size_t)dim * sizeof(float));
+      }
+    }
   }
-  uint32_t slot = NBASE_INVALID_SLOT;
-  if (!nbase_store_find_slot(cl->store, id, &slot)) {
-    return NBASE_ERR_NOT_FOUND;
-  }
-  const float *v = nbase_store_get_vector(cl->store, slot);
-  if (!v) {
-    return NBASE_ERR_NOT_FOUND;
-  }
-  memcpy(out_vec, v, (size_t)dim * sizeof(float));
-  return NBASE_OK;
+  pthread_rwlock_unlock(&mcl->rwlock);
+  return st;
 }
 
 bool nbase_clustered_contains(const nbase_clustered_t *cl, uint64_t id) {
   if (!cl) {
     return false;
   }
-  return nbase_store_find_slot(cl->store, id, NULL);
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+  bool found = nbase_store_find_slot(cl->store, id, NULL);
+  pthread_rwlock_unlock(&mcl->rwlock);
+  return found;
 }
 
 nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clusters) {
   if (!cl) {
     return NBASE_ERR_INVALID_ARG;
   }
+  pthread_rwlock_wrlock(&cl->rwlock);
   if (cl->store->active_count == 0ULL) {
     free_cluster_array(cl->clusters, cl->cluster_count);
     cl->clusters = NULL;
     cl->cluster_count = 0U;
     cl->cluster_cap = 0U;
+    pthread_rwlock_unlock(&cl->rwlock);
     return NBASE_OK;
   }
   if (cl->store->active_count > (uint64_t)UINT32_MAX) {
+    pthread_rwlock_unlock(&cl->rwlock);
     return NBASE_ERR_INVALID_ARG;
   }
 
@@ -476,6 +642,7 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
     free(centroids);
     free(assign);
     free(new_clusters);
+    pthread_rwlock_unlock(&cl->rwlock);
     return NBASE_ERR_NOMEM;
   }
 
@@ -499,6 +666,7 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
     free(centroids);
     free(assign);
     free(new_clusters);
+    pthread_rwlock_unlock(&cl->rwlock);
     return st;
   }
 
@@ -510,6 +678,7 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
       free(slots);
       free(centroids);
       free(assign);
+      pthread_rwlock_unlock(&cl->rwlock);
       return NBASE_ERR_NOMEM;
     }
     memcpy(new_clusters[c].centroid, centroids + (size_t)c * (size_t)dim, (size_t)dim * sizeof(float));
@@ -523,6 +692,7 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
       free(ids);
       free(slots);
       free(assign);
+      pthread_rwlock_unlock(&cl->rwlock);
       return NBASE_ERR_NOMEM;
     }
     new_clusters[cid].member_ids[new_clusters[cid].count++] = ids[i];
@@ -533,6 +703,7 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
     free(ids);
     free(slots);
     free(assign);
+    pthread_rwlock_unlock(&cl->rwlock);
     return NBASE_ERR_NOMEM;
   }
   for (uint32_t i = 0U; i < n; i++) {
@@ -547,34 +718,44 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
   cl->clusters = new_clusters;
   cl->cluster_count = k_eff;
   cl->cluster_cap = k_eff;
+  pthread_rwlock_unlock(&cl->rwlock);
   return NBASE_OK;
 }
 
-nbase_status_t nbase_clustered_search(
+nbase_status_t nbase_clustered_search_filtered(
     const nbase_clustered_t *cl,
     const float *query,
     uint32_t dim,
     uint32_t k,
     uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count) {
   if (!cl || !query || !out_count || (k > 0U && !out_results)) {
     return NBASE_ERR_INVALID_ARG;
   }
   *out_count = 0U;
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+
   if (dim != cl->cfg.dim) {
+    pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_ERR_DIM_MISMATCH;
   }
   if (!nbase_vec_is_finite(query, dim)) {
+    pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_ERR_INVALID_VECTOR;
   }
   if (k == 0U || cl->store->active_count == 0ULL || cl->cluster_count == 0U) {
+    pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_OK;
   }
 
   nbase_dist_fn dfn = nbase_get_distance_fn(cl->cfg.metric);
   cl_probe_t *probes = malloc((size_t)cl->cluster_count * sizeof(cl_probe_t));
   if (!probes) {
+    pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_ERR_NOMEM;
   }
   uint32_t non_empty = 0U;
@@ -588,6 +769,7 @@ nbase_status_t nbase_clustered_search(
   }
   if (non_empty == 0U) {
     free(probes);
+    pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_OK;
   }
 
@@ -597,6 +779,7 @@ nbase_status_t nbase_clustered_search(
   nbase_result_t *heap_buf = malloc((size_t)k * sizeof(nbase_result_t));
   if (!heap_buf) {
     free(probes);
+    pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_ERR_NOMEM;
   }
   cl_maxheap_t heap = {heap_buf, 0U, k};
@@ -605,6 +788,9 @@ nbase_status_t nbase_clustered_search(
     const cl_cluster_t *c = &cl->clusters[probes[pi].cluster_idx];
     for (uint32_t mi = 0U; mi < c->count; mi++) {
       uint64_t mid = c->member_ids[mi];
+      if (filter && !filter(mid, filter_ctx)) {
+        continue;
+      }
       uint32_t mslot = NBASE_INVALID_SLOT;
       if (!nbase_store_find_slot(cl->store, mid, &mslot)) {
         continue;
@@ -615,6 +801,7 @@ nbase_status_t nbase_clustered_search(
     }
   }
   free(probes);
+  pthread_rwlock_unlock(&mcl->rwlock);
 
   if (heap.len > 1U) {
     qsort(heap.data, heap.len, sizeof(nbase_result_t), nbase_cmp_result_asc);
@@ -627,25 +814,51 @@ nbase_status_t nbase_clustered_search(
   return NBASE_OK;
 }
 
+nbase_status_t nbase_clustered_search(
+    const nbase_clustered_t *cl,
+    const float *query,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t nprobe,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return nbase_clustered_search_filtered(
+      cl, query, dim, k, nprobe, NULL, NULL, out_results, out_count);
+}
+
 nbase_status_t nbase_clustered_stats(
     const nbase_clustered_t *cl,
     nbase_clustered_stats_t *out_stats) {
   if (!cl || !out_stats) {
     return NBASE_ERR_INVALID_ARG;
   }
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+
   memset(out_stats, 0, sizeof(*out_stats));
   out_stats->dim = cl->cfg.dim;
   out_stats->metric = cl->cfg.metric;
   out_stats->target_cluster_size = cl->cfg.target_cluster_size;
   out_stats->max_clusters = cl->cfg.max_clusters;
   uint32_t non_empty = 0U;
+  uint64_t mem = (uint64_t)sizeof(*cl) +
+                 nbase_store_memory_bytes(cl->store) +
+                 (uint64_t)cl->cluster_cap * (uint64_t)sizeof(cl_cluster_t) +
+                 (uint64_t)cl->slot_cap * (uint64_t)sizeof(uint32_t);
   for (uint32_t c = 0U; c < cl->cluster_count; c++) {
     if (cl->clusters[c].count > 0U) {
       non_empty++;
     }
+    if (cl->clusters[c].centroid != NULL) {
+      mem += (uint64_t)cl->cfg.dim * (uint64_t)sizeof(float);
+    }
+    mem += (uint64_t)cl->clusters[c].cap * (uint64_t)sizeof(uint64_t);
   }
   out_stats->cluster_count = non_empty;
   out_stats->active_vectors = cl->store->active_count;
+  out_stats->memory_bytes = mem;
+
+  pthread_rwlock_unlock(&mcl->rwlock);
   return NBASE_OK;
 }
 
@@ -653,6 +866,8 @@ nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *fil
   if (!cl || !file_path || file_path[0] == '\0') {
     return NBASE_ERR_INVALID_ARG;
   }
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
 
   uint32_t dim = cl->cfg.dim;
   size_t vec_bytes = (size_t)dim * sizeof(float);
@@ -667,6 +882,7 @@ nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *fil
     size_t per_cluster = vec_bytes + sizeof(uint32_t) +
                          (size_t)cl->clusters[c].count * (sizeof(uint64_t) + vec_bytes);
     if (payload_bytes > SIZE_MAX - per_cluster) {
+      pthread_rwlock_unlock(&mcl->rwlock);
       return NBASE_ERR_NOMEM;
     }
     payload_bytes += per_cluster;
@@ -676,6 +892,7 @@ nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *fil
   if (payload_bytes > 0U) {
     buf = malloc(payload_bytes);
     if (!buf) {
+      pthread_rwlock_unlock(&mcl->rwlock);
       return NBASE_ERR_NOMEM;
     }
     size_t off = 0U;
@@ -693,6 +910,7 @@ nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *fil
         uint32_t mslot = NBASE_INVALID_SLOT;
         if (!nbase_store_find_slot(cl->store, mid, &mslot)) {
           free(buf);
+          pthread_rwlock_unlock(&mcl->rwlock);
           return NBASE_ERR_CORRUPT;
         }
         const float *mv = nbase_store_get_vector(cl->store, mslot);
@@ -720,6 +938,8 @@ nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *fil
   hdr.payload_bytes = (uint64_t)payload_bytes;
   hdr.payload_crc32 = (payload_bytes > 0U) ? nbase_crc32(buf, payload_bytes) : 0U;
   hdr.header_crc32 = nbase_crc32(&hdr, offsetof(nbcl_header_t, header_crc32));
+
+  pthread_rwlock_unlock(&mcl->rwlock);
 
   nbase_io_chunk_t chunk = {buf, payload_bytes};
   nbase_status_t st = nbase_write_file_atomic(

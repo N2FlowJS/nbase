@@ -19,7 +19,9 @@ static void print_usage(const char *prog) {
       "  init <dir> --dim <D> [--metric <M>] [--no-hnsw]\n"
       "  info <dir>\n"
       "  add <dir> <id> <v0,v1,...>\n"
+      "  upsert <dir> <id> <v0,v1,...>\n"
       "  get <dir> <id>\n"
+      "  get-batch <dir> <id1,id2,...>\n"
       "  delete <dir> <id>\n"
       "  delete-batch <dir> <id1,id2,...>\n"
       "  set-text <dir> <id> <text>\n"
@@ -417,7 +419,8 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (strcmp(cmd, "add") == 0) {
+  if (strcmp(cmd, "add") == 0 || strcmp(cmd, "upsert") == 0) {
+    bool is_upsert = (strcmp(cmd, "upsert") == 0);
     if (argc != 5) {
       print_usage(argv[0]);
       return 1;
@@ -441,17 +444,19 @@ int main(int argc, char **argv) {
       fprintf(stderr, "Invalid vector CSV (expected %u floats)\n", s.dim);
       return 1;
     }
-    st = nbase_add(db, id, vec, s.dim);
+    st = is_upsert ? nbase_upsert(db, id, vec, s.dim) : nbase_add(db, id, vec, s.dim);
     free(vec);
     if (st == NBASE_OK) {
       st = nbase_save(db, argv[2]);
     }
     nbase_close(db);
     if (st != NBASE_OK) {
-      fprintf(stderr, "add failed: %s\n", nbase_strerror(st));
+      fprintf(stderr, "%s failed: %s\n", cmd, nbase_strerror(st));
       return 1;
     }
-    printf("Added vector %llu\n", (unsigned long long)id);
+    printf(
+        is_upsert ? "Upserted vector %llu\n" : "Added vector %llu\n",
+        (unsigned long long)id);
     return 0;
   }
 
@@ -522,7 +527,8 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (strcmp(cmd, "delete-batch") == 0) {
+  if (strcmp(cmd, "get-batch") == 0 || strcmp(cmd, "delete-batch") == 0) {
+    bool is_get = (strcmp(cmd, "get-batch") == 0);
     if (argc != 4 || argv[3][0] == '\0') {
       print_usage(argv[0]);
       return 1;
@@ -585,6 +591,51 @@ int main(int argc, char **argv) {
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
     }
+
+    if (is_get) {
+      nbase_stats_t s;
+      (void)nbase_stats(db, &s);
+      float *vecs = malloc((size_t)cnt * (size_t)s.dim * sizeof(float));
+      bool *found = malloc((size_t)cnt * sizeof(bool));
+      if (!vecs || !found) {
+        free(vecs);
+        free(found);
+        free(ids);
+        nbase_close(db);
+        return 1;
+      }
+      st = nbase_get_batch(db, ids, cnt, s.dim, vecs, found);
+      nbase_close(db);
+      if (st != NBASE_OK) {
+        free(vecs);
+        free(found);
+        free(ids);
+        fprintf(stderr, "get-batch failed: %s\n", nbase_strerror(st));
+        return 1;
+      }
+      printf("{\"results\":[");
+      for (uint32_t i = 0U; i < cnt; i++) {
+        printf(
+            i == 0U ? "{\"id\":%llu,\"found\":%s" : ",{\"id\":%llu,\"found\":%s",
+            (unsigned long long)ids[i],
+            found[i] ? "true" : "false");
+        if (found[i]) {
+          printf(",\"vector\":[");
+          const float *v = vecs + (size_t)i * (size_t)s.dim;
+          for (uint32_t d = 0U; d < s.dim; d++) {
+            printf(d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+          }
+          printf("]");
+        }
+        printf("}");
+      }
+      printf("]}\n");
+      free(vecs);
+      free(found);
+      free(ids);
+      return 0;
+    }
+
     uint32_t deleted = 0U;
     st = nbase_delete_batch(db, ids, cnt, &deleted);
     free(ids);

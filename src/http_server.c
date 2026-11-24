@@ -925,7 +925,11 @@ static void handle_stats(const http_conn_t *c) {
   nbase_sbuf_free(&sb);
 }
 
-static void handle_post_vectors(const http_conn_t *c, const char *body, size_t body_len) {
+static void handle_write_vectors(
+    const http_conn_t *c,
+    const char *body,
+    size_t body_len,
+    bool is_upsert) {
   nbase_http_server_t *srv = c->srv;
   nbase_json_t *root = NULL;
   if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
@@ -1010,7 +1014,9 @@ static void handle_post_vectors(const http_conn_t *c, const char *body, size_t b
       free(tmp_v);
     }
 
-    nbase_status_t st = nbase_add_batch(srv->db, ids, vecs, count, dim, threads);
+    nbase_status_t st = is_upsert
+                            ? nbase_upsert_batch(srv->db, ids, vecs, count, dim, threads)
+                            : nbase_add_batch(srv->db, ids, vecs, count, dim, threads);
     free(vecs);
     if (st != NBASE_OK) {
       free(ids);
@@ -1052,8 +1058,11 @@ static void handle_post_vectors(const http_conn_t *c, const char *body, size_t b
     nbase_json_free(root);
     nbase_sbuf_t sb;
     nbase_sbuf_init(&sb);
-    nbase_sbuf_appendf(&sb, "{\"success\":true,\"added\":%u}", count);
-    send_sbuf_json(c, 201, &sb);
+    nbase_sbuf_appendf(
+        &sb,
+        is_upsert ? "{\"success\":true,\"upserted\":%u}" : "{\"success\":true,\"added\":%u}",
+        count);
+    send_sbuf_json(c, is_upsert ? 200 : 201, &sb);
     nbase_sbuf_free(&sb);
     return;
   }
@@ -1078,7 +1087,7 @@ static void handle_post_vectors(const http_conn_t *c, const char *body, size_t b
     return;
   }
 
-  nbase_status_t st = nbase_add(srv->db, id, vec, dim);
+  nbase_status_t st = is_upsert ? nbase_upsert(srv->db, id, vec, dim) : nbase_add(srv->db, id, vec, dim);
   free(vec);
   if (st != NBASE_OK) {
     nbase_json_free(root);
@@ -1114,8 +1123,158 @@ static void handle_post_vectors(const http_conn_t *c, const char *body, size_t b
   nbase_json_free(root);
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
-  nbase_sbuf_appendf(&sb, "{\"success\":true,\"id\":%llu}", (unsigned long long)id);
-  send_sbuf_json(c, 201, &sb);
+  if (is_upsert) {
+    nbase_sbuf_appendf(&sb, "{\"success\":true,\"id\":%llu,\"upserted\":1}", (unsigned long long)id);
+  } else {
+    nbase_sbuf_appendf(&sb, "{\"success\":true,\"id\":%llu}", (unsigned long long)id);
+  }
+  send_sbuf_json(c, is_upsert ? 200 : 201, &sb);
+  nbase_sbuf_free(&sb);
+}
+
+static void handle_post_vectors(const http_conn_t *c, const char *body, size_t body_len) {
+  handle_write_vectors(c, body, body_len, false);
+}
+
+static void handle_upsert_vectors(const http_conn_t *c, const char *body, size_t body_len) {
+  handle_write_vectors(c, body, body_len, true);
+}
+
+static void handle_get_vectors_batch(const http_conn_t *c, const char *body, size_t body_len) {
+  nbase_http_server_t *srv = c->srv;
+  nbase_json_t *root = NULL;
+  if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
+    nbase_json_free(root);
+    send_error_json(c, 400, "invalid JSON request body");
+    return;
+  }
+
+  const nbase_json_t *jids = nbase_json_obj_get(root, "ids");
+  if (!jids || jids->type != NBASE_JSON_ARRAY || jids->len == 0U || jids->len > 100000U) {
+    nbase_json_free(root);
+    send_error_json(c, 400, "ids must be a non-empty array of at most 100000 uint64 values");
+    return;
+  }
+
+  bool inc_vec = true;
+  bool inc_meta = true;
+  bool inc_text = false;
+  const nbase_json_t *jincv = nbase_json_obj_get(root, "includeVectors");
+  if (jincv != NULL) {
+    if (jincv->type != NBASE_JSON_BOOL) {
+      nbase_json_free(root);
+      send_error_json(c, 400, "includeVectors must be boolean");
+      return;
+    }
+    inc_vec = jincv->b;
+  }
+  const nbase_json_t *jincm = nbase_json_obj_get(root, "includeMetadata");
+  if (jincm != NULL) {
+    if (jincm->type != NBASE_JSON_BOOL) {
+      nbase_json_free(root);
+      send_error_json(c, 400, "includeMetadata must be boolean");
+      return;
+    }
+    inc_meta = jincm->b;
+  }
+  const nbase_json_t *jinct = nbase_json_obj_get(root, "includeText");
+  if (jinct != NULL) {
+    if (jinct->type != NBASE_JSON_BOOL) {
+      nbase_json_free(root);
+      send_error_json(c, 400, "includeText must be boolean");
+      return;
+    }
+    inc_text = jinct->b;
+  }
+
+  nbase_stats_t db_st;
+  if (nbase_stats(srv->db, &db_st) != NBASE_OK) {
+    nbase_json_free(root);
+    send_error_json(c, 500, "failed to read db stats");
+    return;
+  }
+
+  uint32_t cnt = (uint32_t)jids->len;
+  uint32_t dim = db_st.dim;
+  uint64_t *ids = malloc((size_t)cnt * sizeof(uint64_t));
+  float *vecs = malloc((size_t)cnt * (size_t)dim * sizeof(float));
+  bool *found = malloc((size_t)cnt * sizeof(bool));
+  if (!ids || !vecs || !found) {
+    free(ids);
+    free(vecs);
+    free(found);
+    nbase_json_free(root);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+
+  for (uint32_t i = 0U; i < cnt; i++) {
+    if (!parse_json_u64(jids->items[i], &ids[i])) {
+      free(ids);
+      free(vecs);
+      free(found);
+      nbase_json_free(root);
+      send_error_json(c, 400, "each id must be an unsigned 64-bit integer");
+      return;
+    }
+  }
+  nbase_json_free(root);
+
+  nbase_status_t st = nbase_get_batch(srv->db, ids, cnt, dim, vecs, found);
+  if (st != NBASE_OK) {
+    free(ids);
+    free(vecs);
+    free(found);
+    send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+
+  uint32_t found_cnt = 0U;
+  for (uint32_t i = 0U; i < cnt; i++) {
+    if (found[i]) {
+      found_cnt++;
+    }
+  }
+
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(
+      &sb,
+      "{\"success\":true,\"count\":%u,\"foundCount\":%u,\"results\":[",
+      cnt,
+      found_cnt);
+  for (uint32_t i = 0U; i < cnt; i++) {
+    nbase_sbuf_appendf(
+        &sb,
+        i == 0U ? "{\"id\":%llu,\"found\":%s" : ",{\"id\":%llu,\"found\":%s",
+        (unsigned long long)ids[i],
+        found[i] ? "true" : "false");
+    if (found[i]) {
+      if (inc_vec) {
+        nbase_sbuf_append(&sb, ",\"vector\":[");
+        const float *v = vecs + (size_t)i * (size_t)dim;
+        for (uint32_t d = 0U; d < dim; d++) {
+          nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+        }
+        nbase_sbuf_append_n(&sb, "]", 1U);
+      }
+      if (inc_meta) {
+        nbase_sbuf_append(&sb, ",\"metadata\":");
+        append_meta_json(&sb, srv->db, ids[i]);
+      }
+      if (inc_text) {
+        nbase_sbuf_append(&sb, ",\"text\":");
+        append_text_json(&sb, srv->db, ids[i]);
+      }
+    }
+    nbase_sbuf_append_n(&sb, "}", 1U);
+  }
+  nbase_sbuf_append(&sb, "]}");
+
+  free(ids);
+  free(vecs);
+  free(found);
+  send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
 }
 
@@ -2534,6 +2693,14 @@ static void dispatch_request(
   }
   if (strcmp(method, "POST") == 0 && strcmp(path, "/api/vectors") == 0) {
     handle_post_vectors(c, body, body_len);
+    return;
+  }
+  if (strcmp(method, "POST") == 0 && strcmp(path, "/api/vectors/upsert") == 0) {
+    handle_upsert_vectors(c, body, body_len);
+    return;
+  }
+  if (strcmp(method, "POST") == 0 && strcmp(path, "/api/vectors/get") == 0) {
+    handle_get_vectors_batch(c, body, body_len);
     return;
   }
   if ((strcmp(method, "POST") == 0 && strcmp(path, "/api/vectors/delete") == 0) ||

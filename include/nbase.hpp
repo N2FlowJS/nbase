@@ -4,6 +4,7 @@
 #include "nbase.h"
 
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -126,6 +127,20 @@ class Database {
     upsert(id, vec.data(), static_cast<uint32_t>(vec.size()));
   }
 
+  void upsert_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<float> &vectors,
+      uint32_t dim,
+      uint32_t num_threads = 0U) {
+    detail::check(nbase_upsert_batch(
+        db_,
+        ids.empty() ? nullptr : ids.data(),
+        vectors.empty() ? nullptr : vectors.data(),
+        static_cast<uint32_t>(ids.size()),
+        dim,
+        num_threads));
+  }
+
   void remove(uint64_t id) { detail::check(nbase_delete(db_, id)); }
 
   uint32_t delete_batch(const std::vector<uint64_t> &ids) {
@@ -145,6 +160,25 @@ class Database {
     std::vector<float> out(dim);
     detail::check(nbase_get(db_, id, out.data(), dim));
     return out;
+  }
+
+  void get_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t dim,
+      std::vector<float> &out_vectors,
+      std::vector<bool> &out_found) const {
+    const size_t n = ids.size();
+    out_vectors.resize(n * static_cast<size_t>(dim));
+    out_found.assign(n, false);
+    if (n == 0U) {
+      return;
+    }
+    std::unique_ptr<bool[]> found_buf(new bool[n]);
+    detail::check(nbase_get_batch(
+        db_, ids.data(), static_cast<uint32_t>(n), dim, out_vectors.data(), found_buf.get()));
+    for (size_t i = 0U; i < n; ++i) {
+      out_found[i] = found_buf[i];
+    }
   }
 
   bool contains(uint64_t id) const noexcept { return nbase_contains(db_, id); }
@@ -708,6 +742,20 @@ class PartitionedDatabase {
     upsert(id, vec.data(), static_cast<uint32_t>(vec.size()));
   }
 
+  void upsert_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<float> &vectors,
+      uint32_t dim,
+      uint32_t num_threads = 0U) {
+    detail::check(nbase_pdb_upsert_batch(
+        pdb_,
+        ids.empty() ? nullptr : ids.data(),
+        vectors.empty() ? nullptr : vectors.data(),
+        static_cast<uint32_t>(ids.size()),
+        dim,
+        num_threads));
+  }
+
   void remove(uint64_t id) { detail::check(nbase_pdb_delete(pdb_, id)); }
 
   uint32_t delete_batch(const std::vector<uint64_t> &ids) {
@@ -727,6 +775,25 @@ class PartitionedDatabase {
     std::vector<float> out(dim);
     detail::check(nbase_pdb_get(pdb_, id, out.data(), dim));
     return out;
+  }
+
+  void get_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t dim,
+      std::vector<float> &out_vectors,
+      std::vector<bool> &out_found) const {
+    const size_t n = ids.size();
+    out_vectors.resize(n * static_cast<size_t>(dim));
+    out_found.assign(n, false);
+    if (n == 0U) {
+      return;
+    }
+    std::unique_ptr<bool[]> found_buf(new bool[n]);
+    detail::check(nbase_pdb_get_batch(
+        pdb_, ids.data(), static_cast<uint32_t>(n), dim, out_vectors.data(), found_buf.get()));
+    for (size_t i = 0U; i < n; ++i) {
+      out_found[i] = found_buf[i];
+    }
   }
 
   bool contains(uint64_t id) const { return nbase_pdb_contains(pdb_, id); }
@@ -827,6 +894,43 @@ class PartitionedDatabase {
     uint32_t count = 0U;
     detail::check(nbase_pdb_find_similar(
         pdb_, id, k, opts, k > 0U ? out.data() : nullptr, &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> rerank_mmr(
+      const std::vector<nbase_result_t> &candidates,
+      uint32_t k,
+      float lambda) const {
+    std::vector<nbase_result_t> out(k);
+    uint32_t count = 0U;
+    detail::check(nbase_pdb_rerank_mmr(
+        pdb_,
+        candidates.empty() ? nullptr : candidates.data(),
+        static_cast<uint32_t>(candidates.size()),
+        k,
+        lambda,
+        k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> rerank_weighted(
+      const std::vector<nbase_result_t> &candidates,
+      const std::vector<nbase_rerank_weight_t> &weights,
+      uint32_t k) const {
+    std::vector<nbase_result_t> out(k);
+    uint32_t count = 0U;
+    detail::check(nbase_pdb_rerank_weighted(
+        pdb_,
+        candidates.empty() ? nullptr : candidates.data(),
+        static_cast<uint32_t>(candidates.size()),
+        weights.empty() ? nullptr : weights.data(),
+        static_cast<uint32_t>(weights.size()),
+        k,
+        k > 0U ? out.data() : nullptr,
+        &count));
     out.resize(count);
     return out;
   }
@@ -1066,6 +1170,18 @@ class ClusteredDatabase {
     add(id, vec.data(), static_cast<uint32_t>(vec.size()));
   }
 
+  void add_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<float> &vectors,
+      uint32_t dim) {
+    detail::check(nbase_clustered_add_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        vectors.empty() ? nullptr : vectors.data(),
+        static_cast<uint32_t>(ids.size()),
+        dim));
+  }
+
   void upsert(uint64_t id, const float *vec, uint32_t dim) {
     detail::check(nbase_clustered_upsert(ptr_, id, vec, dim));
   }
@@ -1075,6 +1191,13 @@ class ClusteredDatabase {
   }
 
   void remove(uint64_t id) { detail::check(nbase_clustered_delete(ptr_, id)); }
+
+  uint32_t delete_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_clustered_delete_batch(
+        ptr_, ids.empty() ? nullptr : ids.data(), static_cast<uint32_t>(ids.size()), &deleted));
+    return deleted;
+  }
 
   std::vector<float> get(uint64_t id, uint32_t dim) const {
     std::vector<float> out(dim);
@@ -1100,6 +1223,28 @@ class ClusteredDatabase {
         static_cast<uint32_t>(query.size()),
         k,
         nprobe,
+        k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> search_filtered(
+      const std::vector<float> &query,
+      uint32_t k,
+      uint32_t nprobe,
+      nbase_filter_fn filter,
+      void *filter_ctx = nullptr) const {
+    std::vector<nbase_result_t> out(k);
+    uint32_t count = 0U;
+    detail::check(nbase_clustered_search_filtered(
+        ptr_,
+        query.data(),
+        static_cast<uint32_t>(query.size()),
+        k,
+        nprobe,
+        filter,
+        filter_ctx,
         k > 0U ? out.data() : nullptr,
         &count));
     out.resize(count);

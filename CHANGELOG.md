@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-23
+
+Feature completeness update adding thread-safe clustered indexing enhancements, high-throughput batch upsert/get & partitioned reranking, HTTP bulk upsert/get endpoints, CLI commands, and aligned shared library `SOVERSION`.
+
+### Added
+- **Thread-Safe Dynamic Clustered Index (`src/clustered.c`)**:
+  - Added internal `pthread_rwlock_t` synchronization across all mutating and read operations on `nbase_clustered_t`.
+  - Added `nbase_clustered_add_batch`, `nbase_clustered_delete_batch`, `nbase_clustered_search_filtered`, and `memory_bytes` footprint accounting in `nbase_clustered_stats_t`.
+- **Batch Upsert, Batch Get & Partitioned Reranking (`src/nbase.c`, `src/wal.c`, `src/partitioned.c`)**:
+  - Added `nbase_upsert_batch` with single-`fsync` WAL batch logging (`nbase_wal_append_vec_batch_op`), duplicate-ID validation, cache invalidation, and parallel HNSW batch insertion.
+  - Added `nbase_get_batch` for single-lock multi-ID retrieval.
+  - Added multi-partition parity APIs `nbase_pdb_upsert_batch`, `nbase_pdb_get_batch`, `nbase_pdb_rerank_mmr`, and `nbase_pdb_rerank_weighted` with partition-grouped batch locality.
+- **HTTP/1.1 Server, CLI & C++17 Wrapper (`src/http_server.c`, `apps/nbase_cli.c`, `include/nbase.hpp`)**:
+  - Added `POST /api/vectors/upsert` (single and bulk `vectors` array upsert) and `POST /api/vectors/get` (bulk fetch by `ids` with `includeVectors`, `includeMetadata`, `includeText`).
+  - Added `nbase-cli upsert <dir> <id> <v0,v1,...>` and `nbase-cli get-batch <dir> <id1,id2,...>`.
+  - Added matching `Database`, `PartitionedDatabase`, and `ClusteredDatabase` methods in `include/nbase.hpp`.
+
+### Changed
+- Aligned `libnbase` shared library `SOVERSION` in `CMakeLists.txt` from `0` to `1` (`libnbase.so.1 -> libnbase.so.1.1.0`) matching major version `1`.
+
 ## [1.0.0] - 2026-11-20
 
 Complete transition from Node.js/TypeScript to the pure-C11/C++17 `nbase` engine promoted to the repository root.

@@ -537,6 +537,7 @@ void nbase_wal_close(nbase_wal_t *wal);
 nbase_status_t nbase_wal_reset(nbase_wal_t *wal);
 nbase_status_t nbase_wal_append_vec(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_wal_append_vec_batch(nbase_wal_t *wal, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
+nbase_status_t nbase_wal_append_vec_batch_op(nbase_wal_t *wal, nbase_wal_op_t op, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
 nbase_status_t nbase_wal_append_id(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t id);
 nbase_status_t nbase_wal_append_meta(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
 nbase_status_t nbase_wal_append_text(nbase_wal_t *wal, uint64_t id, const char *text);

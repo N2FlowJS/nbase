@@ -192,8 +192,14 @@ nbase_status_t nbase_wal_append_vec(nbase_wal_t *wal, nbase_wal_op_t op, uint64_
   return st;
 }
 
-nbase_status_t nbase_wal_append_vec_batch(nbase_wal_t *wal, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim) {
-  if (!wal || !ids || !vectors || dim == 0U || dim > NBASE_MAX_DIM) {
+nbase_status_t nbase_wal_append_vec_batch_op(
+    nbase_wal_t *wal,
+    nbase_wal_op_t op,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim) {
+  if (!wal || (count > 0U && (!ids || !vectors)) || dim == 0U || dim > NBASE_MAX_DIM) {
     return NBASE_ERR_INVALID_ARG;
   }
   if (count == 0U) {
@@ -217,7 +223,7 @@ nbase_status_t nbase_wal_append_vec_batch(nbase_wal_t *wal, const uint64_t *ids,
     memcpy(buf + 8, &dim, sizeof(dim));
     memcpy(buf + 12, &pad, sizeof(pad));
     memcpy(buf + 16, vec, (size_t)dim * sizeof(float));
-    st = wal_append_frame(wal, NBASE_WAL_OP_ADD, buf, (uint32_t)payload_sz, false);
+    st = wal_append_frame(wal, op, buf, (uint32_t)payload_sz, false);
     if (st != NBASE_OK) {
       break;
     }
@@ -227,6 +233,10 @@ nbase_status_t nbase_wal_append_vec_batch(nbase_wal_t *wal, const uint64_t *ids,
     return NBASE_ERR_IO;
   }
   return st;
+}
+
+nbase_status_t nbase_wal_append_vec_batch(nbase_wal_t *wal, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim) {
+  return nbase_wal_append_vec_batch_op(wal, NBASE_WAL_OP_ADD, ids, vectors, count, dim);
 }
 
 nbase_status_t nbase_wal_append_id(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t id) {

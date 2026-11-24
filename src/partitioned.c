@@ -2,6 +2,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <float.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -70,6 +72,59 @@ static int cmp_pdb_scored_desc(const void *pa, const void *pb) {
     return -1;
   }
   if (a->score < b->score) {
+    return 1;
+  }
+  if (a->id < b->id) {
+    return -1;
+  }
+  if (a->id > b->id) {
+    return 1;
+  }
+  return 0;
+}
+
+typedef struct pdb_part_ref {
+  uint32_t part_id;
+  uint32_t orig_idx;
+} pdb_part_ref_t;
+
+typedef struct pdb_weighted_cand {
+  uint64_t id;
+  float weighted_dist;
+  float orig_dist;
+} pdb_weighted_cand_t;
+
+static int cmp_pdb_part_ref_asc(const void *pa, const void *pb) {
+  const pdb_part_ref_t *a = (const pdb_part_ref_t *)pa;
+  const pdb_part_ref_t *b = (const pdb_part_ref_t *)pb;
+  if (a->part_id < b->part_id) {
+    return -1;
+  }
+  if (a->part_id > b->part_id) {
+    return 1;
+  }
+  if (a->orig_idx < b->orig_idx) {
+    return -1;
+  }
+  if (a->orig_idx > b->orig_idx) {
+    return 1;
+  }
+  return 0;
+}
+
+static int cmp_pdb_weighted_asc(const void *pa, const void *pb) {
+  const pdb_weighted_cand_t *a = (const pdb_weighted_cand_t *)pa;
+  const pdb_weighted_cand_t *b = (const pdb_weighted_cand_t *)pb;
+  if (a->weighted_dist < b->weighted_dist) {
+    return -1;
+  }
+  if (a->weighted_dist > b->weighted_dist) {
+    return 1;
+  }
+  if (a->orig_dist < b->orig_dist) {
+    return -1;
+  }
+  if (a->orig_dist > b->orig_dist) {
     return 1;
   }
   if (a->id < b->id) {
@@ -854,55 +909,13 @@ nbase_status_t nbase_pdb_add(nbase_pdb_t *pdb, uint64_t id, const float *vec, ui
   return st;
 }
 
-nbase_status_t nbase_pdb_add_batch(
+static nbase_status_t pdb_add_batch_unlocked(
     nbase_pdb_t *pdb,
     const uint64_t *ids,
     const float *vectors,
     uint32_t count,
     uint32_t dim,
     uint32_t num_threads) {
-  if (!pdb || (count > 0U && (!ids || !vectors))) {
-    return NBASE_ERR_INVALID_ARG;
-  }
-  if (count == 0U) {
-    return NBASE_OK;
-  }
-
-  pthread_mutex_lock(&pdb->mu);
-  if (dim != pdb->cfg.dim) {
-    pthread_mutex_unlock(&pdb->mu);
-    return NBASE_ERR_DIM_MISMATCH;
-  }
-  for (uint32_t i = 0U; i < count; i++) {
-    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)dim, dim)) {
-      pthread_mutex_unlock(&pdb->mu);
-      return NBASE_ERR_INVALID_VECTOR;
-    }
-  }
-
-  uint64_t *sorted_ids = malloc((size_t)count * sizeof(uint64_t));
-  if (!sorted_ids) {
-    pthread_mutex_unlock(&pdb->mu);
-    return NBASE_ERR_NOMEM;
-  }
-  for (uint32_t i = 0U; i < count; i++) {
-    if (pdb_id_map_find(&pdb->id_map, ids[i], NULL)) {
-      free(sorted_ids);
-      pthread_mutex_unlock(&pdb->mu);
-      return NBASE_ERR_ALREADY_EXISTS;
-    }
-    sorted_ids[i] = ids[i];
-  }
-  qsort(sorted_ids, count, sizeof(uint64_t), cmp_pdb_u64_asc);
-  for (uint32_t i = 1U; i < count; i++) {
-    if (sorted_ids[i] == sorted_ids[i - 1U]) {
-      free(sorted_ids);
-      pthread_mutex_unlock(&pdb->mu);
-      return NBASE_ERR_ALREADY_EXISTS;
-    }
-  }
-  free(sorted_ids);
-
   nbase_status_t st = NBASE_OK;
   uint32_t off = 0U;
   while (off < count) {
@@ -955,7 +968,59 @@ nbase_status_t nbase_pdb_add_batch(
     pdb->manifest_dirty = true;
     off += chunk;
   }
+  return st;
+}
 
+nbase_status_t nbase_pdb_add_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim,
+    uint32_t num_threads) {
+  if (!pdb || (count > 0U && (!ids || !vectors))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  if (dim != pdb->cfg.dim) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)dim, dim)) {
+      pthread_mutex_unlock(&pdb->mu);
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+
+  uint64_t *sorted_ids = malloc((size_t)count * sizeof(uint64_t));
+  if (!sorted_ids) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_ERR_NOMEM;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (pdb_id_map_find(&pdb->id_map, ids[i], NULL)) {
+      free(sorted_ids);
+      pthread_mutex_unlock(&pdb->mu);
+      return NBASE_ERR_ALREADY_EXISTS;
+    }
+    sorted_ids[i] = ids[i];
+  }
+  qsort(sorted_ids, count, sizeof(uint64_t), cmp_pdb_u64_asc);
+  for (uint32_t i = 1U; i < count; i++) {
+    if (sorted_ids[i] == sorted_ids[i - 1U]) {
+      free(sorted_ids);
+      pthread_mutex_unlock(&pdb->mu);
+      return NBASE_ERR_ALREADY_EXISTS;
+    }
+  }
+  free(sorted_ids);
+
+  nbase_status_t st = pdb_add_batch_unlocked(pdb, ids, vectors, count, dim, num_threads);
   pthread_mutex_unlock(&pdb->mu);
   return st;
 }
@@ -994,6 +1059,128 @@ nbase_status_t nbase_pdb_upsert(nbase_pdb_t *pdb, uint64_t id, const float *vec,
     }
   }
 
+  pthread_mutex_unlock(&pdb->mu);
+  return st;
+}
+
+nbase_status_t nbase_pdb_upsert_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim,
+    uint32_t num_threads) {
+  if (!pdb || (count > 0U && (!ids || !vectors))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  if (dim != pdb->cfg.dim) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)dim, dim)) {
+      pthread_mutex_unlock(&pdb->mu);
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+
+  uint64_t *sorted_ids = malloc((size_t)count * sizeof(uint64_t));
+  pdb_part_ref_t *existing_refs = malloc((size_t)count * sizeof(pdb_part_ref_t));
+  uint64_t *new_ids = malloc((size_t)count * sizeof(uint64_t));
+  float *new_vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+  if (!sorted_ids || !existing_refs || !new_ids || !new_vecs) {
+    free(sorted_ids);
+    free(existing_refs);
+    free(new_ids);
+    free(new_vecs);
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_ERR_NOMEM;
+  }
+
+  memcpy(sorted_ids, ids, (size_t)count * sizeof(uint64_t));
+  qsort(sorted_ids, count, sizeof(uint64_t), cmp_pdb_u64_asc);
+  for (uint32_t i = 1U; i < count; i++) {
+    if (sorted_ids[i] == sorted_ids[i - 1U]) {
+      free(sorted_ids);
+      free(existing_refs);
+      free(new_ids);
+      free(new_vecs);
+      pthread_mutex_unlock(&pdb->mu);
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+  free(sorted_ids);
+
+  uint32_t existing_cnt = 0U;
+  uint32_t new_cnt = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    uint32_t pid = 0U;
+    if (pdb_id_map_find(&pdb->id_map, ids[i], &pid)) {
+      existing_refs[existing_cnt].part_id = pid;
+      existing_refs[existing_cnt].orig_idx = i;
+      existing_cnt++;
+    } else {
+      new_ids[new_cnt] = ids[i];
+      memcpy(new_vecs + (size_t)new_cnt * (size_t)dim,
+             vectors + (size_t)i * (size_t)dim,
+             (size_t)dim * sizeof(float));
+      new_cnt++;
+    }
+  }
+
+  nbase_status_t st = NBASE_OK;
+  if (existing_cnt > 0U) {
+    qsort(existing_refs, existing_cnt, sizeof(pdb_part_ref_t), cmp_pdb_part_ref_asc);
+    uint64_t *batch_ids = malloc((size_t)existing_cnt * sizeof(uint64_t));
+    float *batch_vecs = malloc((size_t)existing_cnt * (size_t)dim * sizeof(float));
+    if (!batch_ids || !batch_vecs) {
+      st = NBASE_ERR_NOMEM;
+    } else {
+      uint32_t start = 0U;
+      while (start < existing_cnt && st == NBASE_OK) {
+        uint32_t pid = existing_refs[start].part_id;
+        uint32_t end = start;
+        while (end < existing_cnt && existing_refs[end].part_id == pid) {
+          uint32_t oi = existing_refs[end].orig_idx;
+          uint32_t bi = end - start;
+          batch_ids[bi] = ids[oi];
+          memcpy(batch_vecs + (size_t)bi * (size_t)dim,
+                 vectors + (size_t)oi * (size_t)dim,
+                 (size_t)dim * sizeof(float));
+          end++;
+        }
+        pdb_part_t *part = pdb_find_part(pdb, pid);
+        if (!part) {
+          st = NBASE_ERR_CORRUPT;
+          break;
+        }
+        st = pdb_load_partition(pdb, part);
+        if (st != NBASE_OK) {
+          break;
+        }
+        st = nbase_upsert_batch(part->db, batch_ids, batch_vecs, end - start, dim, num_threads);
+        if (st == NBASE_OK) {
+          part->dirty = true;
+        }
+        start = end;
+      }
+    }
+    free(batch_ids);
+    free(batch_vecs);
+  }
+
+  if (st == NBASE_OK && new_cnt > 0U) {
+    st = pdb_add_batch_unlocked(pdb, new_ids, new_vecs, new_cnt, dim, num_threads);
+  }
+
+  free(existing_refs);
+  free(new_ids);
+  free(new_vecs);
   pthread_mutex_unlock(&pdb->mu);
   return st;
 }
@@ -1179,6 +1366,108 @@ nbase_status_t nbase_pdb_get(nbase_pdb_t *pdb, uint64_t id, float *out_vec, uint
     }
   }
 
+  pthread_mutex_unlock(&pdb->mu);
+  return st;
+}
+
+static nbase_status_t pdb_get_batch_unlocked(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t dim,
+    float *out_vectors,
+    bool *out_found) {
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  if (dim != pdb->cfg.dim) {
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+
+  pdb_part_ref_t *refs = malloc((size_t)count * sizeof(pdb_part_ref_t));
+  if (!refs) {
+    return NBASE_ERR_NOMEM;
+  }
+
+  size_t vec_bytes = (size_t)dim * sizeof(float);
+  uint32_t ref_cnt = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    uint32_t pid = 0U;
+    if (pdb_id_map_find(&pdb->id_map, ids[i], &pid)) {
+      refs[ref_cnt].part_id = pid;
+      refs[ref_cnt].orig_idx = i;
+      ref_cnt++;
+    } else {
+      memset(out_vectors + (size_t)i * (size_t)dim, 0, vec_bytes);
+      out_found[i] = false;
+    }
+  }
+
+  nbase_status_t st = NBASE_OK;
+  if (ref_cnt > 0U) {
+    qsort(refs, ref_cnt, sizeof(pdb_part_ref_t), cmp_pdb_part_ref_asc);
+    uint64_t *batch_ids = malloc((size_t)ref_cnt * sizeof(uint64_t));
+    float *batch_vecs = malloc((size_t)ref_cnt * vec_bytes);
+    bool *batch_found = malloc((size_t)ref_cnt * sizeof(bool));
+    if (!batch_ids || !batch_vecs || !batch_found) {
+      st = NBASE_ERR_NOMEM;
+    } else {
+      uint32_t start = 0U;
+      while (start < ref_cnt && st == NBASE_OK) {
+        uint32_t pid = refs[start].part_id;
+        uint32_t end = start;
+        while (end < ref_cnt && refs[end].part_id == pid) {
+          batch_ids[end - start] = ids[refs[end].orig_idx];
+          end++;
+        }
+        uint32_t sub_cnt = end - start;
+        pdb_part_t *part = pdb_find_part(pdb, pid);
+        if (!part) {
+          st = NBASE_ERR_CORRUPT;
+          break;
+        }
+        st = pdb_load_partition(pdb, part);
+        if (st != NBASE_OK) {
+          break;
+        }
+        st = nbase_get_batch(part->db, batch_ids, sub_cnt, dim, batch_vecs, batch_found);
+        if (st != NBASE_OK) {
+          break;
+        }
+        for (uint32_t j = 0U; j < sub_cnt; j++) {
+          uint32_t oi = refs[start + j].orig_idx;
+          out_found[oi] = batch_found[j];
+          memcpy(out_vectors + (size_t)oi * (size_t)dim,
+                 batch_vecs + (size_t)j * (size_t)dim,
+                 vec_bytes);
+        }
+        start = end;
+      }
+    }
+    free(batch_ids);
+    free(batch_vecs);
+    free(batch_found);
+  }
+
+  free(refs);
+  return st;
+}
+
+nbase_status_t nbase_pdb_get_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t dim,
+    float *out_vectors,
+    bool *out_found) {
+  if (!pdb || (count > 0U && (!ids || !out_vectors || !out_found))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  pthread_mutex_lock(&pdb->mu);
+  nbase_status_t st = pdb_get_batch_unlocked(pdb, ids, count, dim, out_vectors, out_found);
   pthread_mutex_unlock(&pdb->mu);
   return st;
 }
@@ -2113,6 +2402,274 @@ nbase_status_t nbase_pdb_extract_relationships(
   nbase_edge_t *shrunk = realloc(edges, unique_len * sizeof(nbase_edge_t));
   *out_edges = shrunk ? shrunk : edges;
   *out_edge_count = (uint64_t)unique_len;
+  return NBASE_OK;
+}
+
+nbase_status_t nbase_pdb_rerank_mmr(
+    nbase_pdb_t *pdb,
+    const nbase_result_t *candidates,
+    uint32_t candidate_count,
+    uint32_t k,
+    float lambda,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!pdb || !out_count || (candidate_count > 0U && !candidates) ||
+      (k > 0U && !out_results) || isnan(lambda) || lambda < 0.0f || lambda > 1.0f) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  if (candidate_count == 0U || k == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    if (!isfinite(candidates[i].distance)) {
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+
+  uint32_t dim = pdb->cfg.dim;
+  nbase_metric_t metric = pdb->cfg.metric;
+  uint64_t *cand_ids = malloc((size_t)candidate_count * sizeof(uint64_t));
+  float *cand_vecs = malloc((size_t)candidate_count * (size_t)dim * sizeof(float));
+  bool *cand_found = malloc((size_t)candidate_count * sizeof(bool));
+  float *rel = malloc((size_t)candidate_count * sizeof(float));
+  float *min_div = malloc((size_t)candidate_count * sizeof(float));
+  bool *used = calloc((size_t)candidate_count, sizeof(bool));
+  if (!cand_ids || !cand_vecs || !cand_found || !rel || !min_div || !used) {
+    free(cand_ids);
+    free(cand_vecs);
+    free(cand_found);
+    free(rel);
+    free(min_div);
+    free(used);
+    return NBASE_ERR_NOMEM;
+  }
+
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    cand_ids[i] = candidates[i].id;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  nbase_status_t st = pdb_get_batch_unlocked(pdb, cand_ids, candidate_count, dim, cand_vecs, cand_found);
+  pthread_mutex_unlock(&pdb->mu);
+  free(cand_ids);
+
+  if (st != NBASE_OK) {
+    free(cand_vecs);
+    free(cand_found);
+    free(rel);
+    free(min_div);
+    free(used);
+    return st;
+  }
+
+  float d_min = candidates[0].distance;
+  float d_max = candidates[0].distance;
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    if (!cand_found[i]) {
+      free(cand_vecs);
+      free(cand_found);
+      free(rel);
+      free(min_div);
+      free(used);
+      return NBASE_ERR_NOT_FOUND;
+    }
+    if (candidates[i].distance < d_min) {
+      d_min = candidates[i].distance;
+    }
+    if (candidates[i].distance > d_max) {
+      d_max = candidates[i].distance;
+    }
+  }
+  free(cand_found);
+
+  uint32_t first = 0U;
+  float rel_span = d_max - d_min;
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    rel[i] = (rel_span > 0.0f) ? ((d_max - candidates[i].distance) / rel_span) : 1.0f;
+    if (candidates[i].distance < candidates[first].distance ||
+        (candidates[i].distance == candidates[first].distance && candidates[i].id < candidates[first].id)) {
+      first = i;
+    }
+  }
+
+  uint32_t eff_k = (k < candidate_count) ? k : candidate_count;
+  nbase_dist_fn dist_fn = nbase_get_distance_fn(metric);
+
+  out_results[0] = candidates[first];
+  used[first] = true;
+
+  float pair_min = 0.0f;
+  float pair_max = 0.0f;
+  bool first_pair_set = false;
+  const float *first_vec = cand_vecs + (size_t)first * (size_t)dim;
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    if (used[i]) {
+      continue;
+    }
+    float pd = dist_fn(cand_vecs + (size_t)i * (size_t)dim, first_vec, dim);
+    min_div[i] = pd;
+    if (!first_pair_set) {
+      pair_min = (pd < 0.0f) ? pd : 0.0f;
+      pair_max = pd;
+      first_pair_set = true;
+    } else {
+      if (pd < pair_min) {
+        pair_min = pd;
+      }
+      if (pd > pair_max) {
+        pair_max = pd;
+      }
+    }
+  }
+
+  float pair_span = pair_max - pair_min;
+  for (uint32_t step = 1U; step < eff_k; step++) {
+    uint32_t best_idx = UINT32_MAX;
+    float best_score = -FLT_MAX;
+
+    for (uint32_t i = 0U; i < candidate_count; i++) {
+      if (used[i]) {
+        continue;
+      }
+      float div_norm = (pair_span > 0.0f) ? ((min_div[i] - pair_min) / pair_span) : 0.0f;
+      float score = lambda * rel[i] + (1.0f - lambda) * div_norm;
+      if (best_idx == UINT32_MAX || score > best_score ||
+          (score == best_score && candidates[i].distance < candidates[best_idx].distance)) {
+        best_score = score;
+        best_idx = i;
+      }
+    }
+
+    if (best_idx == UINT32_MAX) {
+      break;
+    }
+
+    out_results[step] = candidates[best_idx];
+    used[best_idx] = true;
+
+    const float *picked_vec = cand_vecs + (size_t)best_idx * (size_t)dim;
+    for (uint32_t i = 0U; i < candidate_count; i++) {
+      if (used[i]) {
+        continue;
+      }
+      float pd = dist_fn(cand_vecs + (size_t)i * (size_t)dim, picked_vec, dim);
+      if (pd < min_div[i]) {
+        min_div[i] = pd;
+      }
+    }
+  }
+
+  *out_count = eff_k;
+  free(cand_vecs);
+  free(rel);
+  free(min_div);
+  free(used);
+  return NBASE_OK;
+}
+
+nbase_status_t nbase_pdb_rerank_weighted(
+    nbase_pdb_t *pdb,
+    const nbase_result_t *candidates,
+    uint32_t candidate_count,
+    const nbase_rerank_weight_t *weights,
+    uint32_t weight_count,
+    uint32_t k,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!pdb || !out_count || (candidate_count > 0U && !candidates) ||
+      (k > 0U && !out_results) || (weight_count > 0U && !weights)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    if (!isfinite(candidates[i].distance)) {
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+  for (uint32_t w = 0U; w < weight_count; w++) {
+    if (!weights[w].key || weights[w].key[0] == '\0' || !isfinite(weights[w].weight)) {
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+  if (candidate_count == 0U || k == 0U) {
+    return NBASE_OK;
+  }
+
+  pdb_weighted_cand_t *items = malloc((size_t)candidate_count * sizeof(pdb_weighted_cand_t));
+  pdb_part_ref_t *refs = malloc((size_t)candidate_count * sizeof(pdb_part_ref_t));
+  if (!items || !refs) {
+    free(items);
+    free(refs);
+    return NBASE_ERR_NOMEM;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    uint32_t pid = 0U;
+    if (!pdb_id_map_find(&pdb->id_map, candidates[i].id, &pid)) {
+      pthread_mutex_unlock(&pdb->mu);
+      free(items);
+      free(refs);
+      return NBASE_ERR_NOT_FOUND;
+    }
+    refs[i].part_id = pid;
+    refs[i].orig_idx = i;
+  }
+
+  qsort(refs, candidate_count, sizeof(pdb_part_ref_t), cmp_pdb_part_ref_asc);
+
+  nbase_status_t st = NBASE_OK;
+  uint32_t start = 0U;
+  while (start < candidate_count && st == NBASE_OK) {
+    uint32_t pid = refs[start].part_id;
+    pdb_part_t *part = pdb_find_part(pdb, pid);
+    if (!part) {
+      st = NBASE_ERR_CORRUPT;
+      break;
+    }
+    st = pdb_load_partition(pdb, part);
+    if (st != NBASE_OK) {
+      break;
+    }
+
+    uint32_t end = start;
+    while (end < candidate_count && refs[end].part_id == pid) {
+      uint32_t oi = refs[end].orig_idx;
+      double w_dist = (double)candidates[oi].distance;
+      for (uint32_t w = 0U; w < weight_count; w++) {
+        nbase_meta_value_t val;
+        if (nbase_get_meta(part->db, candidates[oi].id, weights[w].key, &val, NULL, 0U) == NBASE_OK) {
+          if (val.type == NBASE_META_INT64) {
+            w_dist -= (double)val.as.i64 * (double)weights[w].weight;
+          } else if (val.type == NBASE_META_DOUBLE) {
+            w_dist -= val.as.f64 * (double)weights[w].weight;
+          }
+        }
+      }
+      items[oi].id = candidates[oi].id;
+      items[oi].weighted_dist = (float)w_dist;
+      items[oi].orig_dist = candidates[oi].distance;
+      end++;
+    }
+    start = end;
+  }
+  pthread_mutex_unlock(&pdb->mu);
+  free(refs);
+
+  if (st != NBASE_OK) {
+    free(items);
+    return st;
+  }
+
+  qsort(items, candidate_count, sizeof(pdb_weighted_cand_t), cmp_pdb_weighted_asc);
+  uint32_t eff_k = (k < candidate_count) ? k : candidate_count;
+  for (uint32_t i = 0U; i < eff_k; i++) {
+    out_results[i].id = items[i].id;
+    out_results[i].distance = items[i].weighted_dist;
+  }
+  *out_count = eff_k;
+  free(items);
   return NBASE_OK;
 }
 

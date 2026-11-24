@@ -269,8 +269,80 @@ static void test_pdb_delete_batch_filter_search_batch_and_graph(void) {
   test_rm_rf(dir);
 }
 
+static void test_pdb_upsert_batch_get_batch_and_rerank(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(3U);
+  cfg.partition_capacity = 2U;
+  cfg.max_active_partitions = 1U;
+  cfg.enable_hnsw = false;
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  uint64_t init_ids[3] = {1ULL, 2ULL, 3ULL};
+  float init_vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.99f, 0.01f, 0.0f,
+      0.8f, 0.6f, 0.0f
+  };
+  ASSERT_STATUS(nbase_pdb_add_batch(pdb, init_ids, init_vecs, 3U, 3U, 2U), NBASE_OK);
+
+  /* Mixed upsert_batch updates IDs 2 & 3 across partitions and adds new ID 4 */
+  uint64_t up_ids[3] = {2ULL, 3ULL, 4ULL};
+  float up_vecs[9] = {
+      0.98f, 0.02f, 0.0f,
+      0.8f, 0.6f, 0.0f,
+      0.0f, 1.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_pdb_upsert_batch(pdb, up_ids, up_vecs, 3U, 3U, 2U), NBASE_OK);
+
+  nbase_meta_field_t f1 = {"rank_boost", {.type = NBASE_META_DOUBLE, .as = {.f64 = 0.0}}};
+  nbase_meta_field_t f3 = {"rank_boost", {.type = NBASE_META_DOUBLE, .as = {.f64 = 2.0}}};
+  ASSERT_STATUS(nbase_pdb_set_meta(pdb, 1ULL, &f1, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_set_meta(pdb, 3ULL, &f3, 1U), NBASE_OK);
+
+  /* get_batch retrieves across partitions + flags missing ID 999 */
+  uint64_t get_ids[4] = {1ULL, 999ULL, 2ULL, 4ULL};
+  float out_vecs[12];
+  bool found[4] = {false, false, false, false};
+  ASSERT_STATUS(nbase_pdb_get_batch(pdb, get_ids, 4U, 3U, out_vecs, found), NBASE_OK);
+  ASSERT_TRUE(found[0] && !found[1] && found[2] && found[3]);
+  ASSERT_NEAR(out_vecs[0], 1.0, 1e-6, 0.0);
+  ASSERT_NEAR(out_vecs[3], 0.0, 1e-6, 0.0);
+  ASSERT_NEAR(out_vecs[6], 0.98, 1e-6, 0.0);
+  ASSERT_NEAR(out_vecs[10], 1.0, 1e-6, 0.0);
+
+  /* Search + MMR diversity rerank + Weighted rerank across partitions */
+  float q[3] = {1.0f, 0.0f, 0.0f};
+  nbase_pdb_search_opts_t sopts = nbase_pdb_search_opts_default();
+  sopts.search_all_partitions = true;
+  nbase_result_t cands[4];
+  uint32_t cand_cnt = 0U;
+  ASSERT_STATUS(nbase_pdb_search(pdb, q, 3U, 4U, &sopts, cands, &cand_cnt), NBASE_OK);
+  ASSERT_EQ_U64(cand_cnt, 4ULL);
+
+  nbase_result_t mmr_out[2];
+  uint32_t mmr_cnt = 0U;
+  ASSERT_STATUS(nbase_pdb_rerank_mmr(pdb, cands, cand_cnt, 2U, 0.2f, mmr_out, &mmr_cnt), NBASE_OK);
+  ASSERT_EQ_U64(mmr_cnt, 2ULL);
+  ASSERT_EQ_U64(mmr_out[0].id, 1ULL);
+  ASSERT_TRUE(mmr_out[1].id == 4ULL || mmr_out[1].id == 3ULL);
+
+  nbase_rerank_weight_t w = {"rank_boost", 1.0f};
+  nbase_result_t w_out[2];
+  uint32_t w_cnt = 0U;
+  ASSERT_STATUS(nbase_pdb_rerank_weighted(pdb, cands, cand_cnt, &w, 1U, 2U, w_out, &w_cnt), NBASE_OK);
+  ASSERT_EQ_U64(w_cnt, 2ULL);
+  ASSERT_EQ_U64(w_out[0].id, 3ULL);
+
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
   RUN_TEST(test_pdb_delete_batch_filter_search_batch_and_graph);
+  RUN_TEST(test_pdb_upsert_batch_get_batch_and_rerank);
 }
