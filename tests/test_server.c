@@ -1472,6 +1472,124 @@ static void test_http_server_ndjson_import_export(void) {
   nbase_close(db1);
 }
 
+static void test_http_server_rerank_endpoint(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  uint64_t ids[3] = {1ULL, 2ULL, 3ULL};
+  float vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      1.0f, 0.01f, 0.0f,
+      0.0f, 1.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 3U, 3U, 1U), NBASE_OK);
+
+  nbase_meta_field_t m1 = {"score", {.type = NBASE_META_DOUBLE, .as = {.f64 = 0.1}}};
+  nbase_meta_field_t m2 = {"score", {.type = NBASE_META_DOUBLE, .as = {.f64 = 0.2}}};
+  nbase_meta_field_t m3 = {"score", {.type = NBASE_META_DOUBLE, .as = {.f64 = 5.0}}};
+  ASSERT_STATUS(nbase_set_meta(db, 1ULL, &m1, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 2ULL, &m2, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 3ULL, &m3, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 3ULL, "diverse pick"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. MMR diversity rerank pushes orthogonal id=3 ahead of near-duplicate id=2 */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/rerank",
+      NULL,
+      "{\"method\":\"diversity\",\"k\":2,\"lambda\":0.3,"
+      "\"includeMetadata\":true,\"includeVectors\":true,\"includeText\":true,"
+      "\"candidates\":[{\"id\":1,\"distance\":0.0},{\"id\":2,\"distance\":0.01},{\"id\":3,\"distance\":0.5}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"method\":\"diversity\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"count\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"diverse pick\"") != NULL);
+  const char *p1 = strstr(r.body, "\"id\":1");
+  const char *p3 = strstr(r.body, "\"id\":3");
+  ASSERT_TRUE(p1 != NULL && p3 != NULL && p1 < p3);
+  free(r.body);
+
+  /* 2. Weighted rerank (method omitted -> defaults to weighted when weights provided) */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/rerank",
+      NULL,
+      "{\"k\":2,\"weights\":{\"score\":0.5},"
+      "\"candidates\":[{\"id\":1,\"distance\":0.05},{\"id\":2,\"distance\":0.06},{\"id\":3,\"distance\":0.5}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"method\":\"weighted\"") != NULL);
+  const char *wp3 = strstr(r.body, "\"id\":3");
+  const char *wp2 = strstr(r.body, "\"id\":2");
+  const char *wp1 = strstr(r.body, "\"id\":1");
+  ASSERT_TRUE(wp3 != NULL && wp2 != NULL && wp3 < wp2 && wp1 == NULL);
+  free(r.body);
+
+  /* 3. Standard ascending sort by distance */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/rerank",
+      NULL,
+      "{\"method\":\"standard\",\"k\":2,"
+      "\"candidates\":[{\"id\":3,\"distance\":0.8},{\"id\":2,\"distance\":0.1},{\"id\":1,\"distance\":0.2}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"method\":\"standard\"") != NULL);
+  const char *sp2 = strstr(r.body, "\"id\":2");
+  const char *sp1 = strstr(r.body, "\"id\":1");
+  ASSERT_TRUE(sp2 != NULL && sp1 != NULL && sp2 < sp1);
+  free(r.body);
+
+  /* 4. Empty candidates array succeeds */
+  ASSERT_TRUE(http_req(port, "POST", "/api/rerank", NULL, "{\"candidates\":[]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":0") != NULL);
+  free(r.body);
+
+  /* 5. Error & method checks */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/rerank",
+      NULL,
+      "{\"candidates\":[{\"id\":999,\"distance\":0.1}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 404);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/rerank",
+      NULL,
+      "{\"lambda\":1.5,\"candidates\":[{\"id\":1,\"distance\":0.1}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/rerank", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1485,4 +1603,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_count_and_resource_crud);
   RUN_TEST(test_http_server_post_similar_and_distance);
   RUN_TEST(test_http_server_ndjson_import_export);
+  RUN_TEST(test_http_server_rerank_endpoint);
 }

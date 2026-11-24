@@ -464,11 +464,23 @@ static void bench_batch_threads_and_pq(void) {
   lsh_cfg.num_bits = 10U;
   nbase_lsh_t *lsh = NULL;
   if (nbase_lsh_create(&lsh_cfg, &lsh) == NBASE_OK) {
-    uint64_t l0 = now_ns();
-    for (uint32_t i = 0U; i < count; i++) {
-      (void)nbase_lsh_add(lsh, (uint64_t)i + 1ULL, vecs + (size_t)i * dim, dim);
+    uint64_t *lids = malloc((size_t)count * sizeof(uint64_t));
+    double add_batch_ms = 0.0;
+    if (lids) {
+      for (uint32_t i = 0U; i < count; i++) {
+        lids[i] = (uint64_t)i + 1ULL;
+      }
     }
-    uint64_t l1 = now_ns();
+    uint64_t l0 = now_ns();
+    if (lids && nbase_lsh_add_batch(lsh, lids, vecs, count, dim) == NBASE_OK) {
+      add_batch_ms = (double)(now_ns() - l0) / 1e6;
+    } else {
+      for (uint32_t i = 0U; i < count; i++) {
+        (void)nbase_lsh_add(lsh, (uint64_t)i + 1ULL, vecs + (size_t)i * dim, dim);
+      }
+      add_batch_ms = (double)(now_ns() - l0) / 1e6;
+    }
+    free(lids);
     nbase_result_t lhits[10];
     uint32_t lgot = 0U;
     uint64_t lq0 = now_ns();
@@ -476,9 +488,22 @@ static void bench_batch_threads_and_pq(void) {
       (void)nbase_lsh_search(lsh, queries + (size_t)q * dim, dim, k, 2U, lhits, &lgot);
     }
     uint64_t lq1 = now_ns();
-    printf("  lsh(8x10b)  build=%5.2f ms  search(multiprobe=2)=%6.2f us/query\n",
-           (double)(l1 - l0) / 1e6,
-           (double)(lq1 - lq0) / (double)nqueries / 1e3);
+    nbase_result_t *lb_res = malloc((size_t)nqueries * k * sizeof(nbase_result_t));
+    uint32_t *lb_cnts = malloc((size_t)nqueries * sizeof(uint32_t));
+    double lb_qps = 0.0;
+    if (lb_res && lb_cnts) {
+      uint64_t lb0 = now_ns();
+      (void)nbase_lsh_search_batch(lsh, queries, nqueries, dim, k, 2U, 4U, lb_res, lb_cnts);
+      uint64_t lb1 = now_ns();
+      double lb_sec = (double)(lb1 - lb0) / 1e9;
+      lb_qps = (lb_sec > 0.0) ? ((double)nqueries / lb_sec) : 0.0;
+    }
+    free(lb_res);
+    free(lb_cnts);
+    printf("  lsh(8x10b)  build_batch=%5.2f ms  search(multiprobe=2)=%6.2f us/query  search_batch(4t)=%7.0f QPS\n",
+           add_batch_ms,
+           (double)(lq1 - lq0) / (double)nqueries / 1e3,
+           lb_qps);
     nbase_lsh_destroy(lsh);
   }
 
@@ -602,10 +627,31 @@ static void bench_batch_threads_and_pq(void) {
       (void)nbase_clustered_search(cl, queries + (size_t)q * dim, dim, k, 4U, chits, &cgot);
     }
     uint64_t cs1 = now_ns();
-    printf("  clustered(N=4000,k=32)  add=%6.2f ms  recluster=%6.2f ms  search(nprobe=4)=%6.2f us/query\n",
+    uint64_t crd0 = now_ns();
+    for (uint32_t q = 0U; q < nqueries; q++) {
+      (void)nbase_clustered_search_radius(cl, queries + (size_t)q * dim, dim, 2.5f, k, 4U, NULL, NULL, chits, &cgot);
+    }
+    uint64_t crd1 = now_ns();
+    uint64_t gids[128];
+    float *gbuf = malloc(128U * (size_t)dim * sizeof(float));
+    bool gfound[128];
+    double gbatch_us = 0.0;
+    if (gbuf) {
+      for (uint32_t i = 0U; i < 128U; i++) {
+        gids[i] = (uint64_t)i * 10ULL + 1ULL;
+      }
+      uint64_t gb0 = now_ns();
+      (void)nbase_clustered_get_batch(cl, gids, 128U, dim, gbuf, gfound);
+      uint64_t gb1 = now_ns();
+      gbatch_us = (double)(gb1 - gb0) / 1e3;
+      free(gbuf);
+    }
+    printf("  clustered(N=4000,k=32)  add=%6.2f ms  recluster=%6.2f ms  search(nprobe=4)=%6.2f us/query  radius=%6.2f us/query  get_batch(128)=%5.2f us\n",
            (double)(ca1 - ca0) / 1e6,
            (double)(cr1 - cr0) / 1e6,
-           (double)(cs1 - cs0) / (double)nqueries / 1e3);
+           (double)(cs1 - cs0) / (double)nqueries / 1e3,
+           (double)(crd1 - crd0) / (double)nqueries / 1e3,
+           gbatch_us);
     nbase_clustered_destroy(cl);
   }
 
@@ -711,6 +757,7 @@ int main(void) {
   bench_distance_batch_metric("Batch SqL2", NBASE_METRIC_SQUARED_EUCLIDEAN, 8U, 10000U, 200U);
   bench_distance_batch_metric("Batch SqL2", NBASE_METRIC_SQUARED_EUCLIDEAN, 128U, 10000U, 200U);
   bench_distance_batch_metric("Batch Cosine", NBASE_METRIC_COSINE, 128U, 10000U, 200U);
+  bench_distance_batch_metric("Batch InnerProd", NBASE_METRIC_INNER_PRODUCT, 128U, 10000U, 200U);
 
   printf("\n[HNSW Index Build & Search (M=16, efConstruction=200, efSearch=100)]\n");
   bench_hnsw_dataset(2000U, 128U, 20U);

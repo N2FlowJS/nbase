@@ -2298,6 +2298,45 @@ static bool parse_search_common_opts(
   return true;
 }
 
+static bool parse_rerank_weights_obj(
+    const nbase_json_t *jrw,
+    nbase_rerank_weight_t **out_weights,
+    uint32_t *out_count,
+    const char **out_err,
+    int *out_http_code) {
+  *out_weights = NULL;
+  *out_count = 0U;
+  if (jrw->type != NBASE_JSON_OBJECT || jrw->len > 1024U) {
+    *out_err = "rerankWeights must be a JSON object";
+    *out_http_code = 400;
+    return false;
+  }
+  if (jrw->len == 0U) {
+    return true;
+  }
+  nbase_rerank_weight_t *w = calloc(jrw->len, sizeof(nbase_rerank_weight_t));
+  if (!w) {
+    *out_err = "out of memory";
+    *out_http_code = 500;
+    return false;
+  }
+  for (size_t wi = 0U; wi < jrw->len; wi++) {
+    const char *wk = jrw->keys[wi];
+    const nbase_json_t *wv = jrw->vals[wi];
+    if (!wk || wk[0] == '\0' || !wv || wv->type != NBASE_JSON_NUMBER || !isfinite(wv->num)) {
+      free(w);
+      *out_err = "rerankWeights values must be finite numbers";
+      *out_http_code = 400;
+      return false;
+    }
+    w[wi].key = wk;
+    w[wi].weight = (float)wv->num;
+  }
+  *out_weights = w;
+  *out_count = (uint32_t)jrw->len;
+  return true;
+}
+
 static void handle_search(const http_conn_t *c, const char *body, size_t body_len) {
   nbase_http_server_t *srv = c->srv;
   nbase_json_t *root = NULL;
@@ -2372,34 +2411,13 @@ static void handle_search(const http_conn_t *c, const char *body, size_t body_le
   }
   const nbase_json_t *jrw = nbase_json_obj_get(root, "rerankWeights");
   if (jrw != NULL) {
-    if (jrw->type != NBASE_JSON_OBJECT || jrw->len > 1024U) {
+    const char *w_err = NULL;
+    int w_code = 400;
+    if (!parse_rerank_weights_obj(jrw, &weights, &weight_cnt, &w_err, &w_code)) {
       free(query);
       nbase_json_free(root);
-      send_error_json(c, 400, "rerankWeights must be a JSON object");
+      send_error_json(c, w_code, w_err);
       return;
-    }
-    if (jrw->len > 0U) {
-      weights = calloc(jrw->len, sizeof(nbase_rerank_weight_t));
-      if (!weights) {
-        free(query);
-        nbase_json_free(root);
-        send_error_json(c, 500, "out of memory");
-        return;
-      }
-      for (size_t wi = 0U; wi < jrw->len; wi++) {
-        const char *wk = jrw->keys[wi];
-        const nbase_json_t *wv = jrw->vals[wi];
-        if (!wk || wk[0] == '\0' || !wv || wv->type != NBASE_JSON_NUMBER || !isfinite(wv->num)) {
-          free(weights);
-          free(query);
-          nbase_json_free(root);
-          send_error_json(c, 400, "rerankWeights values must be finite numbers");
-          return;
-        }
-        weights[weight_cnt].key = wk;
-        weights[weight_cnt].weight = (float)wv->num;
-        weight_cnt++;
-      }
     }
     if (jrr == NULL) {
       do_rerank = true;
@@ -3538,6 +3556,259 @@ static void handle_distance(const http_conn_t *c, const char *body, size_t body_
   nbase_sbuf_free(&sb);
 }
 
+static void handle_rerank(const http_conn_t *c, const char *body, size_t body_len) {
+  nbase_http_server_t *srv = c->srv;
+  nbase_json_t *root = NULL;
+  if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
+    nbase_json_free(root);
+    send_error_json(c, 400, "invalid JSON request body");
+    return;
+  }
+
+  const nbase_json_t *jcands = nbase_json_obj_get(root, "candidates");
+  if (!jcands || jcands->type != NBASE_JSON_ARRAY || jcands->len > 10000U) {
+    nbase_json_free(root);
+    send_error_json(c, 400, "candidates must be an array of at most 10000 items");
+    return;
+  }
+  uint32_t cand_cnt = (uint32_t)jcands->len;
+
+  int rerank_method = 0; /* 0=unset, 1=diversity, 2=weighted, 3=standard */
+  const nbase_json_t *jrm = nbase_json_obj_get(root, "method");
+  if (jrm == NULL) {
+    jrm = nbase_json_obj_get(root, "rerankingMethod");
+  }
+  if (jrm == NULL) {
+    jrm = nbase_json_obj_get(root, "rerankMethod");
+  }
+  if (jrm != NULL) {
+    if (jrm->type != NBASE_JSON_STRING) {
+      nbase_json_free(root);
+      send_error_json(c, 400, "method must be a string");
+      return;
+    }
+    if (strcmp(jrm->str, "diversity") == 0) {
+      rerank_method = 1;
+    } else if (strcmp(jrm->str, "weighted") == 0) {
+      rerank_method = 2;
+    } else if (strcmp(jrm->str, "standard") == 0) {
+      rerank_method = 3;
+    } else {
+      nbase_json_free(root);
+      send_error_json(c, 400, "method must be standard, diversity, or weighted");
+      return;
+    }
+  }
+
+  nbase_rerank_weight_t *weights = NULL;
+  uint32_t weight_cnt = 0U;
+  const nbase_json_t *jrw = nbase_json_obj_get(root, "weights");
+  if (jrw == NULL) {
+    jrw = nbase_json_obj_get(root, "rerankWeights");
+  }
+  if (jrw != NULL) {
+    const char *w_err = NULL;
+    int w_code = 400;
+    if (!parse_rerank_weights_obj(jrw, &weights, &weight_cnt, &w_err, &w_code)) {
+      nbase_json_free(root);
+      send_error_json(c, w_code, w_err);
+      return;
+    }
+  }
+  if (rerank_method == 0) {
+    rerank_method = (weight_cnt > 0U) ? 2 : 1;
+  }
+
+  float lambda = 0.5f;
+  const nbase_json_t *jlam = nbase_json_obj_get(root, "lambda");
+  if (jlam == NULL) {
+    jlam = nbase_json_obj_get(root, "rerankLambda");
+  }
+  if (jlam != NULL) {
+    if (jlam->type != NBASE_JSON_NUMBER || !isfinite(jlam->num) ||
+        jlam->num < 0.0 || jlam->num > 1.0) {
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "lambda must be in [0, 1]");
+      return;
+    }
+    lambda = (float)jlam->num;
+  }
+
+  uint32_t k = (cand_cnt > 0U) ? cand_cnt : 10U;
+  const nbase_json_t *jk = nbase_json_obj_get(root, "k");
+  if (jk != NULL) {
+    if (jk->type != NBASE_JSON_NUMBER || !jk->is_int || jk->i64 <= 0 || jk->i64 > 10000) {
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "k must be in 1..10000");
+      return;
+    }
+    k = (uint32_t)jk->i64;
+  }
+
+  bool inc_meta = false;
+  bool inc_vec = false;
+  bool inc_text = false;
+  const nbase_json_t *jincm = nbase_json_obj_get(root, "includeMetadata");
+  if (jincm != NULL) {
+    if (jincm->type != NBASE_JSON_BOOL) {
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "includeMetadata must be boolean");
+      return;
+    }
+    inc_meta = jincm->b;
+  }
+  const nbase_json_t *jincv = nbase_json_obj_get(root, "includeVectors");
+  if (jincv != NULL) {
+    if (jincv->type != NBASE_JSON_BOOL) {
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "includeVectors must be boolean");
+      return;
+    }
+    inc_vec = jincv->b;
+  }
+  const nbase_json_t *jinct = nbase_json_obj_get(root, "includeText");
+  if (jinct != NULL) {
+    if (jinct->type != NBASE_JSON_BOOL) {
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "includeText must be boolean");
+      return;
+    }
+    inc_text = jinct->b;
+  }
+
+  nbase_result_t *cands = (cand_cnt > 0U) ? malloc((size_t)cand_cnt * sizeof(nbase_result_t)) : NULL;
+  nbase_result_t *out_res = (cand_cnt > 0U) ? malloc((size_t)k * sizeof(nbase_result_t)) : NULL;
+  if (cand_cnt > 0U && (!cands || !out_res)) {
+    free(cands);
+    free(out_res);
+    free(weights);
+    nbase_json_free(root);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+
+  for (uint32_t i = 0U; i < cand_cnt; i++) {
+    const nbase_json_t *item = jcands->items[i];
+    if (!item || item->type != NBASE_JSON_OBJECT) {
+      free(cands);
+      free(out_res);
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "each candidate must be a JSON object");
+      return;
+    }
+    if (!parse_json_u64(nbase_json_obj_get(item, "id"), &cands[i].id)) {
+      free(cands);
+      free(out_res);
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "each candidate requires an unsigned 64-bit id");
+      return;
+    }
+    const nbase_json_t *jd = nbase_json_obj_get(item, "distance");
+    if (!jd || jd->type != NBASE_JSON_NUMBER || !isfinite(jd->num)) {
+      free(cands);
+      free(out_res);
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "each candidate requires a finite distance");
+      return;
+    }
+    float f = (float)jd->num;
+    if (!isfinite(f)) {
+      free(cands);
+      free(out_res);
+      free(weights);
+      nbase_json_free(root);
+      send_error_json(c, 400, "candidate distance must be a finite float32");
+      return;
+    }
+    cands[i].distance = f;
+  }
+
+  nbase_status_t st = NBASE_OK;
+  uint32_t out_n = 0U;
+  if (cand_cnt > 0U) {
+    if (rerank_method == 2) {
+      st = nbase_rerank_weighted(srv->db, cands, cand_cnt, weights, weight_cnt, k, out_res, &out_n);
+    } else if (rerank_method == 3) {
+      for (uint32_t i = 0U; i < cand_cnt; i++) {
+        if (!nbase_contains(srv->db, cands[i].id)) {
+          st = NBASE_ERR_NOT_FOUND;
+          break;
+        }
+      }
+      if (st == NBASE_OK) {
+        qsort(cands, cand_cnt, sizeof(nbase_result_t), nbase_cmp_result_asc);
+        out_n = (cand_cnt < k) ? cand_cnt : k;
+        if (out_n > 0U) {
+          memcpy(out_res, cands, (size_t)out_n * sizeof(nbase_result_t));
+        }
+      }
+    } else {
+      st = nbase_rerank_mmr(srv->db, cands, cand_cnt, k, lambda, out_res, &out_n);
+    }
+  }
+
+  free(cands);
+  free(weights);
+  nbase_json_free(root);
+  if (st != NBASE_OK) {
+    free(out_res);
+    send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+
+  uint32_t vec_dim = 0U;
+  if (inc_vec && out_n > 0U) {
+    nbase_stats_t db_st;
+    st = nbase_stats(srv->db, &db_st);
+    if (st != NBASE_OK) {
+      free(out_res);
+      send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+      return;
+    }
+    vec_dim = db_st.dim;
+  }
+
+  const char *method_str =
+      (rerank_method == 2) ? "weighted" : ((rerank_method == 3) ? "standard" : "diversity");
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(&sb, "{\"success\":true,\"method\":\"%s\",\"count\":%u,\"results\":[",
+                     method_str,
+                     out_n);
+  for (uint32_t i = 0U; i < out_n; i++) {
+    nbase_sbuf_appendf(
+        &sb,
+        i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
+        (unsigned long long)out_res[i].id,
+        (double)out_res[i].distance);
+    if (inc_meta) {
+      nbase_sbuf_append(&sb, ",\"metadata\":");
+      append_meta_json(&sb, srv->db, out_res[i].id);
+    }
+    if (inc_vec) {
+      nbase_sbuf_append(&sb, ",\"vector\":");
+      append_vector_json(&sb, srv->db, out_res[i].id, vec_dim);
+    }
+    if (inc_text) {
+      nbase_sbuf_append(&sb, ",\"text\":");
+      append_text_json(&sb, srv->db, out_res[i].id);
+    }
+    nbase_sbuf_append_n(&sb, "}", 1U);
+  }
+  nbase_sbuf_append(&sb, "]}");
+  free(out_res);
+  send_sbuf_json(c, 200, &sb);
+  nbase_sbuf_free(&sb);
+}
+
 static void handle_admin_cache(const http_conn_t *c, const char *body, size_t body_len) {
   nbase_http_server_t *srv = c->srv;
   bool has_max = false;
@@ -3720,6 +3991,14 @@ static void dispatch_request(
   if (strcmp(path, "/api/distance") == 0) {
     if (strcmp(method, "POST") == 0) {
       handle_distance(c, body, body_len);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
+  if (strcmp(path, "/api/rerank") == 0) {
+    if (strcmp(method, "POST") == 0) {
+      handle_rerank(c, body, body_len);
       return;
     }
     send_error_json(c, 405, "method not allowed");

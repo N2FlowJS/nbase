@@ -986,6 +986,48 @@ class Lsh {
     return out;
   }
 
+  std::vector<std::vector<nbase_result_t>> search_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      uint32_t k,
+      uint32_t multi_probe = 2U,
+      uint32_t num_threads = 0U,
+      std::vector<uint32_t> *out_counts = nullptr) const {
+    if (dim == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
+      throw Error(dim == 0U ? NBASE_ERR_INVALID_ARG : NBASE_ERR_DIM_MISMATCH);
+    }
+    if (query_count == 0U) {
+      detail::check(nbase_lsh_search_batch(
+          ptr_, nullptr, 0U, dim, k, multi_probe, num_threads, nullptr, nullptr));
+      if (out_counts != nullptr) {
+        out_counts->clear();
+      }
+      return {};
+    }
+    std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_lsh_search_batch(
+        ptr_,
+        queries.data(),
+        query_count,
+        dim,
+        k,
+        multi_probe,
+        num_threads,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    std::vector<std::vector<nbase_result_t>> res(query_count);
+    for (uint32_t q = 0U; q < query_count; q++) {
+      const nbase_result_t *row = flat.data() + static_cast<size_t>(q) * static_cast<size_t>(k);
+      res[q].assign(row, row + counts[q]);
+    }
+    if (out_counts != nullptr) {
+      *out_counts = counts;
+    }
+    return res;
+  }
+
   void save(const std::string &file_path) const {
     detail::check(nbase_lsh_save(ptr_, file_path.c_str()));
   }
@@ -1656,6 +1698,38 @@ class ClusteredDatabase {
     return out;
   }
 
+  void get_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t dim,
+      std::vector<float> &out_vectors,
+      std::vector<bool> &out_found) const {
+    const size_t n = ids.size();
+    out_vectors.resize(n * static_cast<size_t>(dim));
+    out_found.assign(n, false);
+    if (n == 0U) {
+      return;
+    }
+    std::unique_ptr<bool[]> found_buf(new bool[n]);
+    detail::check(nbase_clustered_get_batch(
+        ptr_, ids.data(), static_cast<uint32_t>(n), dim, out_vectors.data(), found_buf.get()));
+    for (size_t i = 0U; i < n; ++i) {
+      out_found[i] = found_buf[i];
+    }
+  }
+
+  std::vector<float> get_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t dim,
+      std::vector<bool> *out_found = nullptr) const {
+    std::vector<float> out_vectors;
+    std::vector<bool> found;
+    get_batch(ids, dim, out_vectors, found);
+    if (out_found != nullptr) {
+      *out_found = std::move(found);
+    }
+    return out_vectors;
+  }
+
   bool contains(uint64_t id) const noexcept {
     return nbase_clustered_contains(ptr_, id);
   }
@@ -1707,6 +1781,30 @@ class ClusteredDatabase {
         filter,
         filter_ctx,
         k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> search_radius(
+      const std::vector<float> &query,
+      float max_distance,
+      uint32_t max_results,
+      uint32_t nprobe = 0U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr) const {
+    std::vector<nbase_result_t> out(max_results);
+    uint32_t count = 0U;
+    detail::check(nbase_clustered_search_radius(
+        ptr_,
+        query.data(),
+        static_cast<uint32_t>(query.size()),
+        max_distance,
+        max_results,
+        nprobe,
+        filter,
+        filter_ctx,
+        max_results > 0U ? out.data() : nullptr,
         &count));
     out.resize(count);
     return out;

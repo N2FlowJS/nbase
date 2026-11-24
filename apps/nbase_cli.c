@@ -37,6 +37,8 @@ static void print_usage(const char *prog) {
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]\n"
       "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--filter <json>]\n"
       "  relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
+      "  communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
+      "  distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]\n"
       "  search-text <dir> <query> [--k <K>] [--filter <json>]\n"
       "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>]\n"
       "  rebuild <dir> [--threads <T>]\n"
@@ -1613,6 +1615,221 @@ int main(int argc, char **argv) {
     }
     printf("]}\n");
     nbase_free_edges(edges);
+    return 0;
+  }
+
+  if (strcmp(cmd, "communities") == 0) {
+    if (argc < 3) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint32_t k = 5U;
+    float max_dist = FLT_MAX;
+    const char *flt_json = NULL;
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 1000U) {
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--max-distance") == 0 && i + 1 < argc) {
+        if (!parse_float_arg(argv[++i], &max_dist)) {
+          fprintf(stderr, "Invalid --max-distance\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    nbase_stats_t db_st;
+    st = nbase_stats(db, &db_st);
+    if (st != NBASE_OK) {
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "stats failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    if (db_st.active_vectors == 0ULL) {
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      printf("{\"community_count\":0,\"communities\":[]}\n");
+      return 0;
+    }
+    if (db_st.active_vectors > 1000000ULL) {
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "too many nodes for communities command\n");
+      return 1;
+    }
+
+    uint32_t cap = (uint32_t)db_st.active_vectors + 64U;
+    uint64_t *ids = malloc((size_t)cap * sizeof(uint64_t));
+    if (!ids) {
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "out of memory\n");
+      return 1;
+    }
+    uint32_t got_ids = 0U;
+    st = nbase_query_meta(db, flt.count > 0U ? &flt : NULL, cap, ids, &got_ids);
+    if (st != NBASE_OK) {
+      free(ids);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "query failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    if (got_ids == 0U) {
+      free(ids);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      printf("{\"community_count\":0,\"communities\":[]}\n");
+      return 0;
+    }
+
+    nbase_edge_t *edges = NULL;
+    uint64_t edge_cnt = 0ULL;
+    st = nbase_extract_relationships_filtered(
+        db, k, max_dist, flt.count > 0U ? &flt : NULL, &edges, &edge_cnt);
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+    if (st != NBASE_OK) {
+      free(ids);
+      fprintf(stderr, "relationships failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    uint32_t *labels = malloc((size_t)got_ids * sizeof(uint32_t));
+    if (!labels) {
+      nbase_free_edges(edges);
+      free(ids);
+      fprintf(stderr, "out of memory\n");
+      return 1;
+    }
+    uint32_t comm_cnt = 0U;
+    st = nbase_extract_communities(ids, got_ids, edges, edge_cnt, labels, &comm_cnt);
+    nbase_free_edges(edges);
+    if (st != NBASE_OK) {
+      free(labels);
+      free(ids);
+      fprintf(stderr, "communities failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    printf("{\"community_count\":%u,\"communities\":[", comm_cnt);
+    for (uint32_t i = 0U; i < got_ids; i++) {
+      printf(
+          i == 0U ? "{\"id\":%llu,\"community\":%u}" : ",{\"id\":%llu,\"community\":%u}",
+          (unsigned long long)ids[i],
+          labels[i]);
+    }
+    printf("]}\n");
+    free(labels);
+    free(ids);
+    return 0;
+  }
+
+  if (strcmp(cmd, "distance") == 0) {
+    if (argc < 5) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    nbase_metric_t metric = NBASE_METRIC_EUCLIDEAN;
+    if (!parse_metric(argv[2], &metric)) {
+      fprintf(stderr, "Invalid metric: %s\n", argv[2]);
+      return 1;
+    }
+    uint32_t dim = 1U;
+    for (const char *p = argv[3]; *p != '\0'; p++) {
+      if (*p == ',') {
+        if (dim >= NBASE_MAX_DIM) {
+          fprintf(stderr, "Query dimension exceeds maximum\n");
+          return 1;
+        }
+        dim++;
+      }
+    }
+    float *qvec = NULL;
+    if (!parse_csv_vec(argv[3], dim, &qvec)) {
+      fprintf(stderr, "Invalid query vector\n");
+      return 1;
+    }
+
+    uint32_t count = (uint32_t)(argc - 4);
+    float *targets = malloc((size_t)count * (size_t)dim * sizeof(float));
+    float *dists = malloc((size_t)count * sizeof(float));
+    if (!targets || !dists) {
+      free(targets);
+      free(dists);
+      free(qvec);
+      fprintf(stderr, "out of memory\n");
+      return 1;
+    }
+
+    for (uint32_t i = 0U; i < count; i++) {
+      float *row = NULL;
+      if (!parse_csv_vec(argv[4 + (int)i], dim, &row)) {
+        free(targets);
+        free(dists);
+        free(qvec);
+        fprintf(stderr, "Invalid target vector at index %u\n", i);
+        return 1;
+      }
+      memcpy(targets + (size_t)i * (size_t)dim, row, (size_t)dim * sizeof(float));
+      free(row);
+    }
+
+    nbase_status_t st = nbase_distance_batch(metric, qvec, targets, count, dim, dists);
+    free(targets);
+    free(qvec);
+    if (st != NBASE_OK) {
+      free(dists);
+      fprintf(stderr, "distance failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    printf("{\"metric\":\"%s\",\"dimension\":%u,\"count\":%u,\"distances\":[",
+           metric_str(metric),
+           dim,
+           count);
+    for (uint32_t i = 0U; i < count; i++) {
+      printf(i == 0U ? "%.7g" : ",%.7g", (double)dists[i]);
+    }
+    printf("]}\n");
+    free(dists);
     return 0;
   }
 

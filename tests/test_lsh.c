@@ -219,8 +219,119 @@ static void test_lsh_add_batch_contains_and_concurrent_tsan(void) {
   nbase_lsh_destroy(lsh);
 }
 
+typedef struct lsh_batch_tsan_ctx {
+  nbase_lsh_t *lsh;
+  const float *queries;
+  uint32_t nqueries;
+  uint32_t dim;
+  atomic_bool stop;
+  atomic_int errors;
+} lsh_batch_tsan_ctx_t;
+
+static void *lsh_batch_reader_fn(void *raw) {
+  lsh_batch_tsan_ctx_t *ctx = (lsh_batch_tsan_ctx_t *)raw;
+  nbase_result_t res[4U * 5U];
+  uint32_t cnts[4U];
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    if (nbase_lsh_search_batch(ctx->lsh, ctx->queries, 4U, ctx->dim, 5U, 2U, 2U, res, cnts) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+  }
+  return NULL;
+}
+
+static void test_lsh_search_batch_mt_and_parity(void) {
+  static const nbase_metric_t metrics[2] = {NBASE_METRIC_COSINE, NBASE_METRIC_EUCLIDEAN};
+  const uint32_t dim = 24U;
+  const uint32_t n = 200U;
+  const uint32_t nqueries = 12U;
+  const uint32_t k = 6U;
+
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  float *queries = malloc((size_t)nqueries * dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  nbase_result_t *batch_res = malloc((size_t)nqueries * k * sizeof(nbase_result_t));
+  uint32_t *batch_cnts = malloc((size_t)nqueries * sizeof(uint32_t));
+  ASSERT_TRUE(vecs && queries && ids && batch_res && batch_cnts);
+
+  make_clusters(vecs, 5U, 40U, dim, 6611ULL);
+  make_clusters(queries, 3U, 4U, dim, 6622ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 1000ULL + i;
+  }
+
+  for (size_t mi = 0; mi < 2; mi++) {
+    nbase_lsh_config_t cfg = nbase_lsh_config_default(dim);
+    cfg.metric = metrics[mi];
+    cfg.num_tables = 8U;
+    cfg.num_bits = 8U;
+    cfg.bucket_width = 4.0f;
+    cfg.seed = 4242ULL + mi;
+
+    nbase_lsh_t *lsh = NULL;
+    ASSERT_STATUS(nbase_lsh_create(&cfg, &lsh), NBASE_OK);
+    ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids, vecs, n, dim), NBASE_OK);
+
+    /* Compare single-thread and 4-thread nbase_lsh_search_batch vs nbase_lsh_search */
+    const uint32_t threads[2] = {1U, 4U};
+    for (size_t ti = 0; ti < 2; ti++) {
+      ASSERT_STATUS(
+          nbase_lsh_search_batch(lsh, queries, nqueries, dim, k, 2U, threads[ti], batch_res, batch_cnts),
+          NBASE_OK);
+      for (uint32_t q = 0U; q < nqueries; q++) {
+        nbase_result_t single[6];
+        uint32_t sc = 0U;
+        ASSERT_STATUS(
+            nbase_lsh_search(lsh, queries + (size_t)q * dim, dim, k, 2U, single, &sc),
+            NBASE_OK);
+        ASSERT_EQ_U64(batch_cnts[q], sc);
+        for (uint32_t r = 0U; r < sc; r++) {
+          ASSERT_EQ_U64(batch_res[(size_t)q * k + r].id, single[r].id);
+          ASSERT_NEAR(batch_res[(size_t)q * k + r].distance, single[r].distance, 1e-6, 1e-6);
+        }
+      }
+    }
+
+    /* Validation & edge paths */
+    ASSERT_STATUS(nbase_lsh_search_batch(lsh, NULL, 0U, dim, k, 2U, 2U, NULL, NULL), NBASE_OK);
+    batch_cnts[0] = 99U;
+    ASSERT_STATUS(nbase_lsh_search_batch(lsh, queries, 2U, dim, 0U, 2U, 2U, NULL, batch_cnts), NBASE_OK);
+    ASSERT_EQ_U64(batch_cnts[0], 0ULL);
+    ASSERT_STATUS(nbase_lsh_search_batch(lsh, queries, 2U, dim - 1U, k, 2U, 2U, batch_res, batch_cnts), NBASE_ERR_DIM_MISMATCH);
+    queries[dim + 3U] = NAN;
+    ASSERT_STATUS(nbase_lsh_search_batch(lsh, queries, 2U, dim, k, 2U, 2U, batch_res, batch_cnts), NBASE_ERR_INVALID_VECTOR);
+    queries[dim + 3U] = 0.25f;
+
+    if (mi == 0U) {
+      lsh_batch_tsan_ctx_t ctx = {lsh, queries, nqueries, dim, false, 0};
+      pthread_t r1, r2;
+      ASSERT_TRUE(pthread_create(&r1, NULL, lsh_batch_reader_fn, &ctx) == 0);
+      ASSERT_TRUE(pthread_create(&r2, NULL, lsh_batch_reader_fn, &ctx) == 0);
+      for (uint32_t s = 0U; s < 16U; s++) {
+        ASSERT_STATUS(
+            nbase_lsh_add(lsh, 5000ULL + s, vecs + (size_t)s * dim, dim),
+            NBASE_OK);
+      }
+      atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+      pthread_join(r1, NULL);
+      pthread_join(r2, NULL);
+      ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+    }
+
+    nbase_lsh_destroy(lsh);
+  }
+
+  free(batch_cnts);
+  free(batch_res);
+  free(ids);
+  free(queries);
+  free(vecs);
+}
+
 void test_lsh_run(void) {
   RUN_TEST(test_lsh_cosine_and_multiprobe);
   RUN_TEST(test_lsh_euclidean_save_load_and_errors);
   RUN_TEST(test_lsh_add_batch_contains_and_concurrent_tsan);
+  RUN_TEST(test_lsh_search_batch_mt_and_parity);
 }

@@ -640,6 +640,55 @@ nbase_status_t nbase_clustered_get(
   return st;
 }
 
+nbase_status_t nbase_clustered_get_batch(
+    const nbase_clustered_t *cl,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t dim,
+    float *out_vectors,
+    bool *out_found) {
+  if (!cl || (count > 0U && (!ids || !out_vectors))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+  if (dim != cl->cfg.dim) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  if ((size_t)count > SIZE_MAX / (size_t)dim) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+
+  size_t vec_bytes = (size_t)dim * sizeof(float);
+  for (uint32_t i = 0U; i < count; i++) {
+    float *dst = out_vectors + (size_t)i * (size_t)dim;
+    uint32_t slot = NBASE_INVALID_SLOT;
+    const float *v = NULL;
+    if (nbase_store_find_slot(cl->store, ids[i], &slot)) {
+      v = nbase_store_get_vector(cl->store, slot);
+    }
+    if (v != NULL) {
+      memcpy(dst, v, vec_bytes);
+      if (out_found != NULL) {
+        out_found[i] = true;
+      }
+    } else {
+      memset(dst, 0, vec_bytes);
+      if (out_found != NULL) {
+        out_found[i] = false;
+      }
+    }
+  }
+
+  pthread_rwlock_unlock(&mcl->rwlock);
+  return NBASE_OK;
+}
+
 bool nbase_clustered_contains(const nbase_clustered_t *cl, uint64_t id) {
   if (!cl) {
     return false;
@@ -834,17 +883,20 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
   return NBASE_OK;
 }
 
-nbase_status_t nbase_clustered_search_filtered(
+static nbase_status_t cl_search_internal(
     const nbase_clustered_t *cl,
     const float *query,
     uint32_t dim,
-    uint32_t k,
+    uint32_t max_results,
+    bool use_radius,
+    float max_distance,
     uint32_t nprobe,
     nbase_filter_fn filter,
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count) {
-  if (!cl || !query || !out_count || (k > 0U && !out_results)) {
+  if (!cl || !query || !out_count || (use_radius && !isfinite(max_distance)) ||
+      (max_results > 0U && !out_results)) {
     return NBASE_ERR_INVALID_ARG;
   }
   *out_count = 0U;
@@ -859,7 +911,7 @@ nbase_status_t nbase_clustered_search_filtered(
     pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_ERR_INVALID_VECTOR;
   }
-  if (k == 0U || cl->store->active_count == 0ULL || cl->cluster_count == 0U) {
+  if (max_results == 0U || cl->store->active_count == 0ULL || cl->cluster_count == 0U) {
     pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_OK;
   }
@@ -888,13 +940,13 @@ nbase_status_t nbase_clustered_search_filtered(
   qsort(probes, non_empty, sizeof(cl_probe_t), cmp_cl_probe_asc);
   uint32_t to_probe = (nprobe == 0U || nprobe > non_empty) ? non_empty : nprobe;
 
-  nbase_result_t *heap_buf = malloc((size_t)k * sizeof(nbase_result_t));
+  nbase_result_t *heap_buf = malloc((size_t)max_results * sizeof(nbase_result_t));
   if (!heap_buf) {
     free(probes);
     pthread_rwlock_unlock(&mcl->rwlock);
     return NBASE_ERR_NOMEM;
   }
-  cl_maxheap_t heap = {heap_buf, 0U, k};
+  cl_maxheap_t heap = {heap_buf, 0U, max_results};
 
   for (uint32_t pi = 0U; pi < to_probe; pi++) {
     const cl_cluster_t *c = &cl->clusters[probes[pi].cluster_idx];
@@ -909,6 +961,9 @@ nbase_status_t nbase_clustered_search_filtered(
       }
       const float *mv = nbase_store_get_vector(cl->store, mslot);
       float dist = dfn(query, mv, dim);
+      if (use_radius && dist > max_distance) {
+        continue;
+      }
       cl_heap_push_bounded(&heap, mid, dist);
     }
   }
@@ -924,6 +979,45 @@ nbase_status_t nbase_clustered_search_filtered(
   *out_count = heap.len;
   free(heap_buf);
   return NBASE_OK;
+}
+
+nbase_status_t nbase_clustered_search_filtered(
+    const nbase_clustered_t *cl,
+    const float *query,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return cl_search_internal(
+      cl, query, dim, k, false, 0.0f, nprobe, filter, filter_ctx, out_results, out_count);
+}
+
+nbase_status_t nbase_clustered_search_radius(
+    const nbase_clustered_t *cl,
+    const float *query,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  return cl_search_internal(
+      cl,
+      query,
+      dim,
+      max_results,
+      true,
+      max_distance,
+      nprobe,
+      filter,
+      filter_ctx,
+      out_results,
+      out_count);
 }
 
 nbase_status_t nbase_clustered_search(

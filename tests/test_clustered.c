@@ -282,8 +282,122 @@ static void test_clustered_upsert_batch_and_list_ids(void) {
   nbase_clustered_destroy(cl);
 }
 
+static void *cl_batch_radius_reader_thread(void *raw) {
+  cl_mt_arg_t *arg = (cl_mt_arg_t *)raw;
+  uint64_t gids[3] = {10ULL, 20ULL, 999999ULL};
+  float gvecs[9];
+  bool gfound[3];
+  float q[3] = {1.0f, 0.0f, 0.0f};
+  nbase_result_t rres[8];
+  for (int iter = 0; iter < 50; iter++) {
+    if (nbase_clustered_get_batch(arg->cl, gids, 3U, 3U, gvecs, gfound) != NBASE_OK ||
+        !gfound[0] || gfound[2]) {
+      arg->err = 1;
+      break;
+    }
+    uint32_t got = 0U;
+    if (nbase_clustered_search_radius(arg->cl, q, 3U, 1.5f, 8U, 0U, NULL, NULL, rres, &got) != NBASE_OK) {
+      arg->err = 2;
+      break;
+    }
+    for (uint32_t i = 0U; i < got; i++) {
+      if (rres[i].distance > 1.5f) {
+        arg->err = 3;
+        break;
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_clustered_get_batch_and_search_radius(void) {
+  nbase_clustered_config_t cfg = nbase_clustered_config_default(3U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.target_cluster_size = 3U;
+  cfg.max_clusters = 16U;
+  cfg.distance_threshold = 0.6f;
+
+  nbase_clustered_t *cl = NULL;
+  ASSERT_STATUS(nbase_clustered_create(&cfg, &cl), NBASE_OK);
+
+  uint64_t ids[5] = {10ULL, 11ULL, 20ULL, 21ULL, 30ULL};
+  float vecs[15] = {
+      1.0f, 0.0f, 0.0f,
+      1.2f, 0.0f, 0.0f,
+      1.0f, 0.4f, 0.0f,
+      0.0f, 3.0f, 0.0f,
+      1.0f, 0.8f, 0.0f
+  };
+  ASSERT_STATUS(nbase_clustered_upsert_batch(cl, ids, vecs, 5U, 3U), NBASE_OK);
+
+  /* Batch retrieval including missing ID + NULL out_found + count == 0 */
+  uint64_t qids[4] = {30ULL, 999ULL, 10ULL, 11ULL};
+  float out_v[12];
+  bool found[4] = {false, true, false, false};
+  for (int i = 0; i < 12; i++) {
+    out_v[i] = 99.0f;
+  }
+  ASSERT_STATUS(nbase_clustered_get_batch(cl, qids, 4U, 3U, out_v, found), NBASE_OK);
+  ASSERT_TRUE(found[0] && !found[1] && found[2] && found[3]);
+  ASSERT_NEAR(out_v[0], 1.0, 1e-6, 0.0);
+  ASSERT_NEAR(out_v[1], 0.8, 1e-6, 0.0);
+  ASSERT_NEAR(out_v[3], 0.0, 1e-6, 0.0);
+  ASSERT_NEAR(out_v[4], 0.0, 1e-6, 0.0);
+  ASSERT_NEAR(out_v[5], 0.0, 1e-6, 0.0);
+  ASSERT_NEAR(out_v[6], 1.0, 1e-6, 0.0);
+  ASSERT_NEAR(out_v[9], 1.2, 1e-6, 0.0);
+  ASSERT_STATUS(nbase_clustered_get_batch(cl, qids, 4U, 3U, out_v, NULL), NBASE_OK);
+  ASSERT_STATUS(nbase_clustered_get_batch(cl, NULL, 0U, 3U, NULL, NULL), NBASE_OK);
+  ASSERT_STATUS(nbase_clustered_get_batch(cl, qids, 4U, 2U, out_v, found), NBASE_ERR_DIM_MISMATCH);
+  ASSERT_STATUS(nbase_clustered_get_batch(NULL, qids, 1U, 3U, out_v, found), NBASE_ERR_INVALID_ARG);
+
+  /* Radius search: query [1, 0, 0], max_distance 0.45 should match IDs 10 (0.0), 11 (0.2), 20 (0.4) */
+  float q[3] = {1.0f, 0.0f, 0.0f};
+  nbase_result_t res[5];
+  uint32_t cnt = 0U;
+  ASSERT_STATUS(nbase_clustered_search_radius(cl, q, 3U, 0.45f, 5U, 0U, NULL, NULL, res, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 3ULL);
+  ASSERT_EQ_U64(res[0].id, 10ULL);
+  ASSERT_EQ_U64(res[1].id, 11ULL);
+  ASSERT_EQ_U64(res[2].id, 20ULL);
+
+  /* Filtered radius search skips odd ID 11 */
+  ASSERT_STATUS(
+      nbase_clustered_search_radius(cl, q, 3U, 0.45f, 5U, 0U, cl_even_filter, NULL, res, &cnt),
+      NBASE_OK);
+  ASSERT_EQ_U64(cnt, 2ULL);
+  ASSERT_EQ_U64(res[0].id, 10ULL);
+  ASSERT_EQ_U64(res[1].id, 20ULL);
+
+  /* Radius error and zero-capacity checks */
+  ASSERT_STATUS(nbase_clustered_search_radius(cl, q, 3U, 0.45f, 0U, 0U, NULL, NULL, NULL, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 0ULL);
+  ASSERT_STATUS(nbase_clustered_search_radius(cl, q, 3U, NAN, 5U, 0U, NULL, NULL, res, &cnt), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_clustered_search_radius(cl, q, 2U, 0.5f, 5U, 0U, NULL, NULL, res, &cnt), NBASE_ERR_DIM_MISMATCH);
+  float nanq[3] = {1.0f, NAN, 0.0f};
+  ASSERT_STATUS(nbase_clustered_search_radius(cl, nanq, 3U, 0.5f, 5U, 0U, NULL, NULL, res, &cnt), NBASE_ERR_INVALID_VECTOR);
+
+  /* Concurrent get_batch + search_radius readers against upsert writer under TSan */
+  pthread_t readers[2];
+  cl_mt_arg_t args[2] = {{cl, 0}, {cl, 0}};
+  for (int t = 0; t < 2; t++) {
+    ASSERT_TRUE(pthread_create(&readers[t], NULL, cl_batch_radius_reader_thread, &args[t]) == 0);
+  }
+  for (uint64_t step = 0ULL; step < 25ULL; step++) {
+    float wv[3] = {0.0f, 5.0f + (float)step * 0.1f, 0.0f};
+    ASSERT_STATUS(nbase_clustered_upsert(cl, 700ULL + step, wv, 3U), NBASE_OK);
+  }
+  for (int t = 0; t < 2; t++) {
+    pthread_join(readers[t], NULL);
+    ASSERT_EQ_I64(args[t].err, 0);
+  }
+
+  nbase_clustered_destroy(cl);
+}
+
 void test_clustered_run(void) {
   RUN_TEST(test_clustered_online_assign_search_and_recluster);
   RUN_TEST(test_clustered_batch_filtered_and_concurrent);
   RUN_TEST(test_clustered_upsert_batch_and_list_ids);
+  RUN_TEST(test_clustered_get_batch_and_search_radius);
 }

@@ -121,8 +121,45 @@ static void test_distance_batch_all_metrics_and_dims(void) {
   free(query);
 }
 
+static void test_distance_batch_unrolled_edges(void) {
+  static const uint32_t dims[] = {3U, 8U, 13U, 64U, 129U};
+  static const uint32_t counts[] = {1U, 3U, 4U, 5U, 17U};
+  static const nbase_metric_t metrics[] = {
+      NBASE_METRIC_EUCLIDEAN,
+      NBASE_METRIC_SQUARED_EUCLIDEAN,
+      NBASE_METRIC_INNER_PRODUCT,
+  };
+
+  float *query = malloc(129U * sizeof(float));
+  float *vecs = malloc(17U * 129U * sizeof(float));
+  float *dists = malloc(17U * sizeof(float));
+  ASSERT_TRUE(query != NULL && vecs != NULL && dists != NULL);
+  test_fill_vectors(query, 1U, 129U, 711ULL);
+  test_fill_vectors(vecs, 17U, 129U, 722ULL);
+
+  for (size_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++) {
+    uint32_t dim = dims[di];
+    for (size_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++) {
+      uint32_t count = counts[ci];
+      for (size_t mi = 0; mi < sizeof(metrics) / sizeof(metrics[0]); mi++) {
+        nbase_metric_t metric = metrics[mi];
+        ASSERT_STATUS(nbase_distance_batch(metric, query, vecs, count, dim, dists), NBASE_OK);
+        for (uint32_t n = 0U; n < count; n++) {
+          float expected = nbase_distance_scalar(metric, query, vecs + (size_t)n * (size_t)dim, dim);
+          ASSERT_NEAR(dists[n], expected, 1e-4, 1e-4);
+        }
+      }
+    }
+  }
+
+  free(dists);
+  free(vecs);
+  free(query);
+}
+
 void test_distance_run(void) {
   RUN_TEST(test_all_metrics_across_dims);
   RUN_TEST(test_distance_edge_cases);
   RUN_TEST(test_distance_batch_all_metrics_and_dims);
+  RUN_TEST(test_distance_batch_unrolled_edges);
 }

@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 6
+#define NBASE_VERSION_MINOR 7
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -381,6 +381,13 @@ nbase_status_t nbase_clustered_upsert_batch(
 nbase_status_t nbase_clustered_delete(nbase_clustered_t *cl, uint64_t id);
 nbase_status_t nbase_clustered_delete_batch(nbase_clustered_t *cl, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_clustered_get(const nbase_clustered_t *cl, uint64_t id, float *out_vec, uint32_t dim);
+nbase_status_t nbase_clustered_get_batch(
+    const nbase_clustered_t *cl,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t dim,
+    float *out_vectors,
+    bool *out_found);
 bool nbase_clustered_contains(const nbase_clustered_t *cl, uint64_t id);
 nbase_status_t nbase_clustered_list_ids(
     const nbase_clustered_t *cl,
@@ -392,6 +399,17 @@ nbase_status_t nbase_clustered_list_ids(
 nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clusters);
 nbase_status_t nbase_clustered_search(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_clustered_search_filtered(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_clustered_search_radius(
+    const nbase_clustered_t *cl,
+    const float *query,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count);
 nbase_status_t nbase_clustered_stats(const nbase_clustered_t *cl, nbase_clustered_stats_t *out_stats);
 nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *file_path);
 nbase_status_t nbase_clustered_load(const char *file_path, nbase_clustered_t **out_cl);
@@ -499,6 +517,16 @@ nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id);
 bool nbase_lsh_contains(const nbase_lsh_t *lsh, uint64_t id);
 nbase_status_t nbase_lsh_search(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_lsh_search_filtered(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_lsh_search_batch(
+    const nbase_lsh_t *lsh,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t multi_probe,
+    uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_lsh_stats(const nbase_lsh_t *lsh, nbase_lsh_stats_t *out_stats);
 nbase_status_t nbase_lsh_save(const nbase_lsh_t *lsh, const char *file_path);
 nbase_status_t nbase_lsh_load(const char *file_path, nbase_lsh_t **out_lsh);

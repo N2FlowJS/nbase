@@ -292,7 +292,49 @@ static __attribute__((target("avx2,fma"))) void squared_euclidean_batch_avx2(
     }
     return;
   }
-  for (uint32_t n = 0U; n < count; n++) {
+  uint32_t n = 0U;
+  for (; n + 4U <= count; n += 4U) {
+    const float *v0 = vectors + (size_t)n * (size_t)dim;
+    const float *v1 = vectors + (size_t)(n + 1U) * (size_t)dim;
+    const float *v2 = vectors + (size_t)(n + 2U) * (size_t)dim;
+    const float *v3 = vectors + (size_t)(n + 3U) * (size_t)dim;
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      __m256 d0 = _mm256_sub_ps(vq, _mm256_loadu_ps(v0 + i));
+      __m256 d1 = _mm256_sub_ps(vq, _mm256_loadu_ps(v1 + i));
+      __m256 d2 = _mm256_sub_ps(vq, _mm256_loadu_ps(v2 + i));
+      __m256 d3 = _mm256_sub_ps(vq, _mm256_loadu_ps(v3 + i));
+      a0 = _mm256_fmadd_ps(d0, d0, a0);
+      a1 = _mm256_fmadd_ps(d1, d1, a1);
+      a2 = _mm256_fmadd_ps(d2, d2, a2);
+      a3 = _mm256_fmadd_ps(d3, d3, a3);
+    }
+    float s0 = hsum256_ps(a0);
+    float s1 = hsum256_ps(a1);
+    float s2 = hsum256_ps(a2);
+    float s3 = hsum256_ps(a3);
+    for (; i < dim; i++) {
+      float q = query[i];
+      float d0 = q - v0[i];
+      float d1 = q - v1[i];
+      float d2 = q - v2[i];
+      float d3 = q - v3[i];
+      s0 += d0 * d0;
+      s1 += d1 * d1;
+      s2 += d2 * d2;
+      s3 += d3 * d3;
+    }
+    out_distances[n] = s0;
+    out_distances[n + 1U] = s1;
+    out_distances[n + 2U] = s2;
+    out_distances[n + 3U] = s3;
+  }
+  for (; n < count; n++) {
     const float *v = vectors + (size_t)n * (size_t)dim;
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();
@@ -343,7 +385,41 @@ static __attribute__((target("avx2,fma"))) void inner_product_batch_avx2(
     }
     return;
   }
-  for (uint32_t n = 0U; n < count; n++) {
+  uint32_t n = 0U;
+  for (; n + 4U <= count; n += 4U) {
+    const float *v0 = vectors + (size_t)n * (size_t)dim;
+    const float *v1 = vectors + (size_t)(n + 1U) * (size_t)dim;
+    const float *v2 = vectors + (size_t)(n + 2U) * (size_t)dim;
+    const float *v3 = vectors + (size_t)(n + 3U) * (size_t)dim;
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      a0 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v0 + i), a0);
+      a1 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v1 + i), a1);
+      a2 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v2 + i), a2);
+      a3 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v3 + i), a3);
+    }
+    float s0 = hsum256_ps(a0);
+    float s1 = hsum256_ps(a1);
+    float s2 = hsum256_ps(a2);
+    float s3 = hsum256_ps(a3);
+    for (; i < dim; i++) {
+      float q = query[i];
+      s0 += q * v0[i];
+      s1 += q * v1[i];
+      s2 += q * v2[i];
+      s3 += q * v3[i];
+    }
+    out_distances[n] = -s0;
+    out_distances[n + 1U] = -s1;
+    out_distances[n + 2U] = -s2;
+    out_distances[n + 3U] = -s3;
+  }
+  for (; n < count; n++) {
     const float *v = vectors + (size_t)n * (size_t)dim;
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();

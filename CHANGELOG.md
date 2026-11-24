@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-24
+
+SIMD distance unrolling, LSH batching & multi-threaded query search, Clustered DB batch/radius parity, standalone `POST /api/rerank`, and CLI graph/distance tooling increment.
+
+### Added
+- **SIMD Distance Kernels & LSH Multi-Threaded Batch Search (`src/distance.c`, `src/lsh.c`, `include/nbase.h`, `include/nbase.hpp`)**:
+  - Upgraded AVX2+FMA `squared_euclidean_batch_avx2` and `inner_product_batch_avx2` with 4-row unrolled accumulation loops sharing query register loads across 4 candidate vectors.
+  - Replaced per-hyperplane scalar/callback projection hashing in `src/lsh.c` with single-call `nbase_distance_batch(NBASE_METRIC_INNER_PRODUCT, ...)` across all tables and bits.
+  - Added thread-pooled work-stealing `nbase_lsh_search_batch` under shared `pthread_rwlock_rdlock` and C++17 `Lsh::search_batch`.
+- **Clustered Index Batch & Radius Parity (`src/clustered.c`, `include/nbase.h`, `include/nbase.hpp`)**:
+  - Added `nbase_clustered_get_batch` and `nbase_clustered_search_radius` (with C++17 `ClusteredDatabase::get_batch` and `ClusteredDatabase::search_radius`).
+- **HTTP/1.1 Standalone Reranking & CLI Subcommands (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `POST /api/rerank` supporting `"diversity"` (MMR), `"weighted"` (metadata-weighted), and `"standard"` candidate reranking with optional `includeMetadata`, `includeVectors`, and `includeText`.
+  - Added `nbase-cli communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]` and `nbase-cli distance <metric> <q0,q1,...> <v0,v1,...> [...]`.
+- **Tests & Benchmarks (`tests/test_distance.c`, `tests/test_clustered.c`, `tests/test_lsh.c`, `tests/test_server.c`, `bench/bench_nbase.c`)**:
+  - Added edge-dimension/count parity tests for unrolled batch kernels, ASan/TSan concurrency coverage for `nbase_clustered_get_batch` / `search_radius` and `nbase_lsh_search_batch`, HTTP tests for `POST /api/rerank`, and expanded `bench_nbase` coverage.
+
 ## [1.6.0] - 2026-11-24
 
 Performance, batching, reliability, and NDJSON tooling increment adding SIMD-batched exact store scanning, symmetric SQ8 batch quantization distance (`nbase_sq8_l2_sq_symmetric_batch`), multi-threaded IVF-PQ batch search (`nbase_ivfpq_search_batch`), HTTP NDJSON streaming import/export (`GET /api/vectors/export`, `POST /api/vectors/import`), CLI filter/metric extensions (`delete-by-filter`, `--filter`, `--metric`), and deterministic WAL truncation & CRC bitflip fuzz verification.
