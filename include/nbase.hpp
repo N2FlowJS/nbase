@@ -257,14 +257,42 @@ class Database {
     detail::check(nbase_set_meta(db_, id, fields, count));
   }
 
+  void set_meta_batch(const std::vector<nbase_meta_batch_item_t> &items) {
+    detail::check(nbase_set_meta_batch(
+        db_, items.empty() ? nullptr : items.data(), static_cast<uint32_t>(items.size())));
+  }
+
   void update_meta(uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
     detail::check(nbase_update_meta(db_, id, fields, count));
+  }
+
+  void update_meta_batch(const std::vector<nbase_meta_batch_item_t> &items) {
+    detail::check(nbase_update_meta_batch(
+        db_, items.empty() ? nullptr : items.data(), static_cast<uint32_t>(items.size())));
   }
 
   void delete_meta(uint64_t id) { detail::check(nbase_delete_meta(db_, id)); }
 
   void set_text(uint64_t id, const std::string &text) {
     detail::check(nbase_set_text(db_, id, text.c_str()));
+  }
+
+  void set_text_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<std::string> &texts) {
+    if (ids.size() != texts.size()) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    std::vector<const char *> ptrs;
+    ptrs.reserve(texts.size());
+    for (const std::string &t : texts) {
+      ptrs.push_back(t.c_str());
+    }
+    detail::check(nbase_set_text_batch(
+        db_,
+        ids.empty() ? nullptr : ids.data(),
+        ptrs.empty() ? nullptr : ptrs.data(),
+        static_cast<uint32_t>(ids.size())));
   }
 
   std::string get_text(uint64_t id) const {
@@ -370,14 +398,16 @@ class Database {
   }
 
   std::vector<nbase_edge_t> extract_relationships(
-      uint32_t k_neighbors, float max_distance) const {
+      uint32_t k_neighbors,
+      float max_distance,
+      const nbase_meta_filter_t *meta_filter = nullptr) const {
     struct EdgeGuard {
       nbase_edge_t *ptr = nullptr;
       ~EdgeGuard() { nbase_free_edges(ptr); }
     } guard;
     uint64_t edge_cnt = 0ULL;
-    detail::check(nbase_extract_relationships(
-        db_, k_neighbors, max_distance, &guard.ptr, &edge_cnt));
+    detail::check(nbase_extract_relationships_filtered(
+        db_, k_neighbors, max_distance, meta_filter, &guard.ptr, &edge_cnt));
     std::vector<nbase_edge_t> out;
     if (guard.ptr != nullptr && edge_cnt > 0ULL) {
       out.assign(guard.ptr, guard.ptr + edge_cnt);
@@ -538,6 +568,120 @@ class Bq {
 
  private:
   nbase_bq_t *ptr_ = nullptr;
+};
+
+class Pq {
+ public:
+  Pq() noexcept = default;
+  explicit Pq(nbase_pq_t *raw_pq) noexcept : ptr_(raw_pq) {}
+  Pq(const Pq &) = delete;
+  Pq &operator=(const Pq &) = delete;
+  Pq(Pq &&other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+  Pq &operator=(Pq &&other) noexcept {
+    if (this != &other) {
+      reset();
+      ptr_ = other.ptr_;
+      other.ptr_ = nullptr;
+    }
+    return *this;
+  }
+  ~Pq() { reset(); }
+
+  void reset() noexcept {
+    if (ptr_ != nullptr) {
+      nbase_pq_destroy(ptr_);
+      ptr_ = nullptr;
+    }
+  }
+
+  static Pq train(
+      const float *vectors,
+      uint32_t count,
+      uint32_t dim,
+      uint32_t num_subvectors,
+      uint32_t num_centroids = 256U,
+      uint32_t max_iters = 20U,
+      uint64_t seed = 42ULL) {
+    nbase_pq_t *p = nullptr;
+    detail::check(nbase_pq_train(
+        vectors, count, dim, num_subvectors, num_centroids, max_iters, seed, &p));
+    return Pq(p);
+  }
+
+  static Pq load(const std::string &file_path) {
+    nbase_pq_t *p = nullptr;
+    detail::check(nbase_pq_load(file_path.c_str(), &p));
+    return Pq(p);
+  }
+
+  uint32_t dim() const noexcept { return nbase_pq_dim(ptr_); }
+  uint32_t num_subvectors() const noexcept { return nbase_pq_num_subvectors(ptr_); }
+  uint32_t num_centroids() const noexcept { return nbase_pq_num_centroids(ptr_); }
+
+  std::vector<uint8_t> encode(const float *vectors, uint32_t count) const {
+    std::vector<uint8_t> out(static_cast<size_t>(count) * num_subvectors());
+    detail::check(nbase_pq_encode(ptr_, vectors, count, out.data()));
+    return out;
+  }
+
+  std::vector<float> decode(const uint8_t *codes, uint32_t count) const {
+    std::vector<float> out(static_cast<size_t>(count) * dim());
+    detail::check(nbase_pq_decode(ptr_, codes, count, out.data()));
+    return out;
+  }
+
+  std::vector<float> build_lut(const std::vector<float> &query) const {
+    if (query.size() != dim()) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<float> lut(
+        static_cast<size_t>(num_subvectors()) * static_cast<size_t>(num_centroids()));
+    detail::check(nbase_pq_build_lut(ptr_, query.data(), lut.data()));
+    return lut;
+  }
+
+  float adc_distance(const std::vector<float> &lut, const uint8_t *code) const {
+    size_t req = static_cast<size_t>(num_subvectors()) * static_cast<size_t>(num_centroids());
+    if (lut.size() < req || code == nullptr) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    return nbase_pq_adc_distance(ptr_, lut.data(), code);
+  }
+
+  std::vector<float> adc_distance_batch(
+      const std::vector<float> &lut,
+      const uint8_t *codes,
+      uint32_t count) const {
+    size_t req = static_cast<size_t>(num_subvectors()) * static_cast<size_t>(num_centroids());
+    if (lut.size() < req) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    std::vector<float> out(count);
+    detail::check(nbase_pq_adc_distance_batch(
+        ptr_, lut.data(), codes, count, out.empty() ? nullptr : out.data()));
+    return out;
+  }
+
+  std::vector<float> adc_distance_batch(
+      const std::vector<float> &lut,
+      const std::vector<uint8_t> &codes) const {
+    uint32_t m = num_subvectors();
+    if (m == 0U || (codes.size() % m) != 0U) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    uint32_t count = static_cast<uint32_t>(codes.size() / m);
+    return adc_distance_batch(lut, codes.data(), count);
+  }
+
+  void save(const std::string &file_path) const {
+    detail::check(nbase_pq_save(ptr_, file_path.c_str()));
+  }
+
+  nbase_pq_t *raw() noexcept { return ptr_; }
+  const nbase_pq_t *raw() const noexcept { return ptr_; }
+
+ private:
+  nbase_pq_t *ptr_ = nullptr;
 };
 
 class Bm25 {
@@ -884,8 +1028,18 @@ class PartitionedDatabase {
     detail::check(nbase_pdb_set_meta(pdb_, id, fields, count));
   }
 
+  void set_meta_batch(const std::vector<nbase_meta_batch_item_t> &items) {
+    detail::check(nbase_pdb_set_meta_batch(
+        pdb_, items.empty() ? nullptr : items.data(), static_cast<uint32_t>(items.size())));
+  }
+
   void update_meta(uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
     detail::check(nbase_pdb_update_meta(pdb_, id, fields, count));
+  }
+
+  void update_meta_batch(const std::vector<nbase_meta_batch_item_t> &items) {
+    detail::check(nbase_pdb_update_meta_batch(
+        pdb_, items.empty() ? nullptr : items.data(), static_cast<uint32_t>(items.size())));
   }
 
   void delete_meta(uint64_t id) { detail::check(nbase_pdb_delete_meta(pdb_, id)); }
@@ -902,6 +1056,24 @@ class PartitionedDatabase {
 
   void set_text(uint64_t id, const std::string &text) {
     detail::check(nbase_pdb_set_text(pdb_, id, text.c_str()));
+  }
+
+  void set_text_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<std::string> &texts) {
+    if (ids.size() != texts.size()) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    std::vector<const char *> ptrs;
+    ptrs.reserve(texts.size());
+    for (const std::string &t : texts) {
+      ptrs.push_back(t.c_str());
+    }
+    detail::check(nbase_pdb_set_text_batch(
+        pdb_,
+        ids.empty() ? nullptr : ids.data(),
+        ptrs.empty() ? nullptr : ptrs.data(),
+        static_cast<uint32_t>(ids.size())));
   }
 
   std::string get_text(uint64_t id) const {

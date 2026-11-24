@@ -93,7 +93,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.2.0";
+  return "1.3.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -1428,6 +1428,73 @@ nbase_status_t nbase_update_meta(nbase_db_t *db, uint64_t id, const nbase_meta_f
   return st;
 }
 
+static nbase_status_t db_meta_batch_op(
+    nbase_db_t *db,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count,
+    bool is_update) {
+  if (!db || (count > 0U && !items)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    nbase_status_t vst = nbase_meta_validate_fields(items[i].fields, items[i].field_count);
+    if (vst != NBASE_OK) {
+      return vst;
+    }
+  }
+
+  pthread_rwlock_wrlock(&db->rwlock);
+  nbase_status_t st = NBASE_OK;
+  if (db->store->mmap_backed) {
+    st = NBASE_ERR_UNSUPPORTED;
+  } else {
+    for (uint32_t i = 0U; i < count; i++) {
+      if (!nbase_store_find_slot(db->store, items[i].id, NULL)) {
+        st = NBASE_ERR_NOT_FOUND;
+        break;
+      }
+    }
+    uint32_t applied = 0U;
+    for (uint32_t i = 0U; i < count && st == NBASE_OK; i++) {
+      st = is_update
+               ? nbase_meta_update(db->meta, items[i].id, items[i].fields, items[i].field_count)
+               : nbase_meta_set(db->meta, items[i].id, items[i].fields, items[i].field_count);
+      if (st == NBASE_OK) {
+        applied++;
+      }
+    }
+    if (applied > 0U) {
+      db_cache_invalidate(db);
+    }
+    if (st == NBASE_OK && db->wal != NULL) {
+      st = nbase_wal_append_meta_batch(
+          db->wal,
+          is_update ? NBASE_WAL_OP_UPDATE_META : NBASE_WAL_OP_SET_META,
+          items,
+          count);
+    }
+  }
+  pthread_rwlock_unlock(&db->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_set_meta_batch(
+    nbase_db_t *db,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count) {
+  return db_meta_batch_op(db, items, count, false);
+}
+
+nbase_status_t nbase_update_meta_batch(
+    nbase_db_t *db,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count) {
+  return db_meta_batch_op(db, items, count, true);
+}
+
 nbase_status_t nbase_get_meta(const nbase_db_t *db, uint64_t id, const char *key, nbase_meta_value_t *out_val, char *str_buf, size_t str_buf_len) {
   if (!db || !key || key[0] == '\0' || !out_val) {
     return NBASE_ERR_INVALID_ARG;
@@ -1484,6 +1551,48 @@ nbase_status_t nbase_set_text(nbase_db_t *db, uint64_t id, const char *text) {
     }
     if (st == NBASE_OK && db->wal != NULL) {
       st = nbase_wal_append_text(db->wal, id, text);
+    }
+  }
+  pthread_rwlock_unlock(&db->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_set_text_batch(
+    nbase_db_t *db,
+    const uint64_t *ids,
+    const char *const *texts,
+    uint32_t count) {
+  if (!db || (count > 0U && (!ids || !texts))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!texts[i]) {
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+
+  pthread_rwlock_wrlock(&db->rwlock);
+  nbase_status_t st = NBASE_OK;
+  if (db->store->mmap_backed) {
+    st = NBASE_ERR_UNSUPPORTED;
+  } else {
+    for (uint32_t i = 0U; i < count; i++) {
+      if (!nbase_store_find_slot(db->store, ids[i], NULL)) {
+        st = NBASE_ERR_NOT_FOUND;
+        break;
+      }
+    }
+    if (st == NBASE_OK) {
+      st = db_ensure_bm25_unlocked(db);
+    }
+    for (uint32_t i = 0U; i < count && st == NBASE_OK; i++) {
+      st = nbase_bm25_index(db->bm25, ids[i], texts[i]);
+    }
+    if (st == NBASE_OK && db->wal != NULL) {
+      st = nbase_wal_append_text_batch(db->wal, ids, texts, count);
     }
   }
   pthread_rwlock_unlock(&db->rwlock);

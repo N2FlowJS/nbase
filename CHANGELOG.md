@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-24
+
+Feature and throughput increment adding atomic single-`fsync` batch metadata & text APIs (`nbase_db_t` & `nbase_pdb_t`), filtered k-NN relationship & community extraction, batch PQ ADC distance evaluation with IVF-PQ acceleration, HTTP bulk metadata/text endpoints, CLI metadata management, and C++17 `nbase::Pq` RAII wrapper.
+
+### Added
+- **Atomic Batch Metadata & Text Indexing (`nbase_db_t`, `nbase_wal_t`, `nbase_pdb_t`)**:
+  - Added `nbase_meta_batch_item_t`, `nbase_set_meta_batch`, `nbase_update_meta_batch`, and `nbase_set_text_batch` with upfront field/ID validation (zero partial mutation on missing IDs), single query cache invalidation, and single-`fsync` WAL batching (`nbase_wal_append_meta_batch`, `nbase_wal_append_text_batch`).
+  - Added partitioned multi-DB parity APIs `nbase_pdb_set_meta_batch`, `nbase_pdb_update_meta_batch`, and `nbase_pdb_set_text_batch` with partition-grouped locality.
+- **Filtered Relationship & Community Extraction (`src/rerank.c`, `src/partitioned.c`)**:
+  - Added `nbase_extract_relationships_filtered(db, k_neighbors, max_distance, meta_filter, &edges, &edge_count)` supporting both exact and HNSW graph paths.
+  - Enabled `meta_filter` and predicate filter enforcement inside `nbase_pdb_extract_relationships`.
+- **Batch PQ ADC Scan & IVF-PQ Acceleration (`src/pq.c`, `src/ivfpq.c`)**:
+  - Added `nbase_pq_adc_distance_batch` with a 4x-unrolled branchless fast path for `256`-centroid codebooks and exact scalar parity across `<256`-centroid codebooks.
+  - Upgraded unfiltered `nbase_ivfpq_search` / `nbase_ivfpq_search_filtered` inner list scans to evaluate PQ distances in batch via `nbase_pq_adc_distance_batch`.
+- **HTTP/1.1 Server, CLI & C++17 Wrapper (`src/http_server.c`, `apps/nbase_cli.c`, `include/nbase.hpp`)**:
+  - Added `POST /api/vectors/metadata` (batch replace/set, optional `"mode"`), `PATCH /api/vectors/metadata` (batch partial update), `POST /api/vectors/text` (batch text indexing), and optional `"filters"` on `POST /api/search/relationships` and `POST /api/search/communities`.
+  - Upgraded bulk vector `POST /api/vectors` / `POST /api/vectors/upsert` and `nbase-cli import` flushes to use `nbase_set_meta_batch` and `nbase_set_text_batch`.
+  - Added `nbase-cli set-meta <dir> <id> <json-object> [--update]` and `nbase-cli get-meta <dir> <id>`.
+  - Added `nbase::Pq` RAII class plus `set_meta_batch`, `update_meta_batch`, `set_text_batch`, and filtered `extract_relationships` methods in `include/nbase.hpp`.
+
 ## [1.2.0] - 2026-11-24
 
 Feature increment adding radius/range search, paginated deterministic ID listing, HTTP `GET /api/vectors` pagination, CLI `list` & `--max-distance`, and filtered/SIMD approximate indexes.

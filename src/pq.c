@@ -161,9 +161,32 @@ nbase_status_t nbase_pq_build_lut(const nbase_pq_t *pq, const float *query, floa
   return NBASE_OK;
 }
 
+static inline float pq_adc_one_256(const float *lut, const uint8_t *code, uint32_t m_cnt) {
+  float s0 = 0.0f;
+  float s1 = 0.0f;
+  float s2 = 0.0f;
+  float s3 = 0.0f;
+  uint32_t m = 0U;
+  for (; m + 3U < m_cnt; m += 4U) {
+    const float *row = lut + (size_t)m * 256U;
+    s0 += row[code[m]];
+    s1 += row[256U + (size_t)code[m + 1U]];
+    s2 += row[512U + (size_t)code[m + 2U]];
+    s3 += row[768U + (size_t)code[m + 3U]];
+  }
+  float sum = (s0 + s1) + (s2 + s3);
+  for (; m < m_cnt; m++) {
+    sum += lut[(size_t)m * 256U + (size_t)code[m]];
+  }
+  return sum;
+}
+
 float nbase_pq_adc_distance(const nbase_pq_t *pq, const float *lut, const uint8_t *code) {
   if (!pq || !lut || !code) {
     return 0.0f;
+  }
+  if (pq->num_centroids == 256U) {
+    return pq_adc_one_256(lut, code, pq->num_subvectors);
   }
   float sum = 0.0f;
   for (uint32_t m = 0U; m < pq->num_subvectors; m++) {
@@ -173,6 +196,41 @@ float nbase_pq_adc_distance(const nbase_pq_t *pq, const float *lut, const uint8_
     }
   }
   return sum;
+}
+
+nbase_status_t nbase_pq_adc_distance_batch(
+    const nbase_pq_t *pq,
+    const float *lut,
+    const uint8_t *codes,
+    uint32_t count,
+    float *out_distances) {
+  if (!pq || !lut || (count > 0U && (!codes || !out_distances))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  const uint32_t m_cnt = pq->num_subvectors;
+  const uint32_t nc = pq->num_centroids;
+  if (nc == 256U) {
+    for (uint32_t i = 0U; i < count; i++) {
+      out_distances[i] = pq_adc_one_256(lut, codes + (size_t)i * (size_t)m_cnt, m_cnt);
+    }
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    const uint8_t *code = codes + (size_t)i * (size_t)m_cnt;
+    float sum = 0.0f;
+    for (uint32_t m = 0U; m < m_cnt; m++) {
+      uint32_t c = (uint32_t)code[m];
+      if (c >= nc) {
+        return NBASE_ERR_INVALID_ARG;
+      }
+      sum += lut[(size_t)m * (size_t)nc + c];
+    }
+    out_distances[i] = sum;
+  }
+  return NBASE_OK;
 }
 
 nbase_status_t nbase_pq_save(const nbase_pq_t *pq, const char *file_path) {

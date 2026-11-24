@@ -505,6 +505,7 @@ nbase_status_t nbase_meta_create(nbase_meta_store_t **out_meta);
 void nbase_meta_destroy(nbase_meta_store_t *meta);
 uint64_t nbase_meta_count(const nbase_meta_store_t *meta);
 uint64_t nbase_meta_memory_bytes(const nbase_meta_store_t *meta);
+nbase_status_t nbase_meta_validate_fields(const nbase_meta_field_t *fields, uint32_t count);
 nbase_status_t nbase_meta_set(nbase_meta_store_t *meta, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
 nbase_status_t nbase_meta_update(nbase_meta_store_t *meta, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
 nbase_status_t nbase_meta_get(const nbase_meta_store_t *meta, uint64_t id, const char *key, nbase_meta_value_t *out_val, char *str_buf, size_t str_buf_len);
@@ -541,7 +542,9 @@ nbase_status_t nbase_wal_append_vec_batch(nbase_wal_t *wal, const uint64_t *ids,
 nbase_status_t nbase_wal_append_vec_batch_op(nbase_wal_t *wal, nbase_wal_op_t op, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
 nbase_status_t nbase_wal_append_id(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t id);
 nbase_status_t nbase_wal_append_meta(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
+nbase_status_t nbase_wal_append_meta_batch(nbase_wal_t *wal, nbase_wal_op_t op, const nbase_meta_batch_item_t *items, uint32_t count);
 nbase_status_t nbase_wal_append_text(nbase_wal_t *wal, uint64_t id, const char *text);
+nbase_status_t nbase_wal_append_text_batch(nbase_wal_t *wal, const uint64_t *ids, const char *const *texts, uint32_t count);
 nbase_status_t nbase_wal_append_compact(nbase_wal_t *wal);
 nbase_status_t nbase_wal_replay(nbase_wal_t *wal, nbase_db_t *db, uint64_t *out_applied);
 

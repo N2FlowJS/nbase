@@ -25,6 +25,8 @@ static void print_usage(const char *prog) {
       "  list <dir> [--offset <N>] [--limit <M>]\n"
       "  delete <dir> <id>\n"
       "  delete-batch <dir> <id1,id2,...>\n"
+      "  set-meta <dir> <id> <json-object> [--update]\n"
+      "  get-meta <dir> <id>\n"
       "  set-text <dir> <id> <text>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--max-distance <D>]\n"
       "  search-text <dir> <query> [--k <K>]\n"
@@ -258,6 +260,18 @@ static nbase_status_t flush_import_batch(
     return NBASE_OK;
   }
   nbase_status_t st = nbase_add_batch(db, ids, vecs, cnt, dim, threads);
+  nbase_meta_batch_item_t *meta_items = calloc(cnt, sizeof(*meta_items));
+  nbase_meta_field_t **field_bufs = calloc(cnt, sizeof(*field_bufs));
+  uint64_t *text_ids = malloc((size_t)cnt * sizeof(uint64_t));
+  const char **text_ptrs = malloc((size_t)cnt * sizeof(const char *));
+  if (!meta_items || !field_bufs || !text_ids || !text_ptrs) {
+    if (st == NBASE_OK) {
+      st = NBASE_ERR_NOMEM;
+    }
+  }
+
+  uint32_t meta_cnt = 0U;
+  uint32_t text_cnt = 0U;
   for (uint32_t i = 0U; i < cnt && st == NBASE_OK; i++) {
     const nbase_json_t *jm = nbase_json_obj_get(roots[i], "metadata");
     if (jm != NULL && jm->type != NBASE_JSON_NULL) {
@@ -265,19 +279,40 @@ static nbase_status_t flush_import_batch(
       uint32_t fcnt = 0U;
       st = cli_parse_meta_obj(jm, &fields, &fcnt);
       if (st == NBASE_OK && fcnt > 0U) {
-        st = nbase_set_meta(db, ids[i], fields, fcnt);
+        field_bufs[meta_cnt] = fields;
+        meta_items[meta_cnt].id = ids[i];
+        meta_items[meta_cnt].fields = fields;
+        meta_items[meta_cnt].field_count = fcnt;
+        meta_cnt++;
+      } else {
+        free(fields);
       }
-      free(fields);
     }
     const nbase_json_t *jt = nbase_json_obj_get(roots[i], "text");
     if (st == NBASE_OK && jt != NULL && jt->type != NBASE_JSON_NULL) {
       if (jt->type != NBASE_JSON_STRING) {
         st = NBASE_ERR_INVALID_ARG;
       } else {
-        st = nbase_set_text(db, ids[i], jt->str);
+        text_ids[text_cnt] = ids[i];
+        text_ptrs[text_cnt] = jt->str;
+        text_cnt++;
       }
     }
   }
+  if (st == NBASE_OK && meta_cnt > 0U) {
+    st = nbase_set_meta_batch(db, meta_items, meta_cnt);
+  }
+  if (st == NBASE_OK && text_cnt > 0U) {
+    st = nbase_set_text_batch(db, text_ids, text_ptrs, text_cnt);
+  }
+
+  for (uint32_t i = 0U; i < meta_cnt; i++) {
+    free(field_bufs[i]);
+  }
+  free(meta_items);
+  free(field_bufs);
+  free(text_ids);
+  free((void *)text_ptrs);
   for (uint32_t i = 0U; i < cnt; i++) {
     nbase_json_free(roots[i]);
     roots[i] = NULL;
@@ -288,12 +323,13 @@ static nbase_status_t flush_import_batch(
 typedef struct cli_meta_ctx {
   nbase_sbuf_t *sb;
   bool first;
+  const char *prefix;
 } cli_meta_ctx_t;
 
 static bool cli_meta_cb(const char *key, const nbase_meta_value_t *val, void *raw) {
   cli_meta_ctx_t *ctx = (cli_meta_ctx_t *)raw;
   if (ctx->first) {
-    nbase_sbuf_append(ctx->sb, ",\"metadata\":{");
+    nbase_sbuf_append(ctx->sb, ctx->prefix);
     ctx->first = false;
   } else {
     nbase_sbuf_append_n(ctx->sb, ",", 1U);
@@ -649,6 +685,102 @@ int main(int argc, char **argv) {
       return 1;
     }
     printf("{\"deleted\":%u}\n", deleted);
+    return 0;
+  }
+
+  if (strcmp(cmd, "set-meta") == 0) {
+    if (argc < 5 || argc > 6) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    bool is_update = false;
+    if (argc == 6) {
+      if (strcmp(argv[5], "--update") == 0) {
+        is_update = true;
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[5]);
+        return 1;
+      }
+    }
+    uint64_t id = 0ULL;
+    if (!parse_u64(argv[3], &id)) {
+      fprintf(stderr, "Invalid uint64 id: %s\n", argv[3]);
+      return 1;
+    }
+    nbase_json_t *root = NULL;
+    if (nbase_json_parse(argv[4], strlen(argv[4]), &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
+      nbase_json_free(root);
+      fprintf(stderr, "Invalid JSON metadata object\n");
+      return 1;
+    }
+    nbase_meta_field_t *fields = NULL;
+    uint32_t fcnt = 0U;
+    nbase_status_t st = cli_parse_meta_obj(root, &fields, &fcnt);
+    if (st != NBASE_OK) {
+      free(fields);
+      nbase_json_free(root);
+      fprintf(stderr, "Invalid metadata fields: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    st = nbase_open(argv[2], &db);
+    if (st == NBASE_OK) {
+      st = is_update ? nbase_update_meta(db, id, fields, fcnt) : nbase_set_meta(db, id, fields, fcnt);
+    }
+    if (st == NBASE_OK) {
+      st = nbase_save(db, argv[2]);
+    }
+    nbase_close(db);
+    free(fields);
+    nbase_json_free(root);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "set-meta failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"id\":%llu,\"%s\":%u}\n", (unsigned long long)id, is_update ? "updated" : "set", fcnt);
+    return 0;
+  }
+
+  if (strcmp(cmd, "get-meta") == 0) {
+    if (argc != 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t id = 0ULL;
+    if (!parse_u64(argv[3], &id)) {
+      fprintf(stderr, "Invalid uint64 id: %s\n", argv[3]);
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    if (!nbase_contains(db, id)) {
+      nbase_close(db);
+      fprintf(stderr, "get-meta failed: not found\n");
+      return 1;
+    }
+    nbase_sbuf_t sb;
+    nbase_sbuf_init(&sb);
+    cli_meta_ctx_t mctx = {&sb, true, "{"};
+    st = nbase_foreach_meta(db, id, cli_meta_cb, &mctx);
+    nbase_close(db);
+    if (st == NBASE_OK) {
+      if (mctx.first) {
+        nbase_sbuf_append(&sb, "{}");
+      } else {
+        nbase_sbuf_append_n(&sb, "}", 1U);
+      }
+    }
+    if (st != NBASE_OK || sb.oom || !sb.data) {
+      nbase_sbuf_free(&sb);
+      fprintf(stderr, "get-meta failed: %s\n", nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
+      return 1;
+    }
+    printf("%s\n", sb.data);
+    nbase_sbuf_free(&sb);
     return 0;
   }
 
@@ -1218,7 +1350,7 @@ int main(int argc, char **argv) {
           }
           nbase_sbuf_append_n(&sb, "]", 1U);
 
-          cli_meta_ctx_t mctx = {&sb, true};
+          cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
           (void)nbase_foreach_meta(db, ids[i], cli_meta_cb, &mctx);
           if (!mctx.first) {
             nbase_sbuf_append_n(&sb, "}", 1U);

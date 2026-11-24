@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 2
+#define NBASE_VERSION_MINOR 3
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -89,6 +89,12 @@ typedef struct nbase_meta_field {
   const char *key;
   nbase_meta_value_t value;
 } nbase_meta_field_t;
+
+typedef struct nbase_meta_batch_item {
+  uint64_t id;
+  const nbase_meta_field_t *fields;
+  uint32_t field_count;
+} nbase_meta_batch_item_t;
 
 typedef enum nbase_meta_op {
   NBASE_OP_EQ = 0,
@@ -195,7 +201,9 @@ nbase_status_t nbase_list_ids(const nbase_db_t *db, uint64_t offset, uint32_t li
 typedef bool (*nbase_meta_iter_fn)(const char *key, const nbase_meta_value_t *val, void *user_ctx);
 
 nbase_status_t nbase_set_meta(nbase_db_t *db, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
+nbase_status_t nbase_set_meta_batch(nbase_db_t *db, const nbase_meta_batch_item_t *items, uint32_t count);
 nbase_status_t nbase_update_meta(nbase_db_t *db, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
+nbase_status_t nbase_update_meta_batch(nbase_db_t *db, const nbase_meta_batch_item_t *items, uint32_t count);
 nbase_status_t nbase_get_meta(const nbase_db_t *db, uint64_t id, const char *key, nbase_meta_value_t *out_val, char *str_buf, size_t str_buf_len);
 nbase_status_t nbase_delete_meta(nbase_db_t *db, uint64_t id);
 nbase_status_t nbase_foreach_meta(const nbase_db_t *db, uint64_t id, nbase_meta_iter_fn cb, void *user_ctx);
@@ -207,6 +215,7 @@ nbase_status_t nbase_find_similar(const nbase_db_t *db, uint64_t id, uint32_t k,
 nbase_status_t nbase_search_batch(const nbase_db_t *db, const float *queries, uint32_t query_count, uint32_t dim, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_counts);
 
 nbase_status_t nbase_set_text(nbase_db_t *db, uint64_t id, const char *text);
+nbase_status_t nbase_set_text_batch(nbase_db_t *db, const uint64_t *ids, const char *const *texts, uint32_t count);
 nbase_status_t nbase_get_text(const nbase_db_t *db, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
 nbase_status_t nbase_delete_text(nbase_db_t *db, uint64_t id);
 nbase_status_t nbase_search_text(const nbase_db_t *db, const char *query, uint32_t k, const nbase_meta_filter_t *meta_filter, nbase_scored_id_t *out_results, uint32_t *out_count);
@@ -236,6 +245,7 @@ nbase_status_t nbase_pq_encode(const nbase_pq_t *pq, const float *vectors, uint3
 nbase_status_t nbase_pq_decode(const nbase_pq_t *pq, const uint8_t *codes, uint32_t count, float *out_vectors);
 nbase_status_t nbase_pq_build_lut(const nbase_pq_t *pq, const float *query, float *out_lut);
 float nbase_pq_adc_distance(const nbase_pq_t *pq, const float *lut, const uint8_t *code);
+nbase_status_t nbase_pq_adc_distance_batch(const nbase_pq_t *pq, const float *lut, const uint8_t *codes, uint32_t count, float *out_distances);
 
 nbase_status_t nbase_pq_save(const nbase_pq_t *pq, const char *file_path);
 nbase_status_t nbase_pq_load(const char *file_path, nbase_pq_t **out_pq);
@@ -297,13 +307,16 @@ bool nbase_pdb_contains(nbase_pdb_t *pdb, uint64_t id);
 nbase_status_t nbase_pdb_list_ids(nbase_pdb_t *pdb, uint64_t offset, uint32_t limit, uint64_t *out_ids, uint32_t *out_count, uint64_t *out_total);
 
 nbase_status_t nbase_pdb_set_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
+nbase_status_t nbase_pdb_set_meta_batch(nbase_pdb_t *pdb, const nbase_meta_batch_item_t *items, uint32_t count);
 nbase_status_t nbase_pdb_update_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
+nbase_status_t nbase_pdb_update_meta_batch(nbase_pdb_t *pdb, const nbase_meta_batch_item_t *items, uint32_t count);
 nbase_status_t nbase_pdb_get_meta(nbase_pdb_t *pdb, uint64_t id, const char *key, nbase_meta_value_t *out_val, char *str_buf, size_t str_buf_len);
 nbase_status_t nbase_pdb_delete_meta(nbase_pdb_t *pdb, uint64_t id);
 nbase_status_t nbase_pdb_foreach_meta(nbase_pdb_t *pdb, uint64_t id, nbase_meta_iter_fn cb, void *user_ctx);
 nbase_status_t nbase_pdb_query_meta(nbase_pdb_t *pdb, const nbase_meta_filter_t *filter, uint32_t limit, uint64_t *out_ids, uint32_t *out_count);
 
 nbase_status_t nbase_pdb_set_text(nbase_pdb_t *pdb, uint64_t id, const char *text);
+nbase_status_t nbase_pdb_set_text_batch(nbase_pdb_t *pdb, const uint64_t *ids, const char *const *texts, uint32_t count);
 nbase_status_t nbase_pdb_get_text(nbase_pdb_t *pdb, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
 nbase_status_t nbase_pdb_delete_text(nbase_pdb_t *pdb, uint64_t id);
 
@@ -399,6 +412,7 @@ void nbase_ivfpq_destroy(nbase_ivfpq_t *index);
 nbase_status_t nbase_rerank_mmr(const nbase_db_t *db, const nbase_result_t *candidates, uint32_t candidate_count, uint32_t k, float lambda, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_rerank_weighted(const nbase_db_t *db, const nbase_result_t *candidates, uint32_t candidate_count, const nbase_rerank_weight_t *weights, uint32_t weight_count, uint32_t k, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_extract_relationships(const nbase_db_t *db, uint32_t k_neighbors, float max_distance, nbase_edge_t **out_edges, uint64_t *out_edge_count);
+nbase_status_t nbase_extract_relationships_filtered(const nbase_db_t *db, uint32_t k_neighbors, float max_distance, const nbase_meta_filter_t *meta_filter, nbase_edge_t **out_edges, uint64_t *out_edge_count);
 nbase_status_t nbase_extract_communities(const uint64_t *ids, uint32_t node_count, const nbase_edge_t *edges, uint64_t edge_count, uint32_t *out_labels, uint32_t *out_community_count);
 void nbase_free_edges(nbase_edge_t *edges);
 

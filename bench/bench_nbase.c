@@ -251,15 +251,30 @@ static void bench_batch_threads_and_pq(void) {
         }
       }
       uint64_t st1 = now_ns();
+
+      double avg_batch_us = 0.0;
+      float *adc_out = malloc((size_t)count * sizeof(float));
+      if (adc_out) {
+        uint64_t bt0 = now_ns();
+        for (uint32_t q = 0U; q < 20U; q++) {
+          (void)nbase_pq_build_lut(pq, queries + (size_t)q * dim, lut);
+          (void)nbase_pq_adc_distance_batch(pq, lut, codes, count, adc_out);
+          sink += adc_out[0];
+        }
+        uint64_t bt1 = now_ns();
+        avg_batch_us = (double)(bt1 - bt0) / 20.0 / 1e3;
+        free(adc_out);
+      }
       (void)sink;
 
       double ratio = (double)(dim * sizeof(float)) / (double)pq_m;
       double avg_scan_us = (double)(st1 - st0) / 20.0 / 1e3;
-      printf("  train=%6.2f ms  encode(8000)=%5.2f ms  compression=%.0fx  adc_scan_8000=%6.2f us/query\n",
+      printf("  train=%6.2f ms  encode(8000)=%5.2f ms  compression=%.0fx  adc_scan_8000=%6.2f us/query  adc_batch=%6.2f us/query\n",
              (double)(pt1 - pt0) / 1e6,
              (double)(et1 - et0) / 1e6,
              ratio,
-             avg_scan_us);
+             avg_scan_us,
+             avg_batch_us);
     }
     free(codes);
     free(lut);
@@ -526,11 +541,45 @@ static void bench_batch_threads_and_pq(void) {
           cdb, queries + (size_t)q * dim, dim, 2.5f, k, NULL, reranked, &rgot);
     }
     uint64_t rad1 = now_ns();
-    printf("  lru_cache  miss=%6.2f us/query  hit=%5.2f us/query  weighted_rerank(20->10)=%5.2f us/call  radius=%6.2f us/query\n",
+
+    nbase_meta_batch_item_t *mitems = malloc(2000U * sizeof(*mitems));
+    nbase_meta_field_t *mflds = malloc(2000U * sizeof(*mflds));
+    uint64_t *tids = malloc(2000U * sizeof(uint64_t));
+    const char **tptrs = malloc(2000U * sizeof(const char *));
+    double meta_batch_ms = 0.0;
+    double text_batch_ms = 0.0;
+    if (mitems && mflds && tids && tptrs) {
+      for (uint32_t i = 0U; i < 2000U; i++) {
+        mflds[i].key = "score";
+        mflds[i].value.type = NBASE_META_DOUBLE;
+        mflds[i].value.as.f64 = (double)(i % 100U) * 0.01;
+        mitems[i].id = (uint64_t)i + 1ULL;
+        mitems[i].fields = &mflds[i];
+        mitems[i].field_count = 1U;
+        tids[i] = (uint64_t)i + 1ULL;
+        tptrs[i] = "vector benchmark batch text indexing doc";
+      }
+      uint64_t mb0 = now_ns();
+      (void)nbase_set_meta_batch(cdb, mitems, 2000U);
+      uint64_t mb1 = now_ns();
+      uint64_t tb0 = now_ns();
+      (void)nbase_set_text_batch(cdb, tids, tptrs, 2000U);
+      uint64_t tb1 = now_ns();
+      meta_batch_ms = (double)(mb1 - mb0) / 1e6;
+      text_batch_ms = (double)(tb1 - tb0) / 1e6;
+    }
+    free(mitems);
+    free(mflds);
+    free(tids);
+    free((void *)tptrs);
+
+    printf("  lru_cache  miss=%6.2f us/query  hit=%5.2f us/query  weighted_rerank(20->10)=%5.2f us/call  radius=%6.2f us/query  meta_batch(2000)=%.2f ms  text_batch(2000)=%.2f ms\n",
            (double)(m1 - m0) / (double)nqueries / 1e3,
            (double)(h1 - h0) / (double)(10U * nqueries) / 1e3,
            (double)(w1 - w0) / 200.0 / 1e3,
-           (double)(rad1 - rad0) / (double)nqueries / 1e3);
+           (double)(rad1 - rad0) / (double)nqueries / 1e3,
+           meta_batch_ms,
+           text_batch_ms);
     nbase_close(cdb);
   }
 

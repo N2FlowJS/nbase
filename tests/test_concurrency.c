@@ -208,8 +208,104 @@ static void test_add_batch_and_rebuild_mt_tsan(void) {
   nbase_close(db);
 }
 
+static void *batch_meta_reader_thread(void *raw) {
+  stress_ctx_t *ctx = (stress_ctx_t *)raw;
+  nbase_meta_cond_t cond = {"group", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "a"}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+
+  for (uint32_t iter = 0U; iter < 30U && !atomic_load_explicit(&ctx->stop, memory_order_relaxed); iter++) {
+    uint64_t ids[64];
+    uint32_t cnt = 0U;
+    nbase_status_t st = nbase_query_meta(ctx->db, &flt, 64U, ids, &cnt);
+    if (st != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->error_count, 1, memory_order_relaxed);
+      break;
+    }
+
+    nbase_scored_id_t hits[10];
+    uint32_t tcnt = 0U;
+    st = nbase_search_text(ctx->db, "batch vector", 10U, &flt, hits, &tcnt);
+    if (st != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->error_count, 1, memory_order_relaxed);
+      break;
+    }
+
+    nbase_edge_t *edges = NULL;
+    uint64_t ecnt = 0ULL;
+    st = nbase_extract_relationships_filtered(ctx->db, 3U, 5.0f, &flt, &edges, &ecnt);
+    nbase_free_edges(edges);
+    if (st != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->error_count, 1, memory_order_relaxed);
+      break;
+    }
+  }
+  return NULL;
+}
+
+static void test_concurrent_batch_meta_text_tsan(void) {
+  const uint32_t dim = 8U;
+  const uint32_t n = 40U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = false;
+  cfg.cache_capacity = 32U;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL);
+  test_fill_vectors(vecs, n, dim, 31337ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = (uint64_t)i + 1ULL;
+  }
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, n, dim, 2U), NBASE_OK);
+
+  nbase_meta_field_t fa = {"group", {.type = NBASE_META_STRING, .as = {.str = "a"}}};
+  nbase_meta_batch_item_t init_m[40];
+  const char *init_t[40];
+  for (uint32_t i = 0U; i < n; i++) {
+    init_m[i].id = ids[i];
+    init_m[i].fields = &fa;
+    init_m[i].field_count = 1U;
+    init_t[i] = "initial batch vector doc";
+  }
+  ASSERT_STATUS(nbase_set_meta_batch(db, init_m, n), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text_batch(db, ids, init_t, n), NBASE_OK);
+
+  stress_ctx_t ctx = {db, dim, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, batch_meta_reader_thread, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, batch_meta_reader_thread, &ctx) == 0);
+
+  nbase_meta_field_t fb = {"group", {.type = NBASE_META_STRING, .as = {.str = "b"}}};
+  nbase_meta_field_t fr = {"rev", {.type = NBASE_META_INT64, .as = {.i64 = 1}}};
+  for (uint32_t iter = 0U; iter < 25U; iter++) {
+    for (uint32_t i = 0U; i < 10U; i++) {
+      init_m[i].fields = ((iter + i) % 2U == 0U) ? &fa : &fb;
+      init_m[i].field_count = 1U;
+    }
+    ASSERT_STATUS(nbase_set_meta_batch(db, init_m, 10U), NBASE_OK);
+    fr.value.as.i64 = (int64_t)iter;
+    nbase_meta_batch_item_t u[4] = {
+        {1ULL, &fr, 1U}, {2ULL, &fr, 1U}, {3ULL, &fr, 1U}, {4ULL, &fr, 1U}};
+    ASSERT_STATUS(nbase_update_meta_batch(db, u, 4U), NBASE_OK);
+    const char *t_upd[2] = {"updated batch vector alpha", "updated batch vector beta"};
+    ASSERT_STATUS(nbase_set_text_batch(db, ids, t_upd, 2U), NBASE_OK);
+  }
+
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.error_count, memory_order_relaxed), 0ULL);
+
+  free(vecs);
+  free(ids);
+  nbase_close(db);
+}
+
 void test_concurrency_run(void) {
   RUN_TEST(test_search_batch_multithreaded_matches_serial);
   RUN_TEST(test_concurrent_readers_and_writer_rwlock);
   RUN_TEST(test_add_batch_and_rebuild_mt_tsan);
+  RUN_TEST(test_concurrent_batch_meta_text_tsan);
 }

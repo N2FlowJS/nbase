@@ -177,9 +177,78 @@ static void test_rerank_weighted_metadata_and_edge_cases(void) {
   nbase_close(db);
 }
 
+static void test_extract_relationships_filtered(void) {
+  /* Exercises both exact mode (<=64 matching nodes) and HNSW mode (>64 matching nodes). */
+  const uint32_t dim = 4U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = true;
+  cfg.hnsw_m = 16U;
+  cfg.hnsw_ef_construction = 80U;
+  cfg.hnsw_ef_search = 64U;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  /* Insert 80 vectors: 70 keep_large ("big"), 6 keep_small ("small"), 4 ignored ("none"). */
+  for (uint32_t i = 0U; i < 80U; i++) {
+    uint64_t id = (uint64_t)i + 1ULL;
+    float v[4] = {(float)(i % 10U) * 0.05f, 0.0f, 0.0f, 0.0f};
+    const char *cat = "big";
+    if (i >= 70U && i < 76U) {
+      v[1] = 0.01f * (float)(i - 70U);
+      cat = "small";
+    } else if (i >= 76U) {
+      v[2] = 0.01f * (float)(i - 76U);
+      cat = "none";
+    }
+    ASSERT_STATUS(nbase_add(db, id, v, dim), NBASE_OK);
+    nbase_meta_field_t fld = {"cat", {.type = NBASE_META_STRING, .as = {.str = cat}}};
+    ASSERT_STATUS(nbase_set_meta(db, id, &fld, 1U), NBASE_OK);
+  }
+
+  /* Exact filtered path (6 nodes -> ids 71..76). */
+  nbase_meta_cond_t cond_s = {"cat", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "small"}}};
+  nbase_meta_filter_t flt_s = {&cond_s, 1U};
+  nbase_edge_t *edges = NULL;
+  uint64_t edge_cnt = 0ULL;
+  ASSERT_STATUS(nbase_extract_relationships_filtered(db, 3U, 2.0f, &flt_s, &edges, &edge_cnt), NBASE_OK);
+  ASSERT_TRUE(edge_cnt > 0ULL && edges != NULL);
+  for (uint64_t e = 0ULL; e < edge_cnt; e++) {
+    ASSERT_TRUE(edges[e].src_id >= 71ULL && edges[e].src_id <= 76ULL);
+    ASSERT_TRUE(edges[e].dst_id >= 71ULL && edges[e].dst_id <= 76ULL);
+  }
+  nbase_free_edges(edges);
+  edges = NULL;
+
+  /* HNSW filtered path (70 nodes -> ids 1..70). */
+  nbase_meta_cond_t cond_b = {"cat", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "big"}}};
+  nbase_meta_filter_t flt_b = {&cond_b, 1U};
+  ASSERT_STATUS(nbase_extract_relationships_filtered(db, 4U, 2.0f, &flt_b, &edges, &edge_cnt), NBASE_OK);
+  ASSERT_TRUE(edge_cnt > 0ULL && edges != NULL);
+  for (uint64_t e = 0ULL; e < edge_cnt; e++) {
+    ASSERT_TRUE(edges[e].src_id >= 1ULL && edges[e].src_id <= 70ULL);
+    ASSERT_TRUE(edges[e].dst_id >= 1ULL && edges[e].dst_id <= 70ULL);
+  }
+  nbase_free_edges(edges);
+  edges = NULL;
+
+  /* Zero-match filter returns 0 edges cleanly. */
+  nbase_meta_cond_t cond_z = {"cat", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "missing"}}};
+  nbase_meta_filter_t flt_z = {&cond_z, 1U};
+  ASSERT_STATUS(nbase_extract_relationships_filtered(db, 3U, 2.0f, &flt_z, &edges, &edge_cnt), NBASE_OK);
+  ASSERT_EQ_U64(edge_cnt, 0ULL);
+  ASSERT_TRUE(edges == NULL);
+
+  /* Invalid filter struct must reject cleanly. */
+  nbase_meta_filter_t bad_flt = {NULL, 1U};
+  ASSERT_STATUS(nbase_extract_relationships_filtered(db, 3U, 2.0f, &bad_flt, &edges, &edge_cnt), NBASE_ERR_INVALID_ARG);
+
+  nbase_close(db);
+}
+
 void test_rerank_run(void) {
   RUN_TEST(test_mmr_diversity_vs_relevance_lambda);
   RUN_TEST(test_extract_relationships_and_communities);
   RUN_TEST(test_communities_deep_chain_iterative);
   RUN_TEST(test_rerank_weighted_metadata_and_edge_cases);
+  RUN_TEST(test_extract_relationships_filtered);
 }

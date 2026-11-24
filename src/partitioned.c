@@ -1536,6 +1536,90 @@ nbase_status_t nbase_pdb_list_ids(
   return NBASE_OK;
 }
 
+static nbase_status_t pdb_collect_sorted_refs_locked(
+    const nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count,
+    pdb_part_ref_t **out_refs) {
+  pdb_part_ref_t *refs = malloc((size_t)count * sizeof(pdb_part_ref_t));
+  if (!refs) {
+    return NBASE_ERR_NOMEM;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    uint64_t id = items ? items[i].id : ids[i];
+    uint32_t pid = 0U;
+    if (!pdb_id_map_find(&pdb->id_map, id, &pid)) {
+      free(refs);
+      return NBASE_ERR_NOT_FOUND;
+    }
+    refs[i].part_id = pid;
+    refs[i].orig_idx = i;
+  }
+  qsort(refs, count, sizeof(pdb_part_ref_t), cmp_pdb_part_ref_asc);
+  *out_refs = refs;
+  return NBASE_OK;
+}
+
+static nbase_status_t pdb_meta_batch_op(
+    nbase_pdb_t *pdb,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count,
+    bool is_update) {
+  if (!pdb || (count > 0U && !items)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    nbase_status_t vst = nbase_meta_validate_fields(items[i].fields, items[i].field_count);
+    if (vst != NBASE_OK) {
+      return vst;
+    }
+  }
+
+  nbase_meta_batch_item_t *part_items = malloc((size_t)count * sizeof(nbase_meta_batch_item_t));
+  if (!part_items) {
+    return NBASE_ERR_NOMEM;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  pdb_part_ref_t *refs = NULL;
+  nbase_status_t st = pdb_collect_sorted_refs_locked(pdb, NULL, items, count, &refs);
+  uint32_t start = 0U;
+  while (st == NBASE_OK && start < count) {
+    uint32_t pid = refs[start].part_id;
+    pdb_part_t *part = pdb_find_part(pdb, pid);
+    if (!part) {
+      st = NBASE_ERR_CORRUPT;
+      break;
+    }
+    st = pdb_load_partition(pdb, part);
+    if (st != NBASE_OK) {
+      break;
+    }
+    uint32_t end = start;
+    while (end < count && refs[end].part_id == pid) {
+      part_items[end - start] = items[refs[end].orig_idx];
+      end++;
+    }
+    uint32_t sub_cnt = end - start;
+    st = is_update
+             ? nbase_update_meta_batch(part->db, part_items, sub_cnt)
+             : nbase_set_meta_batch(part->db, part_items, sub_cnt);
+    if (st == NBASE_OK) {
+      part->dirty = true;
+    }
+    start = end;
+  }
+  pthread_mutex_unlock(&pdb->mu);
+
+  free(refs);
+  free(part_items);
+  return st;
+}
+
 nbase_status_t nbase_pdb_set_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
   if (!pdb) {
     return NBASE_ERR_INVALID_ARG;
@@ -1565,6 +1649,13 @@ nbase_status_t nbase_pdb_set_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_met
   return st;
 }
 
+nbase_status_t nbase_pdb_set_meta_batch(
+    nbase_pdb_t *pdb,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count) {
+  return pdb_meta_batch_op(pdb, items, count, false);
+}
+
 nbase_status_t nbase_pdb_update_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
   if (!pdb) {
     return NBASE_ERR_INVALID_ARG;
@@ -1592,6 +1683,13 @@ nbase_status_t nbase_pdb_update_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_
 
   pthread_mutex_unlock(&pdb->mu);
   return st;
+}
+
+nbase_status_t nbase_pdb_update_meta_batch(
+    nbase_pdb_t *pdb,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count) {
+  return pdb_meta_batch_op(pdb, items, count, true);
 }
 
 nbase_status_t nbase_pdb_get_meta(nbase_pdb_t *pdb, uint64_t id, const char *key, nbase_meta_value_t *out_val, char *str_buf, size_t str_buf_len) {
@@ -1777,6 +1875,68 @@ nbase_status_t nbase_pdb_set_text(nbase_pdb_t *pdb, uint64_t id, const char *tex
     }
   }
   pthread_mutex_unlock(&pdb->mu);
+  return st;
+}
+
+nbase_status_t nbase_pdb_set_text_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    const char *const *texts,
+    uint32_t count) {
+  if (!pdb || (count > 0U && (!ids || !texts))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!texts[i]) {
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+
+  uint64_t *part_ids = malloc((size_t)count * sizeof(uint64_t));
+  const char **part_texts = malloc((size_t)count * sizeof(const char *));
+  if (!part_ids || !part_texts) {
+    free(part_ids);
+    free(part_texts);
+    return NBASE_ERR_NOMEM;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  pdb_part_ref_t *refs = NULL;
+  nbase_status_t st = pdb_collect_sorted_refs_locked(pdb, ids, NULL, count, &refs);
+  uint32_t start = 0U;
+  while (st == NBASE_OK && start < count) {
+    uint32_t pid = refs[start].part_id;
+    pdb_part_t *part = pdb_find_part(pdb, pid);
+    if (!part) {
+      st = NBASE_ERR_CORRUPT;
+      break;
+    }
+    st = pdb_load_partition(pdb, part);
+    if (st != NBASE_OK) {
+      break;
+    }
+    uint32_t end = start;
+    while (end < count && refs[end].part_id == pid) {
+      uint32_t oi = refs[end].orig_idx;
+      part_ids[end - start] = ids[oi];
+      part_texts[end - start] = texts[oi];
+      end++;
+    }
+    uint32_t sub_cnt = end - start;
+    st = nbase_set_text_batch(part->db, part_ids, part_texts, sub_cnt);
+    if (st == NBASE_OK) {
+      part->dirty = true;
+    }
+    start = end;
+  }
+  pthread_mutex_unlock(&pdb->mu);
+
+  free(refs);
+  free(part_ids);
+  free((void *)part_texts);
   return st;
 }
 
@@ -2412,9 +2572,17 @@ nbase_status_t nbase_pdb_extract_relationships(
     }
     nbase_db_rdlock(p->db);
     const nbase_store_t *store = nbase_db_store(p->db);
+    const nbase_meta_store_t *meta = nbase_db_meta(p->db);
     for (uint32_t s = 0U; s < store->slot_count && n_vecs < (size_t)total_est; s++) {
       if (store->slot_flags[s] == NBASE_SLOT_ACTIVE) {
-        all_ids[n_vecs] = store->ids[s];
+        uint64_t vid = store->ids[s];
+        if (eff.search.meta_filter && !nbase_meta_matches(meta, vid, eff.search.meta_filter)) {
+          continue;
+        }
+        if (eff.search.filter && !eff.search.filter(vid, eff.search.filter_ctx)) {
+          continue;
+        }
+        all_ids[n_vecs] = vid;
         memcpy(
             all_vecs + n_vecs * (size_t)dim,
             nbase_store_get_vector(store, s),

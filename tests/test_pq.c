@@ -193,7 +193,55 @@ static void test_pq_encode_decode_adc_and_persistence(void) {
   free(lut);
 }
 
+static void test_pq_adc_distance_batch(void) {
+  const uint32_t dim = 16U;
+  const uint32_t m = 8U;
+  const uint32_t count = 300U;
+  float *vecs = malloc((size_t)count * dim * sizeof(float));
+  ASSERT_TRUE(vecs != NULL);
+  test_fill_vectors(vecs, count, dim, 2026ULL);
+
+  /* Test fast num_centroids == 256 path AND general num_centroids < 256 path. */
+  static const uint32_t ks_cases[2] = {256U, 32U};
+  for (uint32_t ci = 0U; ci < 2U; ci++) {
+    uint32_t ks = ks_cases[ci];
+    nbase_pq_t *pq = NULL;
+    ASSERT_STATUS(nbase_pq_train(vecs, count, dim, m, ks, 8U, 42ULL + ci, &pq), NBASE_OK);
+
+    uint8_t *codes = malloc((size_t)count * m);
+    float *lut = malloc((size_t)m * ks * sizeof(float));
+    float *batch_dists = malloc((size_t)count * sizeof(float));
+    ASSERT_TRUE(codes != NULL && lut != NULL && batch_dists != NULL);
+
+    ASSERT_STATUS(nbase_pq_encode(pq, vecs, count, codes), NBASE_OK);
+    ASSERT_STATUS(nbase_pq_build_lut(pq, vecs, lut), NBASE_OK);
+    ASSERT_STATUS(nbase_pq_adc_distance_batch(pq, lut, codes, 0U, batch_dists), NBASE_OK);
+    ASSERT_STATUS(nbase_pq_adc_distance_batch(pq, lut, codes, count, batch_dists), NBASE_OK);
+
+    for (uint32_t i = 0U; i < count; i++) {
+      float single = nbase_pq_adc_distance(pq, lut, codes + (size_t)i * m);
+      ASSERT_NEAR(batch_dists[i], single, 1e-6, 0.0);
+    }
+
+    if (ks < 256U) {
+      uint8_t bad_code[8] = {0};
+      bad_code[3] = (uint8_t)ks;
+      float out_d = 0.0f;
+      ASSERT_STATUS(nbase_pq_adc_distance_batch(pq, lut, bad_code, 1U, &out_d), NBASE_ERR_INVALID_ARG);
+    }
+    ASSERT_STATUS(nbase_pq_adc_distance_batch(pq, lut, NULL, 1U, batch_dists), NBASE_ERR_INVALID_ARG);
+
+    free(codes);
+    free(lut);
+    free(batch_dists);
+    nbase_pq_destroy(pq);
+  }
+
+  free(vecs);
+}
+
 void test_pq_run(void) {
   RUN_TEST(test_kmeans_synthetic_clusters_and_edge_cases);
   RUN_TEST(test_pq_encode_decode_adc_and_persistence);
+  RUN_TEST(test_pq_adc_distance_batch);
 }

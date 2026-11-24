@@ -1004,6 +1004,155 @@ static void test_http_server_list_vectors_and_radius_search(void) {
   nbase_close(db);
 }
 
+static void test_http_server_batch_meta_text_and_filtered_graph(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/upsert",
+      NULL,
+      "{\"vectors\":["
+      "{\"id\":1,\"vector\":[1,0,0],\"metadata\":{\"team\":\"a\"},\"text\":\"init one\"},"
+      "{\"id\":2,\"vector\":[1,0.05,0],\"metadata\":{\"team\":\"a\"},\"text\":\"init two\"},"
+      "{\"id\":3,\"vector\":[1,0.1,0],\"metadata\":{\"team\":\"b\"},\"text\":\"init three\"}"
+      "]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  free(r.body);
+
+  /* POST /api/vectors/metadata (replace mode) */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/metadata",
+      NULL,
+      "{\"items\":["
+      "{\"id\":1,\"metadata\":{\"team\":\"blue\",\"tier\":1}},"
+      "{\"id\":2,\"metadata\":{\"team\":\"blue\",\"tier\":2}},"
+      "{\"id\":3,\"metadata\":{\"team\":\"red\",\"tier\":3}}"
+      "]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"updated\":3") != NULL);
+  free(r.body);
+
+  /* PATCH /api/vectors/metadata (partial update preserving tier) */
+  ASSERT_TRUE(http_req(
+      port,
+      "PATCH",
+      "/api/vectors/metadata",
+      NULL,
+      "{\"items\":["
+      "{\"id\":1,\"metadata\":{\"active\":true}},"
+      "{\"id\":2,\"metadata\":{\"active\":true}}"
+      "]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"updated\":2") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/1?includeVector=false&includeMetadata=true", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"team\":\"blue\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"tier\":1") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"active\":true") != NULL);
+  free(r.body);
+
+  /* Error cases: invalid mode -> 400, missing ID -> 404. */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/metadata",
+      NULL,
+      "{\"mode\":\"invalid\",\"items\":[{\"id\":1,\"metadata\":{\"x\":1}}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/metadata",
+      NULL,
+      "{\"items\":[{\"id\":999,\"metadata\":{\"x\":1}}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 404);
+  free(r.body);
+
+  /* POST /api/vectors/text */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/text",
+      NULL,
+      "{\"items\":["
+      "{\"id\":1,\"text\":\"fast c11 simd engine\"},"
+      "{\"id\":2,\"text\":\"fast c11 partitioned store\"},"
+      "{\"id\":3,\"text\":\"unrelated payload\"}"
+      "]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"updated\":3") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/search/text", NULL, "{\"query\":\"simd engine\",\"k\":3}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":1") != NULL);
+  free(r.body);
+
+  /* Filtered relationship & community extraction. */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/relationships",
+      NULL,
+      "{\"kNeighbors\":2,\"maxDistance\":0.5,\"filters\":{\"team\":\"blue\"}}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"src\":1") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"dst\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "3") == NULL || strstr(r.body, "\"dst\":3") == NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/communities",
+      NULL,
+      "{\"kNeighbors\":2,\"maxDistance\":0.5,\"filters\":{\"team\":\"blue\"}}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"community_count\":1") != NULL);
+  free(r.body);
+
+  /* Zero-match filter on communities returns clean empty list. */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/communities",
+      NULL,
+      "{\"kNeighbors\":2,\"maxDistance\":0.5,\"filters\":{\"team\":\"none\"}}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"community_count\":0") != NULL);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1013,4 +1162,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_weighted_rerank_and_cache);
   RUN_TEST(test_http_server_upsert_and_get_batch);
   RUN_TEST(test_http_server_list_vectors_and_radius_search);
+  RUN_TEST(test_http_server_batch_meta_text_and_filtered_graph);
 }

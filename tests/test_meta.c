@@ -239,8 +239,103 @@ static void test_meta_foreach_query_and_find_similar(void) {
   nbase_close(db);
 }
 
+static void test_meta_and_text_batch_atomicity_and_edge_cases(void) {
+  const uint32_t dim = 3U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.cache_capacity = 16U;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  uint64_t ids[3] = {1ULL, 2ULL, 3ULL};
+  float vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f};
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 3U, dim, 1U), NBASE_OK);
+
+  /* Empty batches succeed cleanly. */
+  ASSERT_STATUS(nbase_set_meta_batch(db, NULL, 0U), NBASE_OK);
+  ASSERT_STATUS(nbase_update_meta_batch(db, NULL, 0U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text_batch(db, NULL, NULL, 0U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta_batch(db, NULL, 1U), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_set_text_batch(db, ids, NULL, 1U), NBASE_ERR_INVALID_ARG);
+
+  nbase_meta_field_t f1[2] = {
+      {"dept", {.type = NBASE_META_STRING, .as = {.str = "eng"}}},
+      {"score", {.type = NBASE_META_INT64, .as = {.i64 = 10}}}};
+  nbase_meta_field_t f2[2] = {
+      {"dept", {.type = NBASE_META_STRING, .as = {.str = "ops"}}},
+      {"score", {.type = NBASE_META_INT64, .as = {.i64 = 20}}}};
+  nbase_meta_field_t f1_dup[2] = {
+      {"dept", {.type = NBASE_META_STRING, .as = {.str = "ml"}}},
+      {"score", {.type = NBASE_META_INT64, .as = {.i64 = 30}}}};
+
+  /* Atomicity: if any ID in the batch is missing, zero items mutate. */
+  nbase_meta_batch_item_t missing_batch[2] = {
+      {1ULL, f1, 2U},
+      {999ULL, f2, 2U}};
+  ASSERT_STATUS(nbase_set_meta_batch(db, missing_batch, 2U), NBASE_ERR_NOT_FOUND);
+  nbase_meta_value_t mv;
+  char sbuf[32];
+  ASSERT_STATUS(nbase_get_meta(db, 1ULL, "dept", &mv, sbuf, sizeof(sbuf)), NBASE_ERR_NOT_FOUND);
+
+  /* Batch set with duplicate ID overwrite preserves last write. */
+  nbase_meta_batch_item_t valid_batch[3] = {
+      {1ULL, f1, 2U},
+      {2ULL, f2, 2U},
+      {1ULL, f1_dup, 2U}};
+  ASSERT_STATUS(nbase_set_meta_batch(db, valid_batch, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_get_meta(db, 1ULL, "dept", &mv, sbuf, sizeof(sbuf)), NBASE_OK);
+  ASSERT_TRUE(strcmp(mv.as.str, "ml") == 0);
+  ASSERT_STATUS(nbase_get_meta(db, 2ULL, "score", &mv, NULL, 0U), NBASE_OK);
+  ASSERT_EQ_U64((uint64_t)mv.as.i64, 20ULL);
+
+  /* Populate LRU search cache with filtered query, then verify batch update invalidates cache. */
+  nbase_meta_cond_t cond = {"dept", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "ops"}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  nbase_search_opts_t sopts = nbase_search_opts_default();
+  sopts.meta_filter = &flt;
+  nbase_result_t hits[3];
+  uint32_t hit_cnt = 0U;
+  ASSERT_STATUS(nbase_search(db, vecs, dim, 3U, &sopts, hits, &hit_cnt), NBASE_OK);
+  ASSERT_EQ_U64(hit_cnt, 1ULL);
+  ASSERT_EQ_U64(hits[0].id, 2ULL);
+
+  nbase_meta_field_t promote = {"dept", {.type = NBASE_META_STRING, .as = {.str = "ops"}}};
+  nbase_meta_batch_item_t upd[1] = {{1ULL, &promote, 1U}};
+  ASSERT_STATUS(nbase_update_meta_batch(db, upd, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_get_meta(db, 1ULL, "score", &mv, NULL, 0U), NBASE_OK);
+  ASSERT_EQ_U64((uint64_t)mv.as.i64, 30ULL); /* Existing field preserved on update! */
+
+  ASSERT_STATUS(nbase_search(db, vecs, dim, 3U, &sopts, hits, &hit_cnt), NBASE_OK);
+  ASSERT_EQ_U64(hit_cnt, 2ULL);
+
+  /* Batch text indexing atomicity + BM25 query. */
+  uint64_t bad_tids[2] = {1ULL, 888ULL};
+  const char *bad_texts[2] = {"avx2 kernel", "missing"};
+  ASSERT_STATUS(nbase_set_text_batch(db, bad_tids, bad_texts, 2U), NBASE_ERR_NOT_FOUND);
+  size_t tlen = 0U;
+  ASSERT_STATUS(nbase_get_text(db, 1ULL, NULL, 0U, &tlen), NBASE_ERR_NOT_FOUND);
+
+  uint64_t tids[3] = {1ULL, 2ULL, 3ULL};
+  const char *texts[3] = {
+      "vector engine c11 avx2 search",
+      "distributed storage raft consensus",
+      "graph rerank hybrid bm25 search"};
+  ASSERT_STATUS(nbase_set_text_batch(db, tids, texts, 3U), NBASE_OK);
+
+  nbase_scored_id_t thits[3];
+  uint32_t tcnt = 0U;
+  ASSERT_STATUS(nbase_search_text(db, "avx2 search", 3U, &flt, thits, &tcnt), NBASE_OK);
+  ASSERT_EQ_U64(tcnt, 1ULL);
+  ASSERT_EQ_U64(thits[0].id, 1ULL);
+
+  nbase_close(db);
+}
+
 void test_meta_run(void) {
   RUN_TEST(test_meta_crud_and_upsert_preservation);
   RUN_TEST(test_meta_filtering_operators_and_persistence);
   RUN_TEST(test_meta_foreach_query_and_find_similar);
+  RUN_TEST(test_meta_and_text_batch_atomicity_and_edge_cases);
 }

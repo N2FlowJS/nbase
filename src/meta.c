@@ -67,7 +67,7 @@ static void record_destroy(meta_record_t *rec) {
   free(rec);
 }
 
-static nbase_status_t validate_fields(const nbase_meta_field_t *fields, uint32_t count) {
+nbase_status_t nbase_meta_validate_fields(const nbase_meta_field_t *fields, uint32_t count) {
   if (count > 0U && !fields) {
     return NBASE_ERR_INVALID_ARG;
   }
@@ -328,7 +328,7 @@ nbase_status_t nbase_meta_set(nbase_meta_store_t *meta, uint64_t id, const nbase
   if (!meta) {
     return NBASE_ERR_INVALID_ARG;
   }
-  nbase_status_t st = validate_fields(fields, count);
+  nbase_status_t st = nbase_meta_validate_fields(fields, count);
   if (st != NBASE_OK) {
     return st;
   }
@@ -360,7 +360,7 @@ nbase_status_t nbase_meta_update(nbase_meta_store_t *meta, uint64_t id, const nb
   if (!meta) {
     return NBASE_ERR_INVALID_ARG;
   }
-  nbase_status_t st = validate_fields(fields, count);
+  nbase_status_t st = nbase_meta_validate_fields(fields, count);
   if (st != NBASE_OK) {
     return st;
   }

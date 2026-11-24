@@ -246,7 +246,13 @@ nbase_status_t nbase_wal_append_id(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t
   return wal_append_frame(wal, op, &id, (uint32_t)sizeof(id), true);
 }
 
-nbase_status_t nbase_wal_append_meta(nbase_wal_t *wal, nbase_wal_op_t op, uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
+static nbase_status_t wal_append_meta_impl(
+    nbase_wal_t *wal,
+    nbase_wal_op_t op,
+    uint64_t id,
+    const nbase_meta_field_t *fields,
+    uint32_t count,
+    bool do_sync) {
   if (!wal || (!fields && count > 0U)) {
     return NBASE_ERR_INVALID_ARG;
   }
@@ -328,12 +334,45 @@ nbase_status_t nbase_wal_append_meta(nbase_wal_t *wal, nbase_wal_op_t op, uint64
     }
   }
 
-  nbase_status_t st = wal_append_frame(wal, op, buf, (uint32_t)total, true);
+  nbase_status_t st = wal_append_frame(wal, op, buf, (uint32_t)total, do_sync);
   free(buf);
   return st;
 }
 
-nbase_status_t nbase_wal_append_text(nbase_wal_t *wal, uint64_t id, const char *text) {
+nbase_status_t nbase_wal_append_meta(
+    nbase_wal_t *wal,
+    nbase_wal_op_t op,
+    uint64_t id,
+    const nbase_meta_field_t *fields,
+    uint32_t count) {
+  return wal_append_meta_impl(wal, op, id, fields, count, true);
+}
+
+nbase_status_t nbase_wal_append_meta_batch(
+    nbase_wal_t *wal,
+    nbase_wal_op_t op,
+    const nbase_meta_batch_item_t *items,
+    uint32_t count) {
+  if (!wal || wal->fd < 0 || (count > 0U && !items)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = 0U; i < count; i++) {
+    st = wal_append_meta_impl(wal, op, items[i].id, items[i].fields, items[i].field_count, false);
+    if (st != NBASE_OK) {
+      break;
+    }
+  }
+  if (st == NBASE_OK && fsync(wal->fd) != 0) {
+    return NBASE_ERR_IO;
+  }
+  return st;
+}
+
+static nbase_status_t wal_append_text_impl(nbase_wal_t *wal, uint64_t id, const char *text, bool do_sync) {
   if (!wal || !text) {
     return NBASE_ERR_INVALID_ARG;
   }
@@ -352,8 +391,36 @@ nbase_status_t nbase_wal_append_text(nbase_wal_t *wal, uint64_t id, const char *
   if (tlen > 0U) {
     memcpy(buf + 12, text, tlen);
   }
-  nbase_status_t st = wal_append_frame(wal, NBASE_WAL_OP_SET_TEXT, buf, (uint32_t)payload_sz, true);
+  nbase_status_t st = wal_append_frame(wal, NBASE_WAL_OP_SET_TEXT, buf, (uint32_t)payload_sz, do_sync);
   free(buf);
+  return st;
+}
+
+nbase_status_t nbase_wal_append_text(nbase_wal_t *wal, uint64_t id, const char *text) {
+  return wal_append_text_impl(wal, id, text, true);
+}
+
+nbase_status_t nbase_wal_append_text_batch(
+    nbase_wal_t *wal,
+    const uint64_t *ids,
+    const char *const *texts,
+    uint32_t count) {
+  if (!wal || wal->fd < 0 || (count > 0U && (!ids || !texts))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = 0U; i < count; i++) {
+    st = wal_append_text_impl(wal, ids[i], texts[i], false);
+    if (st != NBASE_OK) {
+      break;
+    }
+  }
+  if (st == NBASE_OK && fsync(wal->fd) != 0) {
+    return NBASE_ERR_IO;
+  }
   return st;
 }
 

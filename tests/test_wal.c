@@ -143,7 +143,75 @@ static void test_wal_torn_tail_truncation_and_checkpoint(void) {
   test_rm_rf(dir);
 }
 
+static void test_wal_batch_meta_and_text_crash_recovery(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  const uint32_t dim = 4U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.seed = 77ULL;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_wal_enable(db, dir), NBASE_OK);
+
+  uint64_t ids[3] = {11ULL, 22ULL, 33ULL};
+  float vecs[12] = {
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0};
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 3U, dim, 1U), NBASE_OK);
+
+  nbase_meta_field_t f1[2] = {
+      {"env", {.type = NBASE_META_STRING, .as = {.str = "prod"}}},
+      {"ver", {.type = NBASE_META_INT64, .as = {.i64 = 1}}}};
+  nbase_meta_field_t f2[2] = {
+      {"env", {.type = NBASE_META_STRING, .as = {.str = "staging"}}},
+      {"ver", {.type = NBASE_META_INT64, .as = {.i64 = 2}}}};
+  nbase_meta_batch_item_t mitems[2] = {
+      {11ULL, f1, 2U},
+      {22ULL, f2, 2U}};
+  ASSERT_STATUS(nbase_set_meta_batch(db, mitems, 2U), NBASE_OK);
+
+  nbase_meta_field_t fupd = {"ver", {.type = NBASE_META_INT64, .as = {.i64 = 9}}};
+  nbase_meta_batch_item_t uitems[2] = {
+      {11ULL, &fupd, 1U},
+      {33ULL, f1, 2U}};
+  ASSERT_STATUS(nbase_update_meta_batch(db, uitems, 2U), NBASE_OK);
+
+  const char *texts[3] = {
+      "wal durability single fsync meta batch",
+      "secondary doc staging",
+      "third prod vector record"};
+  ASSERT_STATUS(nbase_set_text_batch(db, ids, texts, 3U), NBASE_OK);
+
+  /* Close without save to force WAL replay upon reopen. */
+  nbase_close(db);
+  db = NULL;
+
+  ASSERT_STATUS(nbase_open(dir, &db), NBASE_OK);
+  nbase_meta_value_t mv;
+  char sbuf[32];
+  ASSERT_STATUS(nbase_get_meta(db, 11ULL, "env", &mv, sbuf, sizeof(sbuf)), NBASE_OK);
+  ASSERT_TRUE(strcmp(mv.as.str, "prod") == 0);
+  ASSERT_STATUS(nbase_get_meta(db, 11ULL, "ver", &mv, NULL, 0U), NBASE_OK);
+  ASSERT_EQ_U64((uint64_t)mv.as.i64, 9ULL);
+  ASSERT_STATUS(nbase_get_meta(db, 22ULL, "env", &mv, sbuf, sizeof(sbuf)), NBASE_OK);
+  ASSERT_TRUE(strcmp(mv.as.str, "staging") == 0);
+  ASSERT_STATUS(nbase_get_meta(db, 33ULL, "ver", &mv, NULL, 0U), NBASE_OK);
+  ASSERT_EQ_U64((uint64_t)mv.as.i64, 1ULL);
+
+  nbase_scored_id_t thits[3];
+  uint32_t tcnt = 0U;
+  ASSERT_STATUS(nbase_search_text(db, "single fsync", 3U, NULL, thits, &tcnt), NBASE_OK);
+  ASSERT_EQ_U64(tcnt, 1ULL);
+  ASSERT_EQ_U64(thits[0].id, 11ULL);
+
+  nbase_close(db);
+  test_rm_rf(dir);
+}
+
 void test_wal_run(void) {
   RUN_TEST(test_wal_enable_add_upsert_delete_meta_and_crash_recovery);
   RUN_TEST(test_wal_torn_tail_truncation_and_checkpoint);
+  RUN_TEST(test_wal_batch_meta_and_text_crash_recovery);
 }

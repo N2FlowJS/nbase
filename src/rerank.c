@@ -283,13 +283,25 @@ nbase_status_t nbase_rerank_weighted(
   return NBASE_OK;
 }
 
-nbase_status_t nbase_extract_relationships(
+typedef struct rel_filter_ctx {
+  const nbase_meta_store_t *meta;
+  const nbase_meta_filter_t *filter;
+} rel_filter_ctx_t;
+
+static bool rel_filter_cb(uint64_t id, void *raw) {
+  const rel_filter_ctx_t *ctx = (const rel_filter_ctx_t *)raw;
+  return nbase_meta_matches(ctx->meta, id, ctx->filter);
+}
+
+nbase_status_t nbase_extract_relationships_filtered(
     const nbase_db_t *db,
     uint32_t k_neighbors,
     float max_distance,
+    const nbase_meta_filter_t *meta_filter,
     nbase_edge_t **out_edges,
     uint64_t *out_edge_count) {
-  if (!db || !out_edges || !out_edge_count || k_neighbors == 0U || isnan(max_distance)) {
+  if (!db || !out_edges || !out_edge_count || k_neighbors == 0U || isnan(max_distance) ||
+      (meta_filter != NULL && meta_filter->count > 0U && !meta_filter->conds)) {
     return NBASE_ERR_INVALID_ARG;
   }
   *out_edges = NULL;
@@ -297,23 +309,34 @@ nbase_status_t nbase_extract_relationships(
 
   nbase_db_rdlock(db);
   const nbase_store_t *store = nbase_db_store(db);
+  const nbase_meta_store_t *meta = nbase_db_meta(db);
   if (store->active_count < 2ULL) {
     nbase_db_unlock(db);
     return NBASE_OK;
   }
 
-  uint32_t active_cnt = (uint32_t)store->active_count;
-  uint32_t *slots = malloc((size_t)active_cnt * sizeof(uint32_t));
+  bool has_filter = (meta_filter != NULL && meta_filter->count > 0U);
+  uint32_t active_cap = (uint32_t)store->active_count;
+  uint32_t *slots = malloc((size_t)active_cap * sizeof(uint32_t));
   if (!slots) {
     nbase_db_unlock(db);
     return NBASE_ERR_NOMEM;
   }
   uint32_t s_pos = 0U;
-  for (uint32_t s = 0U; s < store->slot_count && s_pos < active_cnt; s++) {
+  for (uint32_t s = 0U; s < store->slot_count && s_pos < active_cap; s++) {
     if (store->slot_flags[s] == NBASE_SLOT_ACTIVE) {
+      if (has_filter && !nbase_meta_matches(meta, store->ids[s], meta_filter)) {
+        continue;
+      }
       slots[s_pos++] = s;
     }
   }
+  if (s_pos < 2U) {
+    free(slots);
+    nbase_db_unlock(db);
+    return NBASE_OK;
+  }
+  uint32_t active_cnt = s_pos;
 
   uint32_t eff_k = (k_neighbors < active_cnt - 1U) ? k_neighbors : (active_cnt - 1U);
   size_t raw_cap = (size_t)active_cnt * (size_t)eff_k;
@@ -330,6 +353,7 @@ nbase_status_t nbase_extract_relationships(
   size_t edge_len = 0U;
   const nbase_hnsw_t *hnsw = nbase_db_hnsw(db);
   bool use_hnsw = nbase_db_hnsw_enabled(db) && hnsw != NULL && active_cnt > 64U;
+  rel_filter_ctx_t fctx = {meta, meta_filter};
   nbase_dist_fn dist_fn = nbase_get_distance_fn(store->metric);
   nbase_status_t st = NBASE_OK;
 
@@ -340,7 +364,17 @@ nbase_status_t nbase_extract_relationships(
     uint32_t got = 0U;
 
     if (use_hnsw) {
-      st = nbase_hnsw_search(hnsw, store, self_vec, eff_k + 1U, 0U, store->metric, NULL, NULL, knn, &got);
+      st = nbase_hnsw_search(
+          hnsw,
+          store,
+          self_vec,
+          eff_k + 1U,
+          0U,
+          store->metric,
+          has_filter ? rel_filter_cb : NULL,
+          has_filter ? &fctx : NULL,
+          knn,
+          &got);
       if (st != NBASE_OK) {
         break;
       }
@@ -415,6 +449,16 @@ nbase_status_t nbase_extract_relationships(
   *out_edges = shrunk ? shrunk : edges;
   *out_edge_count = (uint64_t)unique_len;
   return NBASE_OK;
+}
+
+nbase_status_t nbase_extract_relationships(
+    const nbase_db_t *db,
+    uint32_t k_neighbors,
+    float max_distance,
+    nbase_edge_t **out_edges,
+    uint64_t *out_edge_count) {
+  return nbase_extract_relationships_filtered(
+      db, k_neighbors, max_distance, NULL, out_edges, out_edge_count);
 }
 
 static uint32_t uf_find_iter(uint32_t *parent, uint32_t x) {

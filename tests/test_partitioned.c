@@ -384,10 +384,111 @@ static void test_pdb_list_ids_and_search_radius(void) {
   test_rm_rf(dir);
 }
 
+static void test_pdb_meta_text_batch_and_filtered_relationships(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(3U);
+  cfg.partition_capacity = 2U;
+  cfg.max_active_partitions = 1U;
+  cfg.enable_hnsw = false;
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  /* Spans 3 partitions across 6 vectors; max_active_partitions=1 exercises LRU eviction. */
+  uint64_t ids[6] = {101ULL, 102ULL, 201ULL, 202ULL, 301ULL, 302ULL};
+  float vecs[18] = {
+      1.0f, 0.00f, 0.0f,
+      1.0f, 0.05f, 0.0f,
+      1.0f, 0.10f, 0.0f,
+      1.0f, 0.12f, 0.0f,
+      1.0f, 0.15f, 0.0f,
+      1.0f, 0.18f, 0.0f};
+  ASSERT_STATUS(nbase_pdb_add_batch(pdb, ids, vecs, 6U, 3U, 1U), NBASE_OK);
+
+  nbase_meta_field_t f_keep[2] = {
+      {"group", {.type = NBASE_META_STRING, .as = {.str = "keep"}}},
+      {"rank", {.type = NBASE_META_INT64, .as = {.i64 = 1}}}};
+  nbase_meta_field_t f_drop[2] = {
+      {"group", {.type = NBASE_META_STRING, .as = {.str = "drop"}}},
+      {"rank", {.type = NBASE_META_INT64, .as = {.i64 = 9}}}};
+
+  /* Atomicity check on missing ID across partitions. */
+  nbase_meta_batch_item_t bad_items[2] = {
+      {101ULL, f_keep, 2U},
+      {9999ULL, f_keep, 2U}};
+  ASSERT_STATUS(nbase_pdb_set_meta_batch(pdb, bad_items, 2U), NBASE_ERR_NOT_FOUND);
+  nbase_meta_value_t mv;
+  char sbuf[32];
+  ASSERT_STATUS(nbase_pdb_get_meta(pdb, 101ULL, "group", &mv, sbuf, sizeof(sbuf)), NBASE_ERR_NOT_FOUND);
+
+  /* Interleaved IDs across partitions, including duplicate overwrite of 101 -> drop -> keep. */
+  nbase_meta_batch_item_t set_items[7] = {
+      {301ULL, f_keep, 2U},
+      {101ULL, f_drop, 2U},
+      {201ULL, f_keep, 2U},
+      {102ULL, f_drop, 2U},
+      {202ULL, f_drop, 2U},
+      {302ULL, f_keep, 2U},
+      {101ULL, f_keep, 2U}};
+  ASSERT_STATUS(nbase_pdb_set_meta_batch(pdb, set_items, 7U), NBASE_OK);
+
+  nbase_meta_field_t f_upd = {"rank", {.type = NBASE_META_INT64, .as = {.i64 = 77}}};
+  nbase_meta_batch_item_t upd_items[2] = {
+      {101ULL, &f_upd, 1U},
+      {301ULL, &f_upd, 1U}};
+  ASSERT_STATUS(nbase_pdb_update_meta_batch(pdb, upd_items, 2U), NBASE_OK);
+
+  ASSERT_STATUS(nbase_pdb_get_meta(pdb, 101ULL, "group", &mv, sbuf, sizeof(sbuf)), NBASE_OK);
+  ASSERT_TRUE(strcmp(mv.as.str, "keep") == 0);
+  ASSERT_STATUS(nbase_pdb_get_meta(pdb, 101ULL, "rank", &mv, NULL, 0U), NBASE_OK);
+  ASSERT_EQ_U64((uint64_t)mv.as.i64, 77ULL);
+
+  const char *texts[6] = {
+      "alpha shard partition zero",
+      "bravo shard zero",
+      "alpha shard partition one",
+      "delta noise one",
+      "alpha shard partition two",
+      "foxtrot noise two"};
+  ASSERT_STATUS(nbase_pdb_set_text_batch(pdb, ids, texts, 6U), NBASE_OK);
+
+  /* Save/reopen persistence check. */
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  nbase_meta_cond_t cond = {"group", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "keep"}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  nbase_pdb_search_opts_t sopts = nbase_pdb_search_opts_default();
+  sopts.search_all_partitions = true;
+  sopts.search.meta_filter = &flt;
+
+  /* Verify filtered graph extraction connects ONLY keep nodes {101, 201, 301, 302}. */
+  nbase_edge_t *edges = NULL;
+  uint64_t edge_cnt = 0ULL;
+  ASSERT_STATUS(nbase_pdb_extract_relationships(pdb, 3U, 0.5f, &sopts, &edges, &edge_cnt), NBASE_OK);
+  ASSERT_TRUE(edge_cnt > 0ULL && edges != NULL);
+  for (uint64_t e = 0ULL; e < edge_cnt; e++) {
+    ASSERT_TRUE(edges[e].src_id != 102ULL && edges[e].dst_id != 102ULL);
+    ASSERT_TRUE(edges[e].src_id != 202ULL && edges[e].dst_id != 202ULL);
+  }
+  nbase_free_edges(edges);
+
+  nbase_scored_id_t thits[6];
+  uint32_t tcnt = 0U;
+  ASSERT_STATUS(nbase_pdb_search_text(pdb, "alpha shard", 6U, &sopts, thits, &tcnt), NBASE_OK);
+  ASSERT_EQ_U64(tcnt, 3ULL);
+
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
   RUN_TEST(test_pdb_delete_batch_filter_search_batch_and_graph);
   RUN_TEST(test_pdb_upsert_batch_get_batch_and_rerank);
   RUN_TEST(test_pdb_list_ids_and_search_radius);
+  RUN_TEST(test_pdb_meta_text_batch_and_filtered_relationships);
 }
