@@ -127,7 +127,9 @@ static void test_distance_batch_unrolled_edges(void) {
   static const nbase_metric_t metrics[] = {
       NBASE_METRIC_EUCLIDEAN,
       NBASE_METRIC_SQUARED_EUCLIDEAN,
+      NBASE_METRIC_COSINE,
       NBASE_METRIC_INNER_PRODUCT,
+      NBASE_METRIC_MANHATTAN,
   };
 
   float *query = malloc(129U * sizeof(float));
@@ -136,6 +138,8 @@ static void test_distance_batch_unrolled_edges(void) {
   ASSERT_TRUE(query != NULL && vecs != NULL && dists != NULL);
   test_fill_vectors(query, 1U, 129U, 711ULL);
   test_fill_vectors(vecs, 17U, 129U, 722ULL);
+  /* Include a zero-norm candidate in slot 2 to verify Cosine denom == 0 edge case. */
+  memset(vecs + 2U * 129U, 0, 129U * sizeof(float));
 
   for (size_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++) {
     uint32_t dim = dims[di];

@@ -293,6 +293,36 @@ static bool rel_filter_cb(uint64_t id, void *raw) {
   return nbase_meta_matches(ctx->meta, id, ctx->filter);
 }
 
+static void rel_knn_consider(
+    nbase_result_t *knn,
+    uint32_t *got,
+    uint32_t eff_k,
+    uint64_t other_id,
+    float d) {
+  if (*got < eff_k) {
+    uint32_t pos = (*got)++;
+    while (pos > 0U &&
+           (d < knn[pos - 1U].distance ||
+            (d == knn[pos - 1U].distance && other_id < knn[pos - 1U].id))) {
+      knn[pos] = knn[pos - 1U];
+      pos--;
+    }
+    knn[pos].id = other_id;
+    knn[pos].distance = d;
+  } else if (d < knn[*got - 1U].distance ||
+             (d == knn[*got - 1U].distance && other_id < knn[*got - 1U].id)) {
+    uint32_t pos = *got - 1U;
+    while (pos > 0U &&
+           (d < knn[pos - 1U].distance ||
+            (d == knn[pos - 1U].distance && other_id < knn[pos - 1U].id))) {
+      knn[pos] = knn[pos - 1U];
+      pos--;
+    }
+    knn[pos].id = other_id;
+    knn[pos].distance = d;
+  }
+}
+
 nbase_status_t nbase_extract_relationships_filtered(
     const nbase_db_t *db,
     uint32_t k_neighbors,
@@ -355,6 +385,26 @@ nbase_status_t nbase_extract_relationships_filtered(
   bool use_hnsw = nbase_db_hnsw_enabled(db) && hnsw != NULL && active_cnt > 64U;
   rel_filter_ctx_t fctx = {meta, meta_filter};
   nbase_dist_fn dist_fn = nbase_get_distance_fn(store->metric);
+  float *dense_vecs = NULL;
+  float *row_dists = NULL;
+  if (!use_hnsw && (size_t)active_cnt <= SIZE_MAX / ((size_t)store->dim * sizeof(float))) {
+    dense_vecs = malloc((size_t)active_cnt * (size_t)store->dim * sizeof(float));
+    row_dists = malloc((size_t)active_cnt * sizeof(float));
+    if (dense_vecs && row_dists) {
+      size_t row_bytes = (size_t)store->dim * sizeof(float);
+      for (uint32_t j = 0U; j < active_cnt; j++) {
+        memcpy(
+            dense_vecs + (size_t)j * (size_t)store->dim,
+            nbase_store_get_vector(store, slots[j]),
+            row_bytes);
+      }
+    } else {
+      free(dense_vecs);
+      free(row_dists);
+      dense_vecs = NULL;
+      row_dists = NULL;
+    }
+  }
   nbase_status_t st = NBASE_OK;
 
   for (uint32_t i = 0U; i < active_cnt && st == NBASE_OK; i++) {
@@ -378,6 +428,16 @@ nbase_status_t nbase_extract_relationships_filtered(
       if (st != NBASE_OK) {
         break;
       }
+    } else if (dense_vecs &&
+               nbase_distance_batch(
+                   store->metric, self_vec, dense_vecs, active_cnt, store->dim, row_dists) == NBASE_OK) {
+      for (uint32_t j = 0U; j < active_cnt; j++) {
+        uint32_t other_slot = slots[j];
+        if (other_slot == self_slot) {
+          continue;
+        }
+        rel_knn_consider(knn, &got, eff_k, store->ids[other_slot], row_dists[j]);
+      }
     } else {
       for (uint32_t j = 0U; j < active_cnt; j++) {
         uint32_t other_slot = slots[j];
@@ -385,24 +445,7 @@ nbase_status_t nbase_extract_relationships_filtered(
           continue;
         }
         float d = dist_fn(self_vec, nbase_store_get_vector(store, other_slot), store->dim);
-        uint64_t other_id = store->ids[other_slot];
-        if (got < eff_k) {
-          uint32_t pos = got++;
-          while (pos > 0U && (d < knn[pos - 1U].distance || (d == knn[pos - 1U].distance && other_id < knn[pos - 1U].id))) {
-            knn[pos] = knn[pos - 1U];
-            pos--;
-          }
-          knn[pos].id = other_id;
-          knn[pos].distance = d;
-        } else if (d < knn[got - 1U].distance || (d == knn[got - 1U].distance && other_id < knn[got - 1U].id)) {
-          uint32_t pos = got - 1U;
-          while (pos > 0U && (d < knn[pos - 1U].distance || (d == knn[pos - 1U].distance && other_id < knn[pos - 1U].id))) {
-            knn[pos] = knn[pos - 1U];
-            pos--;
-          }
-          knn[pos].id = other_id;
-          knn[pos].distance = d;
-        }
+        rel_knn_consider(knn, &got, eff_k, store->ids[other_slot], d);
       }
     }
 
@@ -423,6 +466,8 @@ nbase_status_t nbase_extract_relationships_filtered(
     }
   }
 
+  free(dense_vecs);
+  free(row_dists);
   free(knn);
   free(slots);
   nbase_db_unlock(db);

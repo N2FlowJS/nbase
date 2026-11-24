@@ -395,9 +395,139 @@ static void test_clustered_get_batch_and_search_radius(void) {
   nbase_clustered_destroy(cl);
 }
 
+static void *cl_search_batch_reader_thread(void *raw) {
+  cl_mt_arg_t *arg = (cl_mt_arg_t *)raw;
+  float qs[4U * 4U];
+  test_fill_vectors(qs, 4U, 4U, 9911ULL);
+  nbase_result_t bres[4U * 3U];
+  uint32_t bcnts[4U];
+  for (int iter = 0; iter < 40; iter++) {
+    if (nbase_clustered_search_batch(arg->cl, qs, 4U, 4U, 3U, 2U, 2U, bres, bcnts) != NBASE_OK) {
+      arg->err = 1;
+      break;
+    }
+  }
+  return NULL;
+}
+
+static void test_clustered_compact_and_search_batch_mt(void) {
+  const uint32_t dim = 4U;
+  const uint32_t n = 120U;
+  const uint32_t nq = 10U;
+  const uint32_t k = 5U;
+
+  nbase_clustered_config_t cfg = nbase_clustered_config_default(dim);
+  cfg.metric = NBASE_METRIC_COSINE;
+  cfg.target_cluster_size = 16U;
+  cfg.max_clusters = 32U;
+  cfg.distance_threshold = 0.5f;
+
+  nbase_clustered_t *cl = NULL;
+  ASSERT_STATUS(nbase_clustered_create(&cfg, &cl), NBASE_OK);
+
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  float *qs = malloc((size_t)nq * dim * sizeof(float));
+  nbase_result_t *bres = malloc((size_t)nq * k * sizeof(nbase_result_t));
+  uint32_t *bcnts = malloc((size_t)nq * sizeof(uint32_t));
+  ASSERT_TRUE(ids && vecs && qs && bres && bcnts);
+
+  test_fill_vectors(vecs, n, dim, 3100ULL);
+  test_fill_vectors(qs, nq, dim, 3200ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 100ULL + i;
+  }
+  ASSERT_STATUS(nbase_clustered_add_batch(cl, ids, vecs, n, dim), NBASE_OK);
+  ASSERT_STATUS(nbase_clustered_recluster(cl, 8U), NBASE_OK);
+
+  /* Batch search with 1 and 4 threads must match serial nbase_clustered_search */
+  const uint32_t threads[2] = {1U, 4U};
+  for (size_t ti = 0; ti < 2; ti++) {
+    ASSERT_STATUS(
+        nbase_clustered_search_batch(cl, qs, nq, dim, k, 4U, threads[ti], bres, bcnts),
+        NBASE_OK);
+    for (uint32_t q = 0U; q < nq; q++) {
+      nbase_result_t single[5];
+      uint32_t sc = 0U;
+      ASSERT_STATUS(
+          nbase_clustered_search(cl, qs + (size_t)q * dim, dim, k, 4U, single, &sc),
+          NBASE_OK);
+      ASSERT_EQ_U64(bcnts[q], sc);
+      for (uint32_t r = 0U; r < sc; r++) {
+        ASSERT_EQ_U64(bres[(size_t)q * k + r].id, single[r].id);
+        ASSERT_NEAR(bres[(size_t)q * k + r].distance, single[r].distance, 1e-6, 1e-6);
+      }
+    }
+  }
+
+  /* Validation & edge cases */
+  ASSERT_STATUS(nbase_clustered_search_batch(cl, NULL, 0U, dim, k, 2U, 2U, NULL, NULL), NBASE_OK);
+  bcnts[0] = 77U;
+  ASSERT_STATUS(nbase_clustered_search_batch(cl, qs, 2U, dim, 0U, 2U, 2U, NULL, bcnts), NBASE_OK);
+  ASSERT_EQ_U64(bcnts[0], 0ULL);
+  ASSERT_STATUS(nbase_clustered_search_batch(cl, qs, 2U, dim - 1U, k, 2U, 2U, bres, bcnts), NBASE_ERR_DIM_MISMATCH);
+  qs[dim] = NAN;
+  ASSERT_STATUS(nbase_clustered_search_batch(cl, qs, 2U, dim, k, 2U, 2U, bres, bcnts), NBASE_ERR_INVALID_VECTOR);
+  qs[dim] = 0.25f;
+
+  /* Delete 90 vectors to build tombstones, verify compact reclaims memory and preserves results */
+  ASSERT_STATUS(nbase_clustered_delete_batch(cl, ids, 90U, NULL), NBASE_OK);
+  nbase_clustered_stats_t pre_st, post_st;
+  ASSERT_STATUS(nbase_clustered_stats(cl, &pre_st), NBASE_OK);
+  ASSERT_EQ_U64(pre_st.active_vectors, 30ULL);
+
+  ASSERT_STATUS(nbase_clustered_compact(cl), NBASE_OK);
+  /* Idempotent no-op when tombstones == 0 */
+  ASSERT_STATUS(nbase_clustered_compact(cl), NBASE_OK);
+  ASSERT_STATUS(nbase_clustered_stats(cl, &post_st), NBASE_OK);
+  ASSERT_EQ_U64(post_st.active_vectors, 30ULL);
+  ASSERT_TRUE(post_st.memory_bytes < pre_st.memory_bytes);
+  ASSERT_STATUS(nbase_clustered_compact(NULL), NBASE_ERR_INVALID_ARG);
+
+  float got_v[4] = {0};
+  ASSERT_STATUS(nbase_clustered_get(cl, ids[95], got_v, dim), NBASE_OK);
+  ASSERT_NEAR(got_v[0], vecs[95U * dim], 1e-6, 0.0);
+
+  /* Concurrent batch searches + writer under TSan */
+  pthread_t readers[2];
+  cl_mt_arg_t rargs[2] = {{cl, 0}, {cl, 0}};
+  for (int t = 0; t < 2; t++) {
+    ASSERT_TRUE(pthread_create(&readers[t], NULL, cl_search_batch_reader_thread, &rargs[t]) == 0);
+  }
+  for (uint64_t wid = 1000ULL; wid < 1020ULL; wid++) {
+    float wv[4] = {1.0f, (float)wid * 0.01f, 0.2f, 0.3f};
+    ASSERT_STATUS(nbase_clustered_upsert(cl, wid, wv, dim), NBASE_OK);
+  }
+  for (int t = 0; t < 2; t++) {
+    pthread_join(readers[t], NULL);
+    ASSERT_EQ_I64(rargs[t].err, 0);
+  }
+
+  /* Verify save + load round-trip post-compact */
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+  char path[300];
+  snprintf(path, sizeof(path), "%s/compacted.nbcl", dir);
+  ASSERT_STATUS(nbase_clustered_save(cl, path), NBASE_OK);
+  nbase_clustered_t *reloaded = NULL;
+  ASSERT_STATUS(nbase_clustered_load(path, &reloaded), NBASE_OK);
+  ASSERT_TRUE(nbase_clustered_contains(reloaded, ids[95]));
+  ASSERT_TRUE(!nbase_clustered_contains(reloaded, ids[0]));
+  nbase_clustered_destroy(reloaded);
+  test_rm_rf(dir);
+
+  free(bcnts);
+  free(bres);
+  free(qs);
+  free(vecs);
+  free(ids);
+  nbase_clustered_destroy(cl);
+}
+
 void test_clustered_run(void) {
   RUN_TEST(test_clustered_online_assign_search_and_recluster);
   RUN_TEST(test_clustered_batch_filtered_and_concurrent);
   RUN_TEST(test_clustered_upsert_batch_and_list_ids);
   RUN_TEST(test_clustered_get_batch_and_search_radius);
+  RUN_TEST(test_clustered_compact_and_search_batch_mt);
 }

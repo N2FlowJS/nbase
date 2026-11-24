@@ -245,10 +245,46 @@ static void test_extract_relationships_filtered(void) {
   nbase_close(db);
 }
 
+static void test_extract_relationships_no_hnsw_batch(void) {
+  const uint32_t dim = 16U;
+  const uint32_t n = 45U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.metric = NBASE_METRIC_COSINE;
+  cfg.enable_hnsw = false;
+
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  uint64_t ids[45];
+  for (uint32_t g = 0U; g < 3U; g++) {
+    for (uint32_t i = 0U; i < 15U; i++) {
+      uint32_t idx = g * 15U + i;
+      ids[idx] = 500ULL + idx;
+      float v[16] = {0.0f};
+      v[g] = 1.0f;
+      v[(g + 3U) % dim] = 0.01f * (float)i;
+      ASSERT_STATUS(nbase_add(db, ids[idx], v, dim), NBASE_OK);
+    }
+  }
+
+  nbase_edge_t *edges = NULL;
+  uint64_t edge_cnt = 0ULL;
+  ASSERT_STATUS(nbase_extract_relationships(db, 3U, 0.1f, &edges, &edge_cnt), NBASE_OK);
+  ASSERT_TRUE(edge_cnt > 0ULL && edges != NULL);
+
+  uint32_t labels[45];
+  uint32_t comm_cnt = 0U;
+  ASSERT_STATUS(nbase_extract_communities(ids, n, edges, edge_cnt, labels, &comm_cnt), NBASE_OK);
+  ASSERT_EQ_U64(comm_cnt, 3ULL);
+  nbase_free_edges(edges);
+  nbase_close(db);
+}
+
 void test_rerank_run(void) {
   RUN_TEST(test_mmr_diversity_vs_relevance_lambda);
   RUN_TEST(test_extract_relationships_and_communities);
   RUN_TEST(test_communities_deep_chain_iterative);
   RUN_TEST(test_rerank_weighted_metadata_and_edge_cases);
   RUN_TEST(test_extract_relationships_filtered);
+  RUN_TEST(test_extract_relationships_no_hnsw_batch);
 }

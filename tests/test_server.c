@@ -1590,6 +1590,101 @@ static void test_http_server_rerank_endpoint(void) {
   nbase_close(db);
 }
 
+static void test_http_server_exists_batch_and_radius_endpoint(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  uint64_t ids[4] = {10ULL, 20ULL, 30ULL, 40ULL};
+  float vecs[12] = {
+      1.0f, 0.0f, 0.0f,
+      1.2f, 0.0f, 0.0f,
+      1.4f, 0.0f, 0.0f,
+      0.0f, 5.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 4U, 3U, 1U), NBASE_OK);
+  nbase_meta_field_t m10 = {"group", {.type = NBASE_META_STRING, .as = {.str = "keep"}}};
+  nbase_meta_field_t m20 = {"group", {.type = NBASE_META_STRING, .as = {.str = "drop"}}};
+  nbase_meta_field_t m30 = {"group", {.type = NBASE_META_STRING, .as = {.str = "keep"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, &m10, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 20ULL, &m20, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 30ULL, &m30, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 30ULL, "radius match"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. POST /api/vectors/exists batch check */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/exists",
+      NULL,
+      "{\"ids\":[10,999,30,888]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":4") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"existingCount\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "{\"id\":10,\"exists\":true}") != NULL);
+  ASSERT_TRUE(strstr(r.body, "{\"id\":999,\"exists\":false}") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/exists", NULL, "{\"ids\":[]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":0") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/exists", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  /* 2. POST /api/search/radius unfiltered & filtered */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/radius",
+      NULL,
+      "{\"query\":[1,0,0],\"maxDistance\":0.45,\"maxResults\":10}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":40") == NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/radius",
+      NULL,
+      "{\"query\":[1,0,0],\"maxDistance\":0.45,\"filters\":{\"group\":\"keep\"},"
+      "\"includeMetadata\":true,\"includeVectors\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"radius match\"") != NULL);
+  free(r.body);
+
+  /* Error cases */
+  ASSERT_TRUE(http_req(port, "POST", "/api/search/radius", NULL, "{\"query\":[1,0,0]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/search/radius", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1604,4 +1699,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_post_similar_and_distance);
   RUN_TEST(test_http_server_ndjson_import_export);
   RUN_TEST(test_http_server_rerank_endpoint);
+  RUN_TEST(test_http_server_exists_batch_and_radius_endpoint);
 }

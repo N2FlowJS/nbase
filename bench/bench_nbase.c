@@ -646,10 +646,23 @@ static void bench_batch_threads_and_pq(void) {
       gbatch_us = (double)(gb1 - gb0) / 1e3;
       free(gbuf);
     }
-    printf("  clustered(N=4000,k=32)  add=%6.2f ms  recluster=%6.2f ms  search(nprobe=4)=%6.2f us/query  radius=%6.2f us/query  get_batch(128)=%5.2f us\n",
+    double cb_qps = 0.0;
+    nbase_result_t *cb_res = malloc((size_t)nqueries * k * sizeof(nbase_result_t));
+    uint32_t *cb_cnts = malloc((size_t)nqueries * sizeof(uint32_t));
+    if (cb_res && cb_cnts) {
+      uint64_t cb0 = now_ns();
+      (void)nbase_clustered_search_batch(cl, queries, nqueries, dim, k, 4U, 4U, cb_res, cb_cnts);
+      uint64_t cb1 = now_ns();
+      double cb_sec = (double)(cb1 - cb0) / 1e9;
+      cb_qps = (cb_sec > 0.0) ? ((double)nqueries / cb_sec) : 0.0;
+    }
+    free(cb_res);
+    free(cb_cnts);
+    printf("  clustered(N=4000,k=32)  add=%6.2f ms  recluster=%6.2f ms  search(nprobe=4)=%6.2f us/query  search_batch(4t)=%7.0f QPS  radius=%6.2f us/query  get_batch(128)=%5.2f us\n",
            (double)(ca1 - ca0) / 1e6,
            (double)(cr1 - cr0) / 1e6,
            (double)(cs1 - cs0) / (double)nqueries / 1e3,
+           cb_qps,
            (double)(crd1 - crd0) / (double)nqueries / 1e3,
            gbatch_us);
     nbase_clustered_destroy(cl);
@@ -758,6 +771,7 @@ int main(void) {
   bench_distance_batch_metric("Batch SqL2", NBASE_METRIC_SQUARED_EUCLIDEAN, 128U, 10000U, 200U);
   bench_distance_batch_metric("Batch Cosine", NBASE_METRIC_COSINE, 128U, 10000U, 200U);
   bench_distance_batch_metric("Batch InnerProd", NBASE_METRIC_INNER_PRODUCT, 128U, 10000U, 200U);
+  bench_distance_batch_metric("Batch Manhattan", NBASE_METRIC_MANHATTAN, 128U, 10000U, 200U);
 
   printf("\n[HNSW Index Build & Search (M=16, efConstruction=200, efSearch=100)]\n");
   bench_hnsw_dataset(2000U, 128U, 20U);

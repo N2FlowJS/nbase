@@ -35,6 +35,8 @@ static void print_usage(const char *prog) {
       "  get-text <dir> <id>\n"
       "  delete-text <dir> <id>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]\n"
+      "  search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]\n"
+      "  rerank <dir> <diversity|weighted|standard> <id1:dist1,id2:dist2,...> [--k <K>] [--lambda <L>] [--weights <json>]\n"
       "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--filter <json>]\n"
       "  relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
@@ -47,6 +49,18 @@ static void print_usage(const char *prog) {
       "  import <dir> <file.ndjson|-> [--threads <T>]\n"
       "  export <dir> [file.ndjson|-]\n",
       prog);
+}
+
+static int cmp_cli_res_asc(const void *pa, const void *pb) {
+  const nbase_result_t *a = (const nbase_result_t *)pa;
+  const nbase_result_t *b = (const nbase_result_t *)pb;
+  if (a->distance < b->distance) {
+    return -1;
+  }
+  if (a->distance > b->distance) {
+    return 1;
+  }
+  return (a->id > b->id) - (a->id < b->id);
 }
 
 static bool parse_u64(const char *s, uint64_t *out) {
@@ -1830,6 +1844,359 @@ int main(int argc, char **argv) {
     }
     printf("]}\n");
     free(dists);
+    return 0;
+  }
+
+  if (strcmp(cmd, "search-meta") == 0) {
+    if (argc < 3) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    const char *flt_json = NULL;
+    uint32_t limit = 100U;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &limit) || limit == 0U || limit > 10000U) {
+          fprintf(stderr, "Invalid --limit\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    nbase_stats_t db_st;
+    st = nbase_stats(db, &db_st);
+    uint64_t *ids = malloc((size_t)limit * sizeof(uint64_t));
+    if (st != NBASE_OK || !ids) {
+      free(ids);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "search-meta failed\n");
+      return 1;
+    }
+
+    uint32_t got = 0U;
+    st = nbase_query_meta(db, flt.count > 0U ? &flt : NULL, limit, ids, &got);
+    free(conds);
+    nbase_json_free(flt_root);
+    if (st != NBASE_OK) {
+      free(ids);
+      nbase_close(db);
+      fprintf(stderr, "query failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    float *vec = inc_vecs ? malloc((size_t)db_st.dim * sizeof(float)) : NULL;
+    if (inc_vecs && !vec) {
+      free(ids);
+      nbase_close(db);
+      fprintf(stderr, "out of memory\n");
+      return 1;
+    }
+
+    nbase_sbuf_t sb;
+    nbase_sbuf_init(&sb);
+    nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
+    char *txt_buf = NULL;
+    size_t txt_cap = 0U;
+    for (uint32_t i = 0U; i < got; i++) {
+      nbase_sbuf_appendf(&sb, i == 0U ? "{\"id\":%llu" : ",{\"id\":%llu", (unsigned long long)ids[i]);
+      if (inc_vecs && nbase_get(db, ids[i], vec, db_st.dim) == NBASE_OK) {
+        nbase_sbuf_append(&sb, ",\"vector\":[");
+        for (uint32_t d = 0U; d < db_st.dim; d++) {
+          nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)vec[d]);
+        }
+        nbase_sbuf_append_n(&sb, "]", 1U);
+      }
+      if (inc_meta) {
+        cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
+        (void)nbase_foreach_meta(db, ids[i], cli_meta_cb, &mctx);
+        if (mctx.first) {
+          nbase_sbuf_append(&sb, ",\"metadata\":{}");
+        } else {
+          nbase_sbuf_append_n(&sb, "}", 1U);
+        }
+      }
+      if (inc_text) {
+        size_t tlen = 0U;
+        if (nbase_get_text(db, ids[i], NULL, 0U, &tlen) == NBASE_OK) {
+          if (tlen + 1U > txt_cap) {
+            char *nb = realloc(txt_buf, tlen + 1U);
+            if (nb) {
+              txt_buf = nb;
+              txt_cap = tlen + 1U;
+            }
+          }
+          if (txt_buf && nbase_get_text(db, ids[i], txt_buf, txt_cap, &tlen) == NBASE_OK) {
+            nbase_sbuf_append(&sb, ",\"text\":");
+            nbase_sbuf_append_json_str(&sb, txt_buf);
+          } else {
+            nbase_sbuf_append(&sb, ",\"text\":null");
+          }
+        } else {
+          nbase_sbuf_append(&sb, ",\"text\":null");
+        }
+      }
+      nbase_sbuf_append_n(&sb, "}", 1U);
+    }
+    nbase_sbuf_append(&sb, "]}");
+    free(txt_buf);
+    free(vec);
+    free(ids);
+    nbase_close(db);
+    if (sb.oom || !sb.data) {
+      nbase_sbuf_free(&sb);
+      fprintf(stderr, "out of memory\n");
+      return 1;
+    }
+    printf("%s\n", sb.data);
+    nbase_sbuf_free(&sb);
+    return 0;
+  }
+
+  if (strcmp(cmd, "rerank") == 0) {
+    if (argc < 5) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    const char *method = argv[3];
+    int mcode = 0;
+    if (strcmp(method, "diversity") == 0) {
+      mcode = 1;
+    } else if (strcmp(method, "weighted") == 0) {
+      mcode = 2;
+    } else if (strcmp(method, "standard") == 0) {
+      mcode = 3;
+    } else {
+      fprintf(stderr, "Invalid rerank method: %s\n", method);
+      return 1;
+    }
+
+    uint32_t cand_cap = 32U;
+    uint32_t cand_cnt = 0U;
+    nbase_result_t *cands = malloc((size_t)cand_cap * sizeof(nbase_result_t));
+    if (!cands) {
+      return 1;
+    }
+    const char *p = argv[4];
+    if (*p == '\0') {
+      free(cands);
+      fprintf(stderr, "Candidates list cannot be empty\n");
+      return 1;
+    }
+    while (*p != '\0') {
+      const char *comma = strchr(p, ',');
+      size_t tok_len = comma ? (size_t)(comma - p) : strlen(p);
+      if (tok_len == 0U || cand_cnt >= 10000U) {
+        free(cands);
+        fprintf(stderr, "Invalid candidate token\n");
+        return 1;
+      }
+      const char *colon = memchr(p, ':', tok_len);
+      if (!colon || colon == p || (size_t)(colon - p) >= 32U) {
+        free(cands);
+        fprintf(stderr, "Each candidate must be <id>:<distance>\n");
+        return 1;
+      }
+      char idbuf[32];
+      size_t idlen = (size_t)(colon - p);
+      memcpy(idbuf, p, idlen);
+      idbuf[idlen] = '\0';
+      uint64_t cid = 0ULL;
+      if (!parse_u64(idbuf, &cid)) {
+        free(cands);
+        fprintf(stderr, "Invalid candidate id: %s\n", idbuf);
+        return 1;
+      }
+      size_t dlen = tok_len - idlen - 1U;
+      if (dlen == 0U || dlen >= 64U) {
+        free(cands);
+        fprintf(stderr, "Invalid candidate distance\n");
+        return 1;
+      }
+      char dbuf[64];
+      memcpy(dbuf, colon + 1, dlen);
+      dbuf[dlen] = '\0';
+      float cd = 0.0f;
+      if (!parse_float_arg(dbuf, &cd)) {
+        free(cands);
+        fprintf(stderr, "Invalid candidate distance: %s\n", dbuf);
+        return 1;
+      }
+      if (cand_cnt == cand_cap) {
+        cand_cap *= 2U;
+        nbase_result_t *next = realloc(cands, (size_t)cand_cap * sizeof(nbase_result_t));
+        if (!next) {
+          free(cands);
+          return 1;
+        }
+        cands = next;
+      }
+      cands[cand_cnt].id = cid;
+      cands[cand_cnt].distance = cd;
+      cand_cnt++;
+      p = comma ? (comma + 1) : (p + tok_len);
+      if (comma && *p == '\0') {
+        free(cands);
+        fprintf(stderr, "Trailing comma in candidates\n");
+        return 1;
+      }
+    }
+
+    uint32_t k = cand_cnt;
+    float lambda = 0.5f;
+    const char *weights_json = NULL;
+    for (int i = 5; i < argc; i++) {
+      if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
+          free(cands);
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--lambda") == 0 && i + 1 < argc) {
+        if (!parse_float_arg(argv[++i], &lambda) || lambda < 0.0f || lambda > 1.0f) {
+          free(cands);
+          fprintf(stderr, "Invalid --lambda (must be in [0, 1])\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--weights") == 0 && i + 1 < argc) {
+        weights_json = argv[++i];
+      } else {
+        free(cands);
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *w_root = NULL;
+    nbase_rerank_weight_t *weights = NULL;
+    uint32_t weight_cnt = 0U;
+    if (weights_json != NULL) {
+      if (nbase_json_parse(weights_json, strlen(weights_json), &w_root) != NBASE_OK ||
+          w_root->type != NBASE_JSON_OBJECT || w_root->len > 1024U) {
+        nbase_json_free(w_root);
+        free(cands);
+        fprintf(stderr, "Invalid --weights JSON object\n");
+        return 1;
+      }
+      if (w_root->len > 0U) {
+        weights = calloc(w_root->len, sizeof(nbase_rerank_weight_t));
+        if (!weights) {
+          nbase_json_free(w_root);
+          free(cands);
+          return 1;
+        }
+        for (size_t wi = 0U; wi < w_root->len; wi++) {
+          const char *wk = w_root->keys[wi];
+          const nbase_json_t *wv = w_root->vals[wi];
+          if (!wk || wk[0] == '\0' || !wv || wv->type != NBASE_JSON_NUMBER || !isfinite(wv->num)) {
+            free(weights);
+            nbase_json_free(w_root);
+            free(cands);
+            fprintf(stderr, "Weights values must be finite numbers\n");
+            return 1;
+          }
+          weights[weight_cnt].key = wk;
+          weights[weight_cnt].weight = (float)wv->num;
+          weight_cnt++;
+        }
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(weights);
+      nbase_json_free(w_root);
+      free(cands);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    nbase_result_t *out_res = malloc((size_t)k * sizeof(nbase_result_t));
+    if (!out_res) {
+      nbase_close(db);
+      free(weights);
+      nbase_json_free(w_root);
+      free(cands);
+      return 1;
+    }
+    uint32_t out_n = 0U;
+    if (mcode == 2) {
+      st = nbase_rerank_weighted(db, cands, cand_cnt, weights, weight_cnt, k, out_res, &out_n);
+    } else if (mcode == 3) {
+      for (uint32_t i = 0U; i < cand_cnt; i++) {
+        if (!nbase_contains(db, cands[i].id)) {
+          st = NBASE_ERR_NOT_FOUND;
+          break;
+        }
+      }
+      if (st == NBASE_OK) {
+        qsort(cands, cand_cnt, sizeof(nbase_result_t), cmp_cli_res_asc);
+        out_n = (cand_cnt < k) ? cand_cnt : k;
+        if (out_n > 0U) {
+          memcpy(out_res, cands, (size_t)out_n * sizeof(nbase_result_t));
+        }
+      }
+    } else {
+      st = nbase_rerank_mmr(db, cands, cand_cnt, k, lambda, out_res, &out_n);
+    }
+
+    nbase_close(db);
+    free(weights);
+    nbase_json_free(w_root);
+    free(cands);
+    if (st != NBASE_OK) {
+      free(out_res);
+      fprintf(stderr, "rerank failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    printf("{\"method\":\"%s\",\"count\":%u,\"results\":[", method, out_n);
+    for (uint32_t i = 0U; i < out_n; i++) {
+      printf(
+          i == 0U ? "{\"id\":%llu,\"distance\":%.7g}" : ",{\"id\":%llu,\"distance\":%.7g}",
+          (unsigned long long)out_res[i].id,
+          (double)out_res[i].distance);
+    }
+    printf("]}\n");
+    free(out_res);
     return 0;
   }
 

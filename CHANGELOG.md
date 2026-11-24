@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-25
+
+Cosine & Manhattan 4-row AVX2+FMA batch unrolling, Clustered DB compaction & multi-threaded batch search, SIMD-batched graph relationship extraction fallback, HTTP batch existence / dedicated radius search endpoints, and CLI `search-meta` & `rerank` commands.
+
+### Added
+- **AVX2+FMA Cosine & Manhattan Batch Kernels + Graph Fallback (`src/distance.c`, `src/rerank.c`)**:
+  - Upgraded `cosine_batch_avx2` and added `manhattan_batch_avx2` with 4-row unrolled accumulation loops sharing query register loads across 4 candidates.
+  - Upgraded `nbase_extract_relationships_filtered` non-HNSW path to score contiguous candidate batches via `nbase_distance_batch`.
+- **Clustered Index Compaction & Multi-Threaded Batch Search (`src/clustered.c`, `include/nbase.h`, `include/nbase.hpp`)**:
+  - Added `nbase_clustered_compact` (reclaiming store tombstones, shrinking `slot_cluster` & empty cluster member buffers) and work-stealing `nbase_clustered_search_batch` under shared `pthread_rwlock_rdlock`.
+  - Updated C++17 `ClusteredDatabase::compact` and `ClusteredDatabase::search_batch`.
+- **HTTP/1.1 & CLI Tooling (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `POST /api/vectors/exists` (`ids` batch presence check) and `POST /api/search/radius` (dedicated radius search with metadata filters and include flags).
+  - Added `nbase-cli search-meta` and `nbase-cli rerank` (`diversity`, `weighted`, `standard`).
+- **Tests & Benchmarks (`tests/test_distance.c`, `tests/test_clustered.c`, `tests/test_rerank.c`, `tests/test_server.c`, `bench/bench_nbase.c`)**:
+  - Extended unrolled batch kernel parity tests to Cosine (with zero-norm candidate) and Manhattan, added Clustered `compact` + TSan `search_batch` tests, added no-HNSW relationship extraction test, added HTTP `/api/vectors/exists` & `/api/search/radius` tests, and added `Batch Manhattan` + Clustered `search_batch(4t)` benchmarks.
+
 ## [1.7.0] - 2026-11-24
 
 SIMD distance unrolling, LSH batching & multi-threaded query search, Clustered DB batch/radius parity, standalone `POST /api/rerank`, and CLI graph/distance tooling increment.

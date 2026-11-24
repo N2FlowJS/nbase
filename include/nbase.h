@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 7
+#define NBASE_VERSION_MINOR 8
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -397,6 +397,7 @@ nbase_status_t nbase_clustered_list_ids(
     uint32_t *out_count,
     uint64_t *out_total);
 nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clusters);
+nbase_status_t nbase_clustered_compact(nbase_clustered_t *cl);
 nbase_status_t nbase_clustered_search(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_clustered_search_filtered(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_clustered_search_radius(
@@ -410,6 +411,16 @@ nbase_status_t nbase_clustered_search_radius(
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count);
+nbase_status_t nbase_clustered_search_batch(
+    const nbase_clustered_t *cl,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_clustered_stats(const nbase_clustered_t *cl, nbase_clustered_stats_t *out_stats);
 nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *file_path);
 nbase_status_t nbase_clustered_load(const char *file_path, nbase_clustered_t **out_cl);

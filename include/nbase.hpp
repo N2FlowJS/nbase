@@ -1748,6 +1748,8 @@ class ClusteredDatabase {
     detail::check(nbase_clustered_recluster(ptr_, num_clusters));
   }
 
+  void compact() { detail::check(nbase_clustered_compact(ptr_)); }
+
   std::vector<nbase_result_t> search(
       const std::vector<float> &query, uint32_t k, uint32_t nprobe = 0U) const {
     std::vector<nbase_result_t> out(k);
@@ -1808,6 +1810,48 @@ class ClusteredDatabase {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_result_t>> search_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      uint32_t k,
+      uint32_t nprobe = 0U,
+      uint32_t num_threads = 0U,
+      std::vector<uint32_t> *out_counts = nullptr) const {
+    if (dim == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
+      throw Error(dim == 0U ? NBASE_ERR_INVALID_ARG : NBASE_ERR_DIM_MISMATCH);
+    }
+    if (query_count == 0U) {
+      detail::check(nbase_clustered_search_batch(
+          ptr_, nullptr, 0U, dim, k, nprobe, num_threads, nullptr, nullptr));
+      if (out_counts != nullptr) {
+        out_counts->clear();
+      }
+      return {};
+    }
+    std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_clustered_search_batch(
+        ptr_,
+        queries.data(),
+        query_count,
+        dim,
+        k,
+        nprobe,
+        num_threads,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    std::vector<std::vector<nbase_result_t>> res(query_count);
+    for (uint32_t q = 0U; q < query_count; q++) {
+      const nbase_result_t *row = flat.data() + static_cast<size_t>(q) * static_cast<size_t>(k);
+      res[q].assign(row, row + counts[q]);
+    }
+    if (out_counts != nullptr) {
+      *out_counts = counts;
+    }
+    return res;
   }
 
   nbase_clustered_stats_t stats() const {
