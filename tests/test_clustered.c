@@ -181,7 +181,109 @@ static void test_clustered_batch_filtered_and_concurrent(void) {
   nbase_clustered_destroy(cl);
 }
 
+static void *cl_list_reader_thread(void *raw) {
+  cl_mt_arg_t *arg = (cl_mt_arg_t *)raw;
+  uint64_t ids_buf[8];
+  for (int iter = 0; iter < 50; iter++) {
+    uint32_t got = 0U;
+    uint64_t total = 0ULL;
+    nbase_status_t st = nbase_clustered_list_ids(arg->cl, 0ULL, 8U, ids_buf, &got, &total);
+    if (st != NBASE_OK || got > 8U) {
+      arg->err = 1;
+      break;
+    }
+    for (uint32_t i = 1U; i < got; i++) {
+      if (ids_buf[i] <= ids_buf[i - 1U]) {
+        arg->err = 1;
+        break;
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_clustered_upsert_batch_and_list_ids(void) {
+  nbase_clustered_config_t cfg = nbase_clustered_config_default(3U);
+  cfg.target_cluster_size = 4U;
+  cfg.max_clusters = 16U;
+  cfg.distance_threshold = 0.5f;
+
+  nbase_clustered_t *cl = NULL;
+  ASSERT_STATUS(nbase_clustered_create(&cfg, &cl), NBASE_OK);
+
+  uint64_t init_ids[3] = {30ULL, 10ULL, 20ULL};
+  float init_vecs[9] = {
+      0.0f, 0.0f, 1.0f,
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_clustered_upsert_batch(cl, init_ids, init_vecs, 3U, 3U), NBASE_OK);
+
+  /* Overwrite 20 + add 40 and 5 in a single batch */
+  uint64_t up_ids[3] = {40ULL, 20ULL, 5ULL};
+  float up_vecs[9] = {
+      1.0f, 1.0f, 0.0f,
+      0.0f, 0.5f, 0.5f,
+      0.2f, 0.0f, 0.0f
+  };
+  ASSERT_STATUS(nbase_clustered_upsert_batch(cl, up_ids, up_vecs, 3U, 3U), NBASE_OK);
+
+  float got_v[3] = {0.0f, 0.0f, 0.0f};
+  ASSERT_STATUS(nbase_clustered_get(cl, 20ULL, got_v, 3U), NBASE_OK);
+  ASSERT_NEAR(got_v[1], 0.5, 1e-6, 0.0);
+
+  /* Reject duplicate ID within same batch without adding new ID 99 */
+  uint64_t dup_ids[3] = {99ULL, 40ULL, 99ULL};
+  ASSERT_STATUS(nbase_clustered_upsert_batch(cl, dup_ids, up_vecs, 3U, 3U), NBASE_ERR_ALREADY_EXISTS);
+  ASSERT_TRUE(!nbase_clustered_contains(cl, 99ULL));
+
+  /* Reject NaN vector atomically without adding ID 88 */
+  uint64_t nan_ids[2] = {88ULL, 89ULL};
+  float nan_vecs[6] = {1.0f, 0.0f, 0.0f, 0.0f, NAN, 0.0f};
+  ASSERT_STATUS(nbase_clustered_upsert_batch(cl, nan_ids, nan_vecs, 2U, 3U), NBASE_ERR_INVALID_VECTOR);
+  ASSERT_TRUE(!nbase_clustered_contains(cl, 88ULL));
+
+  /* Sorted paginated listing: [5, 10, 20, 30, 40] */
+  uint64_t page[3];
+  uint32_t cnt = 0U;
+  uint64_t total = 0ULL;
+  ASSERT_STATUS(nbase_clustered_list_ids(cl, 0ULL, 3U, page, &cnt, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 5ULL);
+  ASSERT_EQ_U64(cnt, 3ULL);
+  ASSERT_EQ_U64(page[0], 5ULL);
+  ASSERT_EQ_U64(page[1], 10ULL);
+  ASSERT_EQ_U64(page[2], 20ULL);
+
+  ASSERT_STATUS(nbase_clustered_list_ids(cl, 3ULL, 3U, page, &cnt, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 5ULL);
+  ASSERT_EQ_U64(cnt, 2ULL);
+  ASSERT_EQ_U64(page[0], 30ULL);
+  ASSERT_EQ_U64(page[1], 40ULL);
+
+  ASSERT_STATUS(nbase_clustered_list_ids(cl, 10ULL, 3U, page, &cnt, &total), NBASE_OK);
+  ASSERT_EQ_U64(total, 5ULL);
+  ASSERT_EQ_U64(cnt, 0ULL);
+
+  /* Concurrent list_ids reader + batch upsert writer under TSan */
+  pthread_t rthr;
+  cl_mt_arg_t rarg = {cl, 0};
+  ASSERT_TRUE(pthread_create(&rthr, NULL, cl_list_reader_thread, &rarg) == 0);
+  for (uint64_t step = 0ULL; step < 20ULL; step++) {
+    uint64_t bids[2] = {500ULL + step, 600ULL + (step % 4ULL)};
+    float bvecs[6] = {
+        (float)step * 0.1f, 0.2f, 0.3f,
+        0.4f, (float)step * 0.05f, 0.1f
+    };
+    ASSERT_STATUS(nbase_clustered_upsert_batch(cl, bids, bvecs, 2U, 3U), NBASE_OK);
+  }
+  pthread_join(rthr, NULL);
+  ASSERT_EQ_I64(rarg.err, 0);
+
+  nbase_clustered_destroy(cl);
+}
+
 void test_clustered_run(void) {
   RUN_TEST(test_clustered_online_assign_search_and_recluster);
   RUN_TEST(test_clustered_batch_filtered_and_concurrent);
+  RUN_TEST(test_clustered_upsert_batch_and_list_ids);
 }

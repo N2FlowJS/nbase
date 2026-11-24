@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-24
+
+Performance, batching, and API ergonomics increment introducing SIMD 1-to-N batch distance (`nbase_distance_batch`), faster K-Means++ training, deterministic multi-threaded PQ codebook training, clustered batch upsert & paginated ID listing, `POST /api/vectors/:id/similar` & `POST /api/distance`, and `nbase-cli find-similar` / `relationships`.
+
+### Added
+- **SIMD 1-to-N Batch Distance & Faster PQ/K-Means++ (`src/distance.c`, `src/kmeans.c`, `src/pq.c`)**:
+  - Added `nbase_distance_batch(metric, query, vectors, count, dim, out_distances)` across all 7 metrics with AVX2+FMA / NEON / scalar paths, once-per-query norm precomputation for Cosine, dedicated `dim == 8` AVX2 fast path, and 16-float loop unrolling.
+  - Upgraded `nbase_kmeans_train`, `nbase_pq_encode`, and `nbase_pq_build_lut` to evaluate squared L2 batches via `nbase_distance_batch`.
+  - Parallelized `nbase_pq_train` across independent subvectors (`pthread_create` work-stealing with up to 4 threads when `num_subvectors > 1 && count * num_centroids >= 16384`), preserving bit-for-bit deterministic codebooks.
+- **Clustered Index Batch Upsert & ID Pagination (`src/clustered.c`)**:
+  - Added `nbase_clustered_upsert_batch` with upfront vector finiteness and duplicate-ID validation.
+  - Added `nbase_clustered_list_ids` returning sorted active vector IDs (`offset`, `limit`, `out_total`).
+- **HTTP/1.1 Server, CLI & C++17 Wrapper (`src/http_server.c`, `apps/nbase_cli.c`, `include/nbase.hpp`)**:
+  - Added `POST /api/vectors/:id/similar` supporting `k`, `filters`, `metric`, `mode`, `efSearch`, `skipCache`, and `include*`.
+  - Added `POST /api/distance` supporting 1-to-N distance calculation (`metric`, `query`, `vectors`).
+  - Added `nbase-cli find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--filter <json>]` and `relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]`.
+  - Updated `include/nbase.hpp` (`nbase::distance_batch`, `ClusteredDatabase::upsert_batch`, `ClusteredDatabase::list_ids`).
+
 ## [1.4.0] - 2026-11-24
 
 Performance, thread-safety, and API completeness increment adding filtered vector counting (`nbase_count` / `nbase_pdb_count`), SIMD-batched SQ8 & BQ distance kernels, thread-safe SIMD-accelerated LSH & IVF-PQ indexes, full HTTP `/api/vectors/count` and `/api/vectors/:id/{metadata,text}` REST methods, CLI `count`/`get-text`/`delete-meta`/`delete-text` commands, deterministic JSON fuzz coverage, and C++17 `nbase::Sq8`/`Bq`/`Lsh` batch wrappers.

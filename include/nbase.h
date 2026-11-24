@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 4
+#define NBASE_VERSION_MINOR 5
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -174,6 +174,13 @@ nbase_search_opts_t nbase_search_opts_default(void);
 
 float nbase_distance(nbase_metric_t metric, const float *a, const float *b, uint32_t dim);
 float nbase_distance_scalar(nbase_metric_t metric, const float *a, const float *b, uint32_t dim);
+nbase_status_t nbase_distance_batch(
+    nbase_metric_t metric,
+    const float *query,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances);
 
 /* --- Embedded Single-Partition DB --- */
 
@@ -365,10 +372,23 @@ void nbase_clustered_destroy(nbase_clustered_t *cl);
 nbase_status_t nbase_clustered_add(nbase_clustered_t *cl, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_clustered_add_batch(nbase_clustered_t *cl, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
 nbase_status_t nbase_clustered_upsert(nbase_clustered_t *cl, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_clustered_upsert_batch(
+    nbase_clustered_t *cl,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim);
 nbase_status_t nbase_clustered_delete(nbase_clustered_t *cl, uint64_t id);
 nbase_status_t nbase_clustered_delete_batch(nbase_clustered_t *cl, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_clustered_get(const nbase_clustered_t *cl, uint64_t id, float *out_vec, uint32_t dim);
 bool nbase_clustered_contains(const nbase_clustered_t *cl, uint64_t id);
+nbase_status_t nbase_clustered_list_ids(
+    const nbase_clustered_t *cl,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total);
 nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clusters);
 nbase_status_t nbase_clustered_search(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_clustered_search_filtered(const nbase_clustered_t *cl, const float *query, uint32_t dim, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);

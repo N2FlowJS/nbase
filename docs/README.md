@@ -1,4 +1,4 @@
-# NBase (`libnbase`) — Pure C11 / C++17 Vector, Graph & Full-Text Engine (`v1.4.0`)
+# NBase (`libnbase`) — Pure C11 / C++17 Vector, Graph & Full-Text Engine (`v1.5.0`)
 
 NBase is a standalone, zero-dependency, embedded vector, metadata, graph, and full-text database written strictly in ISO C11 (with a header-only C++17 RAII wrapper [`include/nbase.hpp`](../include/nbase.hpp)), paired with a POSIX HTTP/1.1 Keep-Alive REST daemon (`nbased`) and streaming NDJSON CLI (`nbase-cli`).
 

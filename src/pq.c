@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -14,6 +16,65 @@ struct nbase_pq {
   uint32_t num_centroids;
   float *codebooks;
 };
+
+typedef struct pq_train_ctx {
+  const float *vectors;
+  uint32_t count;
+  uint32_t dim;
+  uint32_t num_subvectors;
+  uint32_t sub_dim;
+  uint32_t num_centroids;
+  uint32_t max_iters;
+  uint64_t seed;
+  float *codebooks;
+  atomic_uint next_m;
+  atomic_int first_err;
+} pq_train_ctx_t;
+
+static void *pq_train_worker(void *raw) {
+  pq_train_ctx_t *ctx = (pq_train_ctx_t *)raw;
+  float *slice = malloc((size_t)ctx->count * (size_t)ctx->sub_dim * sizeof(float));
+  if (!slice) {
+    int expected = (int)NBASE_OK;
+    (void)atomic_compare_exchange_strong(&ctx->first_err, &expected, (int)NBASE_ERR_NOMEM);
+    return NULL;
+  }
+
+  while (true) {
+    if (atomic_load_explicit(&ctx->first_err, memory_order_acquire) != (int)NBASE_OK) {
+      break;
+    }
+    uint32_t m = atomic_fetch_add_explicit(&ctx->next_m, 1U, memory_order_relaxed);
+    if (m >= ctx->num_subvectors) {
+      break;
+    }
+    uint32_t offset = m * ctx->sub_dim;
+    for (uint32_t i = 0U; i < ctx->count; i++) {
+      memcpy(
+          slice + (size_t)i * (size_t)ctx->sub_dim,
+          ctx->vectors + (size_t)i * (size_t)ctx->dim + offset,
+          (size_t)ctx->sub_dim * sizeof(float));
+    }
+    float *dst_cb = ctx->codebooks + (size_t)m * (size_t)ctx->num_centroids * (size_t)ctx->sub_dim;
+    nbase_status_t st = nbase_kmeans_train(
+        slice,
+        ctx->count,
+        ctx->sub_dim,
+        ctx->num_centroids,
+        ctx->max_iters,
+        ctx->seed + (uint64_t)m,
+        dst_cb,
+        NULL);
+    if (st != NBASE_OK) {
+      int expected = (int)NBASE_OK;
+      (void)atomic_compare_exchange_strong(&ctx->first_err, &expected, (int)st);
+      break;
+    }
+  }
+
+  free(slice);
+  return NULL;
+}
 
 nbase_status_t nbase_pq_train(
     const float *vectors,
@@ -29,7 +90,7 @@ nbase_status_t nbase_pq_train(
   }
   uint32_t sub_dim = dim / num_subvectors;
   size_t codebook_floats = (size_t)num_subvectors * (size_t)num_centroids * (size_t)sub_dim;
-  if (codebook_floats > SIZE_MAX / sizeof(float) || (size_t)count > SIZE_MAX / (size_t)sub_dim) {
+  if (codebook_floats > SIZE_MAX / sizeof(float) || (size_t)count > SIZE_MAX / ((size_t)sub_dim * sizeof(float))) {
     return NBASE_ERR_NOMEM;
   }
 
@@ -42,28 +103,47 @@ nbase_status_t nbase_pq_train(
   pq->sub_dim = sub_dim;
   pq->num_centroids = num_centroids;
   pq->codebooks = malloc(codebook_floats * sizeof(float));
-  float *slice = malloc((size_t)count * (size_t)sub_dim * sizeof(float));
-  if (!pq->codebooks || !slice) {
-    free(slice);
+  if (!pq->codebooks) {
     nbase_pq_destroy(pq);
     return NBASE_ERR_NOMEM;
   }
 
-  for (uint32_t m = 0U; m < num_subvectors; m++) {
-    uint32_t offset = m * sub_dim;
-    for (uint32_t i = 0U; i < count; i++) {
-      memcpy(slice + (size_t)i * (size_t)sub_dim, vectors + (size_t)i * (size_t)dim + offset, (size_t)sub_dim * sizeof(float));
-    }
-    float *dst_cb = pq->codebooks + (size_t)m * (size_t)num_centroids * (size_t)sub_dim;
-    nbase_status_t st = nbase_kmeans_train(slice, count, sub_dim, num_centroids, max_iters, seed + (uint64_t)m, dst_cb, NULL);
-    if (st != NBASE_OK) {
-      free(slice);
-      nbase_pq_destroy(pq);
-      return st;
-    }
+  pq_train_ctx_t ctx;
+  ctx.vectors = vectors;
+  ctx.count = count;
+  ctx.dim = dim;
+  ctx.num_subvectors = num_subvectors;
+  ctx.sub_dim = sub_dim;
+  ctx.num_centroids = num_centroids;
+  ctx.max_iters = max_iters;
+  ctx.seed = seed;
+  ctx.codebooks = pq->codebooks;
+  atomic_init(&ctx.next_m, 0U);
+  atomic_init(&ctx.first_err, (int)NBASE_OK);
+
+  uint32_t nthreads = 1U;
+  if (num_subvectors > 1U && (uint64_t)count * (uint64_t)num_centroids >= 16384ULL) {
+    nthreads = (num_subvectors < 4U) ? num_subvectors : 4U;
   }
 
-  free(slice);
+  pthread_t workers[3];
+  uint32_t spawned = 0U;
+  for (uint32_t t = 1U; t < nthreads; t++) {
+    if (pthread_create(&workers[spawned], NULL, pq_train_worker, &ctx) == 0) {
+      spawned++;
+    }
+  }
+  (void)pq_train_worker(&ctx);
+  for (uint32_t t = 0U; t < spawned; t++) {
+    pthread_join(workers[t], NULL);
+  }
+
+  nbase_status_t st = (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
+  if (st != NBASE_OK) {
+    nbase_pq_destroy(pq);
+    return st;
+  }
+
   *out_pq = pq;
   return NBASE_OK;
 }
@@ -101,19 +181,23 @@ nbase_status_t nbase_pq_encode(const nbase_pq_t *pq, const float *vectors, uint3
     }
   }
 
-  nbase_dist_fn sq_l2 = nbase_get_distance_fn(NBASE_METRIC_SQUARED_EUCLIDEAN);
+  float dists[256] = {0.0f};
   for (uint32_t i = 0U; i < count; i++) {
     const float *vec = vectors + (size_t)i * (size_t)pq->dim;
     uint8_t *code = out_codes + (size_t)i * (size_t)pq->num_subvectors;
     for (uint32_t m = 0U; m < pq->num_subvectors; m++) {
       const float *sub = vec + (size_t)m * (size_t)pq->sub_dim;
       const float *cb = pq->codebooks + (size_t)m * (size_t)pq->num_centroids * (size_t)pq->sub_dim;
+      nbase_status_t st = nbase_distance_batch(
+          NBASE_METRIC_SQUARED_EUCLIDEAN, sub, cb, pq->num_centroids, pq->sub_dim, dists);
+      if (st != NBASE_OK) {
+        return st;
+      }
       uint32_t best_c = 0U;
       float best_d = FLT_MAX;
       for (uint32_t c = 0U; c < pq->num_centroids; c++) {
-        float d = sq_l2(sub, cb + (size_t)c * (size_t)pq->sub_dim, pq->sub_dim);
-        if (d < best_d) {
-          best_d = d;
+        if (dists[c] < best_d) {
+          best_d = dists[c];
           best_c = c;
         }
       }
@@ -149,13 +233,14 @@ nbase_status_t nbase_pq_build_lut(const nbase_pq_t *pq, const float *query, floa
   if (!nbase_vec_is_finite(query, pq->dim)) {
     return NBASE_ERR_INVALID_VECTOR;
   }
-  nbase_dist_fn sq_l2 = nbase_get_distance_fn(NBASE_METRIC_SQUARED_EUCLIDEAN);
   for (uint32_t m = 0U; m < pq->num_subvectors; m++) {
     const float *q_sub = query + (size_t)m * (size_t)pq->sub_dim;
     const float *cb = pq->codebooks + (size_t)m * (size_t)pq->num_centroids * (size_t)pq->sub_dim;
     float *lut_row = out_lut + (size_t)m * (size_t)pq->num_centroids;
-    for (uint32_t c = 0U; c < pq->num_centroids; c++) {
-      lut_row[c] = sq_l2(q_sub, cb + (size_t)c * (size_t)pq->sub_dim, pq->sub_dim);
+    nbase_status_t st = nbase_distance_batch(
+        NBASE_METRIC_SQUARED_EUCLIDEAN, q_sub, cb, pq->num_centroids, pq->sub_dim, lut_row);
+    if (st != NBASE_OK) {
+      return st;
     }
   }
   return NBASE_OK;

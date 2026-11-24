@@ -552,6 +552,64 @@ nbase_status_t nbase_clustered_upsert(
   return st;
 }
 
+nbase_status_t nbase_clustered_upsert_batch(
+    nbase_clustered_t *cl,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim) {
+  if (!cl || (count > 0U && (!ids || !vectors))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&cl->rwlock);
+  if (dim != cl->cfg.dim) {
+    pthread_rwlock_unlock(&cl->rwlock);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)dim, dim)) {
+      pthread_rwlock_unlock(&cl->rwlock);
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+
+  uint64_t *sorted = malloc((size_t)count * sizeof(uint64_t));
+  if (!sorted) {
+    pthread_rwlock_unlock(&cl->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+  memcpy(sorted, ids, (size_t)count * sizeof(uint64_t));
+  qsort(sorted, count, sizeof(uint64_t), cmp_cl_u64_asc);
+  for (uint32_t i = 1U; i < count; i++) {
+    if (sorted[i] == sorted[i - 1U]) {
+      free(sorted);
+      pthread_rwlock_unlock(&cl->rwlock);
+      return NBASE_ERR_ALREADY_EXISTS;
+    }
+  }
+  free(sorted);
+
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = 0U; i < count; i++) {
+    if (nbase_store_find_slot(cl->store, ids[i], NULL)) {
+      st = cl_delete_unlocked(cl, ids[i]);
+      if (st != NBASE_OK) {
+        break;
+      }
+    }
+    st = cl_add_unlocked(cl, ids[i], vectors + (size_t)i * (size_t)dim, dim);
+    if (st != NBASE_OK) {
+      break;
+    }
+  }
+  pthread_rwlock_unlock(&cl->rwlock);
+  return st;
+}
+
 nbase_status_t nbase_clustered_get(
     const nbase_clustered_t *cl,
     uint64_t id,
@@ -591,6 +649,60 @@ bool nbase_clustered_contains(const nbase_clustered_t *cl, uint64_t id) {
   bool found = nbase_store_find_slot(cl->store, id, NULL);
   pthread_rwlock_unlock(&mcl->rwlock);
   return found;
+}
+
+nbase_status_t nbase_clustered_list_ids(
+    const nbase_clustered_t *cl,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total) {
+  if (!cl || !out_count || (limit > 0U && !out_ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  if (out_total) {
+    *out_total = 0ULL;
+  }
+
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+  uint64_t active = cl->store->active_count;
+  if (out_total) {
+    *out_total = active;
+  }
+  if (active == 0ULL || limit == 0U || offset >= active) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    return NBASE_OK;
+  }
+  if (active > (uint64_t)SIZE_MAX / sizeof(uint64_t)) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+  uint64_t *all = malloc((size_t)active * sizeof(uint64_t));
+  if (!all) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    return NBASE_ERR_NOMEM;
+  }
+  size_t n = 0U;
+  for (uint32_t s = 0U; s < cl->store->slot_count && n < (size_t)active; s++) {
+    if (cl->store->slot_flags[s] == NBASE_SLOT_ACTIVE) {
+      all[n++] = cl->store->ids[s];
+    }
+  }
+  pthread_rwlock_unlock(&mcl->rwlock);
+
+  qsort(all, n, sizeof(uint64_t), cmp_cl_u64_asc);
+  size_t start = (size_t)offset;
+  if (start < n) {
+    size_t rem = n - start;
+    size_t take = ((size_t)limit < rem) ? (size_t)limit : rem;
+    memcpy(out_ids, all + start, take * sizeof(uint64_t));
+    *out_count = (uint32_t)take;
+  }
+  free(all);
+  return NBASE_OK;
 }
 
 nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clusters) {

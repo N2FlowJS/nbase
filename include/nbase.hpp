@@ -31,6 +31,29 @@ inline void check(nbase_status_t st) {
 }
 }  // namespace detail
 
+inline std::vector<float> distance_batch(
+    nbase_metric_t metric,
+    const std::vector<float> &query,
+    const std::vector<float> &vectors) {
+  if (query.empty()) {
+    throw Error(NBASE_ERR_INVALID_ARG);
+  }
+  uint32_t dim = static_cast<uint32_t>(query.size());
+  if (vectors.size() % static_cast<size_t>(dim) != 0U) {
+    throw Error(NBASE_ERR_DIM_MISMATCH);
+  }
+  uint32_t count = static_cast<uint32_t>(vectors.size() / static_cast<size_t>(dim));
+  std::vector<float> out(count);
+  detail::check(nbase_distance_batch(
+      metric,
+      query.data(),
+      vectors.empty() ? nullptr : vectors.data(),
+      count,
+      dim,
+      out.empty() ? nullptr : out.data()));
+  return out;
+}
+
 class Database {
  public:
   Database() noexcept = default;
@@ -1553,6 +1576,18 @@ class ClusteredDatabase {
     upsert(id, vec.data(), static_cast<uint32_t>(vec.size()));
   }
 
+  void upsert_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<float> &vectors,
+      uint32_t dim) {
+    detail::check(nbase_clustered_upsert_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        vectors.empty() ? nullptr : vectors.data(),
+        static_cast<uint32_t>(ids.size()),
+        dim));
+  }
+
   void remove(uint64_t id) { detail::check(nbase_clustered_delete(ptr_, id)); }
 
   uint32_t delete_batch(const std::vector<uint64_t> &ids) {
@@ -1570,6 +1605,16 @@ class ClusteredDatabase {
 
   bool contains(uint64_t id) const noexcept {
     return nbase_clustered_contains(ptr_, id);
+  }
+
+  std::vector<uint64_t> list_ids(
+      uint64_t offset, uint32_t limit, uint64_t *out_total = nullptr) const {
+    std::vector<uint64_t> out(limit);
+    uint32_t got = 0U;
+    detail::check(nbase_clustered_list_ids(
+        ptr_, offset, limit, limit > 0U ? out.data() : nullptr, &got, out_total));
+    out.resize(got);
+    return out;
   }
 
   void recluster(uint32_t num_clusters = 0U) {

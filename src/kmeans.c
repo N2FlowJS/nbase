@@ -25,17 +25,18 @@ nbase_status_t nbase_kmeans_train(
     }
   }
 
-  nbase_dist_fn sq_l2 = nbase_get_distance_fn(NBASE_METRIC_SQUARED_EUCLIDEAN);
   uint64_t rng = (seed != 0ULL) ? seed : 42ULL;
 
   float *min_dist_sq = malloc((size_t)count * sizeof(float));
+  float *dist_buf = malloc((size_t)count * sizeof(float));
   uint32_t *assign = malloc((size_t)count * sizeof(uint32_t));
   float *point_err = malloc((size_t)count * sizeof(float));
   double *sums = malloc((size_t)k * (size_t)dim * sizeof(double));
   uint32_t *counts = malloc((size_t)k * sizeof(uint32_t));
 
-  if (!min_dist_sq || !assign || !point_err || !sums || !counts) {
+  if (!min_dist_sq || !dist_buf || !assign || !point_err || !sums || !counts) {
     free(min_dist_sq);
+    free(dist_buf);
     free(assign);
     free(point_err);
     free(sums);
@@ -46,8 +47,16 @@ nbase_status_t nbase_kmeans_train(
   /* K-Means++ initialization */
   uint32_t first = (uint32_t)(nbase_rng_next_u64(&rng) % (uint64_t)count);
   memcpy(out_centroids, vectors + (size_t)first * (size_t)dim, (size_t)dim * sizeof(float));
-  for (uint32_t i = 0U; i < count; i++) {
-    min_dist_sq[i] = sq_l2(vectors + (size_t)i * (size_t)dim, out_centroids, dim);
+  nbase_status_t st = nbase_distance_batch(
+      NBASE_METRIC_SQUARED_EUCLIDEAN, out_centroids, vectors, count, dim, min_dist_sq);
+  if (st != NBASE_OK) {
+    free(min_dist_sq);
+    free(dist_buf);
+    free(assign);
+    free(point_err);
+    free(sums);
+    free(counts);
+    return st;
   }
 
   for (uint32_t c = 1U; c < k; c++) {
@@ -74,10 +83,20 @@ nbase_status_t nbase_kmeans_train(
     float *dst_centroid = out_centroids + (size_t)c * (size_t)dim;
     memcpy(dst_centroid, vectors + (size_t)chosen * (size_t)dim, (size_t)dim * sizeof(float));
 
+    st = nbase_distance_batch(
+        NBASE_METRIC_SQUARED_EUCLIDEAN, dst_centroid, vectors, count, dim, dist_buf);
+    if (st != NBASE_OK) {
+      free(min_dist_sq);
+      free(dist_buf);
+      free(assign);
+      free(point_err);
+      free(sums);
+      free(counts);
+      return st;
+    }
     for (uint32_t i = 0U; i < count; i++) {
-      float d = sq_l2(vectors + (size_t)i * (size_t)dim, dst_centroid, dim);
-      if (d < min_dist_sq[i]) {
-        min_dist_sq[i] = d;
+      if (dist_buf[i] < min_dist_sq[i]) {
+        min_dist_sq[i] = dist_buf[i];
       }
     }
   }
@@ -94,12 +113,22 @@ nbase_status_t nbase_kmeans_train(
 
     for (uint32_t i = 0U; i < count; i++) {
       const float *vec = vectors + (size_t)i * (size_t)dim;
+      st = nbase_distance_batch(
+          NBASE_METRIC_SQUARED_EUCLIDEAN, vec, out_centroids, k, dim, dist_buf);
+      if (st != NBASE_OK) {
+        free(min_dist_sq);
+        free(dist_buf);
+        free(assign);
+        free(point_err);
+        free(sums);
+        free(counts);
+        return st;
+      }
       uint32_t best_c = 0U;
       float best_d = FLT_MAX;
       for (uint32_t c = 0U; c < k; c++) {
-        float d = sq_l2(vec, out_centroids + (size_t)c * (size_t)dim, dim);
-        if (d < best_d) {
-          best_d = d;
+        if (dist_buf[c] < best_d) {
+          best_d = dist_buf[c];
           best_c = c;
         }
       }
@@ -175,6 +204,7 @@ nbase_status_t nbase_kmeans_train(
   }
 
   free(min_dist_sq);
+  free(dist_buf);
   free(assign);
   free(point_err);
   free(sums);

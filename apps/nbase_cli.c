@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,8 @@ static void print_usage(const char *prog) {
       "  get-text <dir> <id>\n"
       "  delete-text <dir> <id>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--max-distance <D>]\n"
+      "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--filter <json>]\n"
+      "  relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  search-text <dir> <query> [--k <K>]\n"
       "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>]\n"
       "  rebuild <dir> [--threads <T>]\n"
@@ -1318,6 +1321,161 @@ int main(int argc, char **argv) {
       printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].distance);
     }
     free(res);
+    return 0;
+  }
+
+  if (strcmp(cmd, "find-similar") == 0) {
+    if (argc < 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t id = 0ULL;
+    if (!parse_u64(argv[3], &id)) {
+      fprintf(stderr, "Invalid uint64 id: %s\n", argv[3]);
+      return 1;
+    }
+    uint32_t k = 10U;
+    nbase_search_opts_t opts = nbase_search_opts_default();
+    const char *flt_json = NULL;
+    for (int i = 4; i < argc; i++) {
+      if (strcmp(argv[i], "--exact") == 0) {
+        opts.mode = NBASE_SEARCH_EXACT;
+      } else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--ef") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &opts.ef_search) || opts.ef_search == 0U) {
+          fprintf(stderr, "Invalid --ef\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+      if (flt.count > 0U) {
+        opts.meta_filter = &flt;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    nbase_result_t *res = malloc((size_t)k * sizeof(nbase_result_t));
+    if (!res) {
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      return 1;
+    }
+    uint32_t got = 0U;
+    st = nbase_find_similar(db, id, k, &opts, res, &got);
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+    if (st != NBASE_OK) {
+      free(res);
+      fprintf(stderr, "find-similar failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    for (uint32_t i = 0U; i < got; i++) {
+      printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].distance);
+    }
+    free(res);
+    return 0;
+  }
+
+  if (strcmp(cmd, "relationships") == 0) {
+    if (argc < 3) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint32_t k = 5U;
+    float max_dist = FLT_MAX;
+    const char *flt_json = NULL;
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 1000U) {
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--max-distance") == 0 && i + 1 < argc) {
+        if (!parse_float_arg(argv[++i], &max_dist)) {
+          fprintf(stderr, "Invalid --max-distance\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    nbase_edge_t *edges = NULL;
+    uint64_t edge_cnt = 0ULL;
+    st = nbase_extract_relationships_filtered(
+        db, k, max_dist, flt.count > 0U ? &flt : NULL, &edges, &edge_cnt);
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "relationships failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"count\":%llu,\"edges\":[", (unsigned long long)edge_cnt);
+    for (uint64_t i = 0ULL; i < edge_cnt; i++) {
+      printf(
+          i == 0ULL ? "{\"src\":%llu,\"dst\":%llu,\"weight\":%.7g}"
+                    : ",{\"src\":%llu,\"dst\":%llu,\"weight\":%.7g}",
+          (unsigned long long)edges[i].src_id,
+          (unsigned long long)edges[i].dst_id,
+          (double)edges[i].weight);
+    }
+    printf("]}\n");
+    nbase_free_edges(edges);
     return 0;
   }
 

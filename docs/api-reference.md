@@ -14,13 +14,14 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 
 ## Version, Diagnostics & Distance
 
-- `const char *nbase_version(void);` -> `"1.4.0"`
+- `const char *nbase_version(void);` -> `"1.5.0"`
 - `const char *nbase_strerror(nbase_status_t status);`
 - `const char *nbase_simd_backend(void);` -> `"avx2+fma"`, `"neon"`, or `"scalar"`
 - `nbase_config_t nbase_config_default(uint32_t dim);` (`initial_capacity=64`, `enable_hnsw=true`, `hnsw_m=16`, `hnsw_ef_construction=200`, `hnsw_ef_search=50`, `cache_capacity=0`)
 - `nbase_search_opts_t nbase_search_opts_default(void);`
 - `float nbase_distance(nbase_metric_t metric, const float *a, const float *b, uint32_t dim);`
 - `float nbase_distance_scalar(nbase_metric_t metric, const float *a, const float *b, uint32_t dim);`
+- `nbase_status_t nbase_distance_batch(nbase_metric_t metric, const float *query, const float *vectors, uint32_t count, uint32_t dim, float *out_distances);`
 
 ## Single-Partition Embedded DB (`nbase_db_t`)
 
@@ -59,7 +60,7 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 ## Dynamic Online Clustered DB (`nbase_clustered_t`, `.nbcl`)
 
 - `nbase_clustered_config_default`, `nbase_clustered_create`, `nbase_clustered_destroy`
-- `nbase_clustered_add`, `nbase_clustered_add_batch`, `nbase_clustered_upsert`, `nbase_clustered_delete`, `nbase_clustered_delete_batch`, `nbase_clustered_get`, `nbase_clustered_contains`
+- `nbase_clustered_add`, `nbase_clustered_add_batch`, `nbase_clustered_upsert`, `nbase_clustered_upsert_batch`, `nbase_clustered_delete`, `nbase_clustered_delete_batch`, `nbase_clustered_get`, `nbase_clustered_contains`, `nbase_clustered_list_ids`
 - `nbase_clustered_recluster`, `nbase_clustered_search`, `nbase_clustered_search_filtered`, `nbase_clustered_stats` (includes `memory_bytes`), `nbase_clustered_save`, `nbase_clustered_load`
 
 ## Quantization, Approximate Indexes & Standalone BM25
@@ -81,4 +82,5 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 All handles wrap C ownership with move semantics, RAII cleanup, and `nbase::Error` exceptions:
 - `nbase::Database` (`create`, `open`, `open_mmap`, `open_wal`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `count`, `list_ids`, `set_meta`, `set_meta_batch`, `update_meta`, `update_meta_batch`, `delete_meta`, `query_meta`, `set_text`, `set_text_batch`, `get_text`, `delete_text`, `search`, `search_radius`, `find_similar`, `search_text`, `search_hybrid`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `extract_communities`, `compact`, `rebuild_hnsw_mt`, `cache_configure`, `cache_clear`, `stats`)
 - `nbase::PartitionedDatabase` (`open`, `save`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `count`, `list_ids`, `set_meta`, `set_meta_batch`, `update_meta`, `update_meta_batch`, `delete_meta`, `query_meta`, `set_text`, `set_text_batch`, `get_text`, `delete_text`, `search`, `search_radius`, `search_batch`, `search_text`, `search_hybrid`, `find_similar`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `compact`, `rebuild_hnsw_mt`, `stats`)
-- `nbase::ClusteredDatabase`, `nbase::Pq` (`adc_distance_batch`), `nbase::IvfPq` (`search_filtered`, `stats`), `nbase::Lsh` (`add_batch`, `contains`, `search_filtered`, `stats`), `nbase::Sq8` (`l2_sq_symmetric`, `l2_sq_asymmetric_batch`), `nbase::Bq` (`hamming_batch`), `nbase::Bm25`, `nbase::HttpServer`
+- `nbase::distance_batch(metric, query, vectors)`
+- `nbase::ClusteredDatabase` (`upsert_batch`, `list_ids`), `nbase::Pq` (`adc_distance_batch`), `nbase::IvfPq` (`search_filtered`, `stats`), `nbase::Lsh` (`add_batch`, `contains`, `search_filtered`, `stats`), `nbase::Sq8` (`l2_sq_symmetric`, `l2_sq_asymmetric_batch`), `nbase::Bq` (`hamming_batch`), `nbase::Bm25`, `nbase::HttpServer`

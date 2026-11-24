@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(libnbase VERSION 1.4.0 LANGUAGES C)
+project(libnbase VERSION 1.5.0 LANGUAGES C)
 
 include(GNUInstallDirs)
 

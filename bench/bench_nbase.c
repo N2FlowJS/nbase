@@ -90,6 +90,49 @@ static void bench_distance_metric(const char *label, nbase_metric_t metric, uint
   free(b);
 }
 
+static void bench_distance_batch_metric(const char *label, nbase_metric_t metric, uint32_t dim, uint32_t count, uint32_t rounds) {
+  float *q = malloc((size_t)dim * sizeof(float));
+  float *vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+  float *dists = malloc((size_t)count * sizeof(float));
+  if (!q || !vecs || !dists) {
+    free(q);
+    free(vecs);
+    free(dists);
+    return;
+  }
+  fill_vectors(q, 1U, dim, 33ULL);
+  fill_vectors(vecs, count, dim, 44ULL);
+
+  volatile float sink = 0.0f;
+  uint64_t t0 = now_ns();
+  for (uint32_t r = 0U; r < rounds; r++) {
+    for (uint32_t i = 0U; i < count; i++) {
+      dists[i] = nbase_distance(metric, q, vecs + (size_t)i * (size_t)dim, dim);
+    }
+    sink += dists[r % count];
+  }
+  uint64_t t1 = now_ns();
+
+  uint64_t t2 = now_ns();
+  for (uint32_t r = 0U; r < rounds; r++) {
+    (void)nbase_distance_batch(metric, q, vecs, count, dim, dists);
+    sink += dists[r % count];
+  }
+  uint64_t t3 = now_ns();
+  (void)sink;
+
+  double single_us = (double)(t1 - t0) / (double)rounds / 1e3;
+  double batch_us = (double)(t3 - t2) / (double)rounds / 1e3;
+  double speedup = (batch_us > 0.0) ? (single_us / batch_us) : 1.0;
+
+  printf("  %-18s dim=%-4u  1-by-1(N=%u)=%6.2f us  batch=%6.2f us  speedup=%.2fx\n",
+         label, dim, count, single_us, batch_us, speedup);
+
+  free(dists);
+  free(vecs);
+  free(q);
+}
+
 static void bench_hnsw_dataset(uint32_t count, uint32_t dim, uint32_t nqueries) {
   const uint32_t k = 10U;
   float *vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
@@ -624,6 +667,9 @@ int main(void) {
   bench_distance_metric("Cosine", NBASE_METRIC_COSINE, 128U, 2000000U);
   bench_distance_metric("Euclidean", NBASE_METRIC_EUCLIDEAN, 1536U, 250000U);
   bench_distance_metric("Cosine", NBASE_METRIC_COSINE, 1536U, 250000U);
+  bench_distance_batch_metric("Batch SqL2", NBASE_METRIC_SQUARED_EUCLIDEAN, 8U, 10000U, 200U);
+  bench_distance_batch_metric("Batch SqL2", NBASE_METRIC_SQUARED_EUCLIDEAN, 128U, 10000U, 200U);
+  bench_distance_batch_metric("Batch Cosine", NBASE_METRIC_COSINE, 128U, 10000U, 200U);
 
   printf("\n[HNSW Index Build & Search (M=16, efConstruction=200, efSearch=100)]\n");
   bench_hnsw_dataset(2000U, 128U, 20U);

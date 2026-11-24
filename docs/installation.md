@@ -1,4 +1,4 @@
-# NBase Installation Guide (Pure C11 / C++17 — v1.4.0)
+# NBase Installation Guide (Pure C11 / C++17 — v1.5.0)
 
 ## Requirements
 
@@ -21,7 +21,7 @@ sudo ldconfig
 ```
 
 Installed artifacts:
-- Libraries: `libnbase.a`, `libnbase.so.1.4.0` (`libnbase.so.1`, `libnbase.so`)
+- Libraries: `libnbase.a`, `libnbase.so.1.5.0` (`libnbase.so.1`, `libnbase.so`)
 - Headers: `nbase.h` (C11), `nbase.hpp` (C++17 header-only RAII wrapper)
 - Binaries: `nbased` (HTTP/1.1 REST daemon), `nbase-cli` (offline/NDJSON CLI tool)
 - Package config: `libnbase.pc`

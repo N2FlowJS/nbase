@@ -240,8 +240,49 @@ static void test_pq_adc_distance_batch(void) {
   free(vecs);
 }
 
+static void test_pq_train_parallel_determinism_tsan(void) {
+  const uint32_t dim = 32U;
+  const uint32_t m = 8U;
+  const uint32_t ks = 64U;
+  const uint32_t count = 400U; /* count * ks = 25600 >= 16384 triggers MT PQ subvector training */
+
+  float *vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+  uint8_t *codes1 = malloc((size_t)count * (size_t)m);
+  uint8_t *codes2 = malloc((size_t)count * (size_t)m);
+  float *lut1 = malloc((size_t)m * (size_t)ks * sizeof(float));
+  float *lut2 = malloc((size_t)m * (size_t)ks * sizeof(float));
+  ASSERT_TRUE(vecs != NULL && codes1 != NULL && codes2 != NULL && lut1 != NULL && lut2 != NULL);
+
+  test_fill_vectors(vecs, count, dim, 5150ULL);
+
+  nbase_pq_t *pq1 = NULL;
+  nbase_pq_t *pq2 = NULL;
+  ASSERT_STATUS(nbase_pq_train(vecs, count, dim, m, ks, 10U, 777ULL, &pq1), NBASE_OK);
+  ASSERT_STATUS(nbase_pq_train(vecs, count, dim, m, ks, 10U, 777ULL, &pq2), NBASE_OK);
+
+  ASSERT_STATUS(nbase_pq_encode(pq1, vecs, count, codes1), NBASE_OK);
+  ASSERT_STATUS(nbase_pq_encode(pq2, vecs, count, codes2), NBASE_OK);
+  ASSERT_TRUE(memcmp(codes1, codes2, (size_t)count * (size_t)m) == 0);
+
+  ASSERT_STATUS(nbase_pq_build_lut(pq1, vecs, lut1), NBASE_OK);
+  ASSERT_STATUS(nbase_pq_build_lut(pq2, vecs, lut2), NBASE_OK);
+  for (uint32_t i = 0U; i < m * ks; i++) {
+    ASSERT_NEAR(lut1[i], lut2[i], 0.0, 0.0);
+  }
+  ASSERT_NEAR(nbase_pq_adc_distance(pq1, lut1, codes1), 0.5, 0.5, 1.0);
+
+  nbase_pq_destroy(pq1);
+  nbase_pq_destroy(pq2);
+  free(lut2);
+  free(lut1);
+  free(codes2);
+  free(codes1);
+  free(vecs);
+}
+
 void test_pq_run(void) {
   RUN_TEST(test_kmeans_synthetic_clusters_and_edge_cases);
   RUN_TEST(test_pq_encode_decode_adc_and_persistence);
   RUN_TEST(test_pq_adc_distance_batch);
+  RUN_TEST(test_pq_train_parallel_determinism_tsan);
 }

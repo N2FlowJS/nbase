@@ -1246,6 +1246,131 @@ static void test_http_server_count_and_resource_crud(void) {
   nbase_close(db);
 }
 
+static void test_http_server_post_similar_and_distance(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/upsert",
+      NULL,
+      "{\"vectors\":["
+      "{\"id\":1,\"vector\":[1,0,0],\"metadata\":{\"team\":\"alpha\"}},"
+      "{\"id\":2,\"vector\":[1,0.1,0],\"metadata\":{\"team\":\"beta\"}},"
+      "{\"id\":3,\"vector\":[1,0.2,0],\"metadata\":{\"team\":\"alpha\"}},"
+      "{\"id\":4,\"vector\":[0,1,0],\"metadata\":{\"team\":\"alpha\"}}"
+      "]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  free(r.body);
+
+  /* POST /api/vectors/:id/similar with metadata filter + includeMetadata */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/1/similar",
+      NULL,
+      "{\"k\":2,\"filters\":{\"team\":\"alpha\"},\"includeMetadata\":true,\"metric\":\"euclidean\"}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":4") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"team\":\"alpha\"") != NULL);
+  free(r.body);
+
+  /* POST /api/vectors/:id/similar with empty body uses defaults */
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/1/similar", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":3") != NULL);
+  free(r.body);
+
+  /* Missing ID -> 404, wrong method -> 405 */
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/999/similar", NULL, "{\"k\":2}", &r));
+  ASSERT_EQ_I64(r.status, 404);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "DELETE", "/api/vectors/1/similar", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  /* POST /api/distance across metrics + edge/error paths */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/distance",
+      NULL,
+      "{\"metric\":\"cosine\",\"query\":[1,0,0],\"vectors\":[[1,0,0],[0,1,0],[-1,0,0]]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"metric\":\"cosine\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"count\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"distances\":[0,1,2]") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/distance",
+      NULL,
+      "{\"query\":[3,0,0],\"vectors\":[[0,4,0]]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"metric\":\"euclidean\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"distances\":[5]") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/distance",
+      NULL,
+      "{\"metric\":\"inner_product\",\"query\":[2,1,0],\"vectors\":[]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":0") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"distances\":[]") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/distance",
+      NULL,
+      "{\"query\":[1,0,0],\"vectors\":[[1,0]]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/distance",
+      NULL,
+      "{\"metric\":\"bad\",\"query\":[1,0,0],\"vectors\":[[1,0,0]]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/distance", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1257,4 +1382,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_list_vectors_and_radius_search);
   RUN_TEST(test_http_server_batch_meta_text_and_filtered_graph);
   RUN_TEST(test_http_server_count_and_resource_crud);
+  RUN_TEST(test_http_server_post_similar_and_distance);
 }
