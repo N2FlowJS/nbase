@@ -93,7 +93,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.3.0";
+  return "1.4.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -1324,6 +1324,32 @@ bool nbase_contains(const nbase_db_t *db, uint64_t id) {
   bool found = nbase_store_find_slot(db->store, id, NULL);
   pthread_rwlock_unlock(&mutable_db->rwlock);
   return found;
+}
+
+nbase_status_t nbase_count(
+    const nbase_db_t *db,
+    const nbase_meta_filter_t *filter,
+    uint64_t *out_count) {
+  if (!db || !out_count || (filter != NULL && filter->count > 0U && !filter->conds)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0ULL;
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+  if (!filter || filter->count == 0U) {
+    *out_count = db->store->active_count;
+  } else {
+    uint64_t matched = 0ULL;
+    for (uint32_t s = 0U; s < db->store->slot_count; s++) {
+      if (db->store->slot_flags[s] == NBASE_SLOT_ACTIVE &&
+          nbase_meta_matches(db->meta, db->store->ids[s], filter)) {
+        matched++;
+      }
+    }
+    *out_count = matched;
+  }
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  return NBASE_OK;
 }
 
 nbase_status_t nbase_list_ids(

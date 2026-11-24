@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-24
+
+Performance, thread-safety, and API completeness increment adding filtered vector counting (`nbase_count` / `nbase_pdb_count`), SIMD-batched SQ8 & BQ distance kernels, thread-safe SIMD-accelerated LSH & IVF-PQ indexes, full HTTP `/api/vectors/count` and `/api/vectors/:id/{metadata,text}` REST methods, CLI `count`/`get-text`/`delete-meta`/`delete-text` commands, deterministic JSON fuzz coverage, and C++17 `nbase::Sq8`/`Bq`/`Lsh` batch wrappers.
+
+### Added
+- **Filtered & Unfiltered Counting (`nbase_count`, `nbase_pdb_count`)**:
+  - Added O(1) unfiltered counting (`pdb_count` without reloading evicted partitions) and allocation-free metadata-filtered counting across `nbase_db_t` and `nbase_pdb_t`.
+- **SIMD-Batched Quantization Distance Kernels (`src/sq8.c`, `src/bq.c`)**:
+  - Added `nbase_sq8_l2_sq_asymmetric_batch` with query shift precomputation and 16-way AVX2+FMA unrolling.
+  - Added `nbase_bq_hamming_batch` with specialized `1`/`2`/`4`-word fast paths and 4x unrolling for arbitrary bit widths.
+- **Thread-Safe & SIMD-Accelerated LSH & IVF-PQ (`src/lsh.c`, `src/ivfpq.c`)**:
+  - Added internal `pthread_rwlock_t` reader/writer synchronization across `nbase_lsh_t` and `nbase_ivfpq_t`.
+  - Replaced scalar inner-product projection loops in `lsh_hash_table` and IVF-PQ `build_dot_lut` with runtime-dispatched AVX2+FMA/NEON `nbase_get_distance_fn` kernels.
+  - Added atomic `nbase_lsh_add_batch` and thread-safe `nbase_lsh_contains`.
+- **HTTP/1.1 Server, CLI, C++17 & Fuzz Tests (`src/http_server.c`, `apps/nbase_cli.c`, `include/nbase.hpp`, `tests/test_json.c`)**:
+  - Added `GET`/`POST /api/vectors/count` (with optional `"filters"`), `GET`/`PUT`/`DELETE /api/vectors/:id/metadata`, and `GET /api/vectors/:id/text`.
+  - Added `nbase-cli count <dir> [--filter <json>]`, `delete-meta`, `get-text`, and `delete-text`.
+  - Updated `include/nbase.hpp` (`Database::count`, `PartitionedDatabase::count`, `Sq8::l2_sq_symmetric`, `Sq8::l2_sq_asymmetric_batch`, `Bq::hamming_batch`, `Lsh::add_batch`, `Lsh::contains`, `Lsh::stats`).
+  - Added 8 new tests including TSan concurrency on LSH & IVF-PQ and a 1,000-iteration deterministic JSON mutation fuzz suite.
+
 ## [1.3.0] - 2026-11-24
 
 Feature and throughput increment adding atomic single-`fsync` batch metadata & text APIs (`nbase_db_t` & `nbase_pdb_t`), filtered k-NN relationship & community extraction, batch PQ ADC distance evaluation with IVF-PQ acceleration, HTTP bulk metadata/text endpoints, CLI metadata management, and C++17 `nbase::Pq` RAII wrapper.

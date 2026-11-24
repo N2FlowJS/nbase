@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <float.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -26,6 +27,8 @@ struct nbase_ivfpq {
   float *coarse_centroids;
   nbase_pq_t *pq;
   ivf_list_t *lists;
+  pthread_rwlock_t rwlock;
+  bool rwlock_init;
 };
 
 typedef struct probe_cand {
@@ -93,17 +96,14 @@ static void build_dot_lut(const nbase_pq_t *pq, const float *query, float *out_l
   uint32_t k_cent = nbase_pq_num_centroids(pq);
   uint32_t sub_dim = nbase_pq_dim(pq) / m_sub;
   const float *codebooks = nbase_pq_codebooks(pq);
+  nbase_dist_fn ip_fn = nbase_get_distance_fn(NBASE_METRIC_INNER_PRODUCT);
 
   for (uint32_t m = 0U; m < m_sub; m++) {
     const float *q_sub = query + (size_t)m * (size_t)sub_dim;
     const float *cb_m = codebooks + (size_t)m * (size_t)k_cent * (size_t)sub_dim;
     for (uint32_t c = 0U; c < k_cent; c++) {
       const float *cent = cb_m + (size_t)c * (size_t)sub_dim;
-      float s = 0.0f;
-      for (uint32_t j = 0U; j < sub_dim; j++) {
-        s += q_sub[j] * cent[j];
-      }
-      out_lut[(size_t)m * (size_t)k_cent + c] = s;
+      out_lut[(size_t)m * (size_t)k_cent + c] = -ip_fn(q_sub, cent, sub_dim);
     }
   }
 }
@@ -266,28 +266,21 @@ nbase_status_t nbase_ivfpq_train(
   index->coarse_centroids = coarse;
   index->pq = pq;
   index->lists = lists;
+  if (pthread_rwlock_init(&index->rwlock, NULL) != 0) {
+    nbase_ivfpq_destroy(index);
+    return NBASE_ERR_NOMEM;
+  }
+  index->rwlock_init = true;
 
   *out_index = index;
   return NBASE_OK;
 }
 
-nbase_status_t nbase_ivfpq_add(
+static nbase_status_t ivfpq_add_unlocked(
     nbase_ivfpq_t *index,
     const uint64_t *ids,
     const float *vectors,
     uint32_t count) {
-  if (!index || (count > 0U && (!ids || !vectors))) {
-    return NBASE_ERR_INVALID_ARG;
-  }
-  if (count == 0U) {
-    return NBASE_OK;
-  }
-
-  for (uint32_t i = 0U; i < count; i++) {
-    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)index->dim, index->dim)) {
-      return NBASE_ERR_INVALID_VECTOR;
-    }
-  }
 
   float *vec_buf = malloc((size_t)index->dim * sizeof(float));
   float *res_buf = malloc((size_t)index->dim * sizeof(float));
@@ -352,7 +345,29 @@ nbase_status_t nbase_ivfpq_add(
   return st;
 }
 
-nbase_status_t nbase_ivfpq_search_filtered(
+nbase_status_t nbase_ivfpq_add(
+    nbase_ivfpq_t *index,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count) {
+  if (!index || (count > 0U && (!ids || !vectors))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!nbase_vec_is_finite(vectors + (size_t)i * (size_t)index->dim, index->dim)) {
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+  pthread_rwlock_wrlock(&index->rwlock);
+  nbase_status_t st = ivfpq_add_unlocked(index, ids, vectors, count);
+  pthread_rwlock_unlock(&index->rwlock);
+  return st;
+}
+
+static nbase_status_t ivfpq_search_filtered_unlocked(
     const nbase_ivfpq_t *index,
     const float *query,
     uint32_t k,
@@ -361,13 +376,6 @@ nbase_status_t nbase_ivfpq_search_filtered(
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count) {
-  if (!index || !query || !out_count || (k > 0U && !out_results)) {
-    return NBASE_ERR_INVALID_ARG;
-  }
-  *out_count = 0U;
-  if (!nbase_vec_is_finite(query, index->dim)) {
-    return NBASE_ERR_INVALID_VECTOR;
-  }
   if (k == 0U || index->count == 0ULL) {
     return NBASE_OK;
   }
@@ -506,6 +514,30 @@ nbase_status_t nbase_ivfpq_search_filtered(
   return st;
 }
 
+nbase_status_t nbase_ivfpq_search_filtered(
+    const nbase_ivfpq_t *index,
+    const float *query,
+    uint32_t k,
+    uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!index || !query || !out_count || (k > 0U && !out_results)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  if (!nbase_vec_is_finite(query, index->dim)) {
+    return NBASE_ERR_INVALID_VECTOR;
+  }
+  nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
+  pthread_rwlock_rdlock(&mutable_idx->rwlock);
+  nbase_status_t st = ivfpq_search_filtered_unlocked(
+      index, query, k, nprobe, filter, filter_ctx, out_results, out_count);
+  pthread_rwlock_unlock(&mutable_idx->rwlock);
+  return st;
+}
+
 nbase_status_t nbase_ivfpq_search(
     const nbase_ivfpq_t *index,
     const float *query,
@@ -516,10 +548,7 @@ nbase_status_t nbase_ivfpq_search(
   return nbase_ivfpq_search_filtered(index, query, k, nprobe, NULL, NULL, out_results, out_count);
 }
 
-nbase_status_t nbase_ivfpq_save(const nbase_ivfpq_t *index, const char *file_path) {
-  if (!index || !file_path || file_path[0] == '\0') {
-    return NBASE_ERR_INVALID_ARG;
-  }
+static nbase_status_t ivfpq_save_unlocked(const nbase_ivfpq_t *index, const char *file_path) {
 
   uint32_t sub_dim = index->dim / index->num_subvectors;
   size_t coarse_bytes = (size_t)index->nlist * (size_t)index->dim * sizeof(float);
@@ -578,6 +607,17 @@ nbase_status_t nbase_ivfpq_save(const nbase_ivfpq_t *index, const char *file_pat
   nbase_status_t st = nbase_write_file_atomic(file_path, &hdr, sizeof(hdr), chunks, chunk_cnt);
   free(list_lens);
   free(chunks);
+  return st;
+}
+
+nbase_status_t nbase_ivfpq_save(const nbase_ivfpq_t *index, const char *file_path) {
+  if (!index || !file_path || file_path[0] == '\0') {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
+  pthread_rwlock_rdlock(&mutable_idx->rwlock);
+  nbase_status_t st = ivfpq_save_unlocked(index, file_path);
+  pthread_rwlock_unlock(&mutable_idx->rwlock);
   return st;
 }
 
@@ -732,6 +772,13 @@ nbase_status_t nbase_ivfpq_load(const char *file_path, nbase_ivfpq_t **out_index
   index->coarse_centroids = coarse;
   index->pq = pq;
   index->lists = lists;
+  if (pthread_rwlock_init(&index->rwlock, NULL) != 0) {
+    free(list_lens);
+    free(payload);
+    nbase_ivfpq_destroy(index);
+    return NBASE_ERR_NOMEM;
+  }
+  index->rwlock_init = true;
 
   for (uint32_t c = 0U; c < hdr.nlist; c++) {
     uint32_t len = list_lens[c];
@@ -766,18 +813,24 @@ nbase_status_t nbase_ivfpq_stats(const nbase_ivfpq_t *index, nbase_ivfpq_stats_t
   if (!index || !out_stats) {
     return NBASE_ERR_INVALID_ARG;
   }
+  nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
+  pthread_rwlock_rdlock(&mutable_idx->rwlock);
   out_stats->dim = index->dim;
   out_stats->metric = index->metric;
   out_stats->nlist = index->nlist;
   out_stats->num_subvectors = index->num_subvectors;
   out_stats->num_centroids = index->num_centroids;
   out_stats->count = index->count;
+  pthread_rwlock_unlock(&mutable_idx->rwlock);
   return NBASE_OK;
 }
 
 void nbase_ivfpq_destroy(nbase_ivfpq_t *index) {
   if (!index) {
     return;
+  }
+  if (index->rwlock_init) {
+    pthread_rwlock_destroy(&index->rwlock);
   }
   if (index->lists) {
     for (uint32_t c = 0U; c < index->nlist; c++) {

@@ -484,6 +484,51 @@ static void test_pdb_meta_text_batch_and_filtered_relationships(void) {
   test_rm_rf(dir);
 }
 
+static void test_pdb_count_filtered_and_unfiltered(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(3U);
+  cfg.partition_capacity = 2U;
+  cfg.max_active_partitions = 1U;
+  cfg.enable_hnsw = false;
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  uint64_t cnt = 0ULL;
+  ASSERT_STATUS(nbase_pdb_count(pdb, NULL, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 0ULL);
+
+  uint64_t ids[6] = {1ULL, 2ULL, 3ULL, 4ULL, 5ULL, 6ULL};
+  float vecs[18];
+  test_fill_vectors(vecs, 6U, 3U, 888ULL);
+  ASSERT_STATUS(nbase_pdb_add_batch(pdb, ids, vecs, 6U, 3U, 1U), NBASE_OK);
+
+  nbase_meta_field_t f_keep = {"tier", {.type = NBASE_META_INT64, .as = {.i64 = 1}}};
+  nbase_meta_field_t f_skip = {"tier", {.type = NBASE_META_INT64, .as = {.i64 = 2}}};
+  nbase_meta_batch_item_t items[6] = {
+      {1ULL, &f_keep, 1U}, {2ULL, &f_skip, 1U},
+      {3ULL, &f_keep, 1U}, {4ULL, &f_skip, 1U},
+      {5ULL, &f_keep, 1U}, {6ULL, &f_skip, 1U}};
+  ASSERT_STATUS(nbase_pdb_set_meta_batch(pdb, items, 6U), NBASE_OK);
+
+  /* O(1) unfiltered count does not trigger partition reload (cache_misses unchanged). */
+  nbase_pdb_stats_t s0, s1;
+  ASSERT_STATUS(nbase_pdb_stats(pdb, &s0), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_count(pdb, NULL, &cnt), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_stats(pdb, &s1), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 6ULL);
+  ASSERT_EQ_U64(s1.cache_misses, s0.cache_misses);
+
+  nbase_meta_cond_t cond = {"tier", NBASE_OP_EQ, {.type = NBASE_META_INT64, .as = {.i64 = 1}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  ASSERT_STATUS(nbase_pdb_count(pdb, &flt, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 3ULL);
+
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
@@ -491,4 +536,5 @@ void test_partitioned_run(void) {
   RUN_TEST(test_pdb_upsert_batch_get_batch_and_rerank);
   RUN_TEST(test_pdb_list_ids_and_search_radius);
   RUN_TEST(test_pdb_meta_text_batch_and_filtered_relationships);
+  RUN_TEST(test_pdb_count_filtered_and_unfiltered);
 }

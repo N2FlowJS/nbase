@@ -214,6 +214,49 @@ static __attribute__((target("avx2,fma"))) float sq8_l2_sq_symmetric_avx2(
   }
   return sum;
 }
+
+static __attribute__((target("avx2,fma"))) void sq8_l2_sq_asymmetric_batch_avx2(
+    const float *q_shifted,
+    const float *scales,
+    uint32_t dim,
+    const uint8_t *codes,
+    uint32_t count,
+    float *out_distances) {
+  for (uint32_t i = 0U; i < count; i++) {
+    const uint8_t *code = codes + (size_t)i * (size_t)dim;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    uint32_t d = 0U;
+    for (; d + 16U <= dim; d += 16U) {
+      __m128i v16;
+      memcpy(&v16, code + d, 16U);
+      __m256 vf0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v16));
+      __m256 vf1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128(v16, 8)));
+      __m256 diff0 = _mm256_fnmadd_ps(
+          vf0, _mm256_loadu_ps(scales + d), _mm256_loadu_ps(q_shifted + d));
+      __m256 diff1 = _mm256_fnmadd_ps(
+          vf1, _mm256_loadu_ps(scales + d + 8U), _mm256_loadu_ps(q_shifted + d + 8U));
+      acc0 = _mm256_fmadd_ps(diff0, diff0, acc0);
+      acc1 = _mm256_fmadd_ps(diff1, diff1, acc1);
+    }
+    if (d + 8U <= dim) {
+      uint64_t raw8 = 0ULL;
+      memcpy(&raw8, code + d, 8U);
+      __m128i v8 = _mm_cvtsi64_si128((long long)raw8);
+      __m256 vf = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v8));
+      __m256 diff = _mm256_fnmadd_ps(
+          vf, _mm256_loadu_ps(scales + d), _mm256_loadu_ps(q_shifted + d));
+      acc0 = _mm256_fmadd_ps(diff, diff, acc0);
+      d += 8U;
+    }
+    float sum = sq8_hsum256_ps(_mm256_add_ps(acc0, acc1));
+    for (; d < dim; d++) {
+      float diff = q_shifted[d] - (float)code[d] * scales[d];
+      sum += diff * diff;
+    }
+    out_distances[i] = sum;
+  }
+}
 #endif
 
 float nbase_sq8_l2_sq_asymmetric(const nbase_sq8_t *sq8, const float *query, const uint8_t *code) {
@@ -249,6 +292,56 @@ float nbase_sq8_l2_sq_symmetric(const nbase_sq8_t *sq8, const uint8_t *code_a, c
     sum += diff * diff;
   }
   return sum;
+}
+
+nbase_status_t nbase_sq8_l2_sq_asymmetric_batch(
+    const nbase_sq8_t *sq8,
+    const float *query,
+    const uint8_t *codes,
+    uint32_t count,
+    float *out_distances) {
+  if (!sq8 || !query || (count > 0U && (!codes || !out_distances))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  if (!nbase_vec_is_finite(query, sq8->dim)) {
+    return NBASE_ERR_INVALID_VECTOR;
+  }
+
+  float stack_buf[512] = {0.0f};
+  float *q_shifted = (sq8->dim <= 512U) ? stack_buf : malloc((size_t)sq8->dim * sizeof(float));
+  if (!q_shifted) {
+    return NBASE_ERR_NOMEM;
+  }
+  for (uint32_t d = 0U; d < sq8->dim; d++) {
+    q_shifted[d] = query[d] - sq8->mins[d];
+  }
+
+#if NBASE_SQ8_HAS_AVX2
+  if (nbase_cpu_has_avx2_fma()) {
+    sq8_l2_sq_asymmetric_batch_avx2(q_shifted, sq8->scales, sq8->dim, codes, count, out_distances);
+    if (q_shifted != stack_buf) {
+      free(q_shifted);
+    }
+    return NBASE_OK;
+  }
+#endif
+
+  for (uint32_t i = 0U; i < count; i++) {
+    const uint8_t *code = codes + (size_t)i * (size_t)sq8->dim;
+    float sum = 0.0f;
+    for (uint32_t d = 0U; d < sq8->dim; d++) {
+      float diff = q_shifted[d] - (float)code[d] * sq8->scales[d];
+      sum += diff * diff;
+    }
+    out_distances[i] = sum;
+  }
+  if (q_shifted != stack_buf) {
+    free(q_shifted);
+  }
+  return NBASE_OK;
 }
 
 nbase_status_t nbase_sq8_save(const nbase_sq8_t *sq8, const char *file_path) {

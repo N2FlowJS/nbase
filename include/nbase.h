@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 3
+#define NBASE_VERSION_MINOR 4
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -196,6 +196,7 @@ nbase_status_t nbase_delete_by_filter(nbase_db_t *db, const nbase_meta_filter_t 
 nbase_status_t nbase_get(const nbase_db_t *db, uint64_t id, float *out_vec, uint32_t dim);
 nbase_status_t nbase_get_batch(const nbase_db_t *db, const uint64_t *ids, uint32_t count, uint32_t dim, float *out_vectors, bool *out_found);
 bool nbase_contains(const nbase_db_t *db, uint64_t id);
+nbase_status_t nbase_count(const nbase_db_t *db, const nbase_meta_filter_t *filter, uint64_t *out_count);
 nbase_status_t nbase_list_ids(const nbase_db_t *db, uint64_t offset, uint32_t limit, uint64_t *out_ids, uint32_t *out_count, uint64_t *out_total);
 
 typedef bool (*nbase_meta_iter_fn)(const char *key, const nbase_meta_value_t *val, void *user_ctx);
@@ -304,6 +305,7 @@ nbase_status_t nbase_pdb_delete_by_filter(nbase_pdb_t *pdb, const nbase_meta_fil
 nbase_status_t nbase_pdb_get(nbase_pdb_t *pdb, uint64_t id, float *out_vec, uint32_t dim);
 nbase_status_t nbase_pdb_get_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t count, uint32_t dim, float *out_vectors, bool *out_found);
 bool nbase_pdb_contains(nbase_pdb_t *pdb, uint64_t id);
+nbase_status_t nbase_pdb_count(nbase_pdb_t *pdb, const nbase_meta_filter_t *filter, uint64_t *out_count);
 nbase_status_t nbase_pdb_list_ids(nbase_pdb_t *pdb, uint64_t offset, uint32_t limit, uint64_t *out_ids, uint32_t *out_count, uint64_t *out_total);
 
 nbase_status_t nbase_pdb_set_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_meta_field_t *fields, uint32_t count);
@@ -427,6 +429,7 @@ nbase_status_t nbase_sq8_encode(const nbase_sq8_t *sq8, const float *vectors, ui
 nbase_status_t nbase_sq8_decode(const nbase_sq8_t *sq8, const uint8_t *codes, uint32_t count, float *out_vectors);
 float nbase_sq8_l2_sq_asymmetric(const nbase_sq8_t *sq8, const float *query, const uint8_t *code);
 float nbase_sq8_l2_sq_symmetric(const nbase_sq8_t *sq8, const uint8_t *code_a, const uint8_t *code_b);
+nbase_status_t nbase_sq8_l2_sq_asymmetric_batch(const nbase_sq8_t *sq8, const float *query, const uint8_t *codes, uint32_t count, float *out_distances);
 nbase_status_t nbase_sq8_save(const nbase_sq8_t *sq8, const char *file_path);
 nbase_status_t nbase_sq8_load(const char *file_path, nbase_sq8_t **out_sq8);
 
@@ -456,7 +459,9 @@ nbase_lsh_config_t nbase_lsh_config_default(uint32_t dim);
 nbase_status_t nbase_lsh_create(const nbase_lsh_config_t *cfg, nbase_lsh_t **out_lsh);
 void nbase_lsh_destroy(nbase_lsh_t *lsh);
 nbase_status_t nbase_lsh_add(nbase_lsh_t *lsh, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_lsh_add_batch(nbase_lsh_t *lsh, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
 nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id);
+bool nbase_lsh_contains(const nbase_lsh_t *lsh, uint64_t id);
 nbase_status_t nbase_lsh_search(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_lsh_search_filtered(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_lsh_stats(const nbase_lsh_t *lsh, nbase_lsh_stats_t *out_stats);
@@ -473,6 +478,7 @@ uint32_t nbase_bq_dim(const nbase_bq_t *bq);
 uint32_t nbase_bq_words_per_vec(const nbase_bq_t *bq);
 nbase_status_t nbase_bq_encode(const nbase_bq_t *bq, const float *vectors, uint32_t count, uint64_t *out_words);
 uint32_t nbase_bq_hamming(const uint64_t *a, const uint64_t *b, uint32_t num_words);
+nbase_status_t nbase_bq_hamming_batch(const uint64_t *query_words, const uint64_t *codes, uint32_t count, uint32_t num_words, uint32_t *out_distances);
 nbase_status_t nbase_bq_save(const nbase_bq_t *bq, const char *file_path);
 nbase_status_t nbase_bq_load(const char *file_path, nbase_bq_t **out_bq);
 

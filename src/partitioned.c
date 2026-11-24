@@ -1482,6 +1482,45 @@ bool nbase_pdb_contains(nbase_pdb_t *pdb, uint64_t id) {
   return found;
 }
 
+nbase_status_t nbase_pdb_count(
+    nbase_pdb_t *pdb,
+    const nbase_meta_filter_t *filter,
+    uint64_t *out_count) {
+  if (!pdb || !out_count || (filter != NULL && filter->count > 0U && !filter->conds)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0ULL;
+
+  pthread_mutex_lock(&pdb->mu);
+  nbase_status_t st = NBASE_OK;
+  if (!filter || filter->count == 0U) {
+    *out_count = pdb->total_vectors;
+  } else {
+    uint64_t matched = 0ULL;
+    for (uint32_t i = 0U; i < pdb->part_count; i++) {
+      pdb_part_t *part = pdb->parts[i];
+      if (part->active_vectors == 0ULL) {
+        continue;
+      }
+      st = pdb_load_partition(pdb, part);
+      if (st != NBASE_OK) {
+        break;
+      }
+      uint64_t part_matched = 0ULL;
+      st = nbase_count(part->db, filter, &part_matched);
+      if (st != NBASE_OK) {
+        break;
+      }
+      matched += part_matched;
+    }
+    if (st == NBASE_OK) {
+      *out_count = matched;
+    }
+  }
+  pthread_mutex_unlock(&pdb->mu);
+  return st;
+}
+
 nbase_status_t nbase_pdb_list_ids(
     nbase_pdb_t *pdb,
     uint64_t offset,

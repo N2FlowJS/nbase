@@ -126,6 +126,69 @@ uint32_t nbase_bq_hamming(const uint64_t *a, const uint64_t *b, uint32_t num_wor
   return dist;
 }
 
+nbase_status_t nbase_bq_hamming_batch(
+    const uint64_t *query_words,
+    const uint64_t *codes,
+    uint32_t count,
+    uint32_t num_words,
+    uint32_t *out_distances) {
+  if (count > 0U && (!out_distances || (num_words > 0U && (!query_words || !codes)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  if (num_words == 0U) {
+    memset(out_distances, 0, (size_t)count * sizeof(uint32_t));
+    return NBASE_OK;
+  }
+  if (num_words == 1U) {
+    uint64_t q0 = query_words[0];
+    for (uint32_t i = 0U; i < count; i++) {
+      out_distances[i] = popcnt64(q0 ^ codes[i]);
+    }
+    return NBASE_OK;
+  }
+  if (num_words == 2U) {
+    uint64_t q0 = query_words[0];
+    uint64_t q1 = query_words[1];
+    for (uint32_t i = 0U; i < count; i++) {
+      const uint64_t *row = codes + (size_t)i * 2U;
+      out_distances[i] = popcnt64(q0 ^ row[0]) + popcnt64(q1 ^ row[1]);
+    }
+    return NBASE_OK;
+  }
+  if (num_words == 4U) {
+    uint64_t q0 = query_words[0];
+    uint64_t q1 = query_words[1];
+    uint64_t q2 = query_words[2];
+    uint64_t q3 = query_words[3];
+    for (uint32_t i = 0U; i < count; i++) {
+      const uint64_t *row = codes + (size_t)i * 4U;
+      out_distances[i] =
+          popcnt64(q0 ^ row[0]) + popcnt64(q1 ^ row[1]) +
+          popcnt64(q2 ^ row[2]) + popcnt64(q3 ^ row[3]);
+    }
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    const uint64_t *row = codes + (size_t)i * (size_t)num_words;
+    uint32_t dist = 0U;
+    uint32_t w = 0U;
+    for (; w + 3U < num_words; w += 4U) {
+      dist += popcnt64(query_words[w] ^ row[w]) +
+              popcnt64(query_words[w + 1U] ^ row[w + 1U]) +
+              popcnt64(query_words[w + 2U] ^ row[w + 2U]) +
+              popcnt64(query_words[w + 3U] ^ row[w + 3U]);
+    }
+    for (; w < num_words; w++) {
+      dist += popcnt64(query_words[w] ^ row[w]);
+    }
+    out_distances[i] = dist;
+  }
+  return NBASE_OK;
+}
+
 nbase_status_t nbase_bq_save(const nbase_bq_t *bq, const char *file_path) {
   if (!bq || !file_path || file_path[0] == '\0') {
     return NBASE_ERR_INVALID_ARG;

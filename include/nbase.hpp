@@ -193,6 +193,12 @@ class Database {
     return ids;
   }
 
+  uint64_t count(const nbase_meta_filter_t *filter = nullptr) const {
+    uint64_t out = 0ULL;
+    detail::check(nbase_count(db_, filter, &out));
+    return out;
+  }
+
   std::vector<nbase_result_t> search(
       const std::vector<float> &query,
       uint32_t k,
@@ -501,6 +507,34 @@ class Sq8 {
     return nbase_sq8_l2_sq_asymmetric(ptr_, query, code);
   }
 
+  float l2_sq_symmetric(const uint8_t *code_a, const uint8_t *code_b) const noexcept {
+    return nbase_sq8_l2_sq_symmetric(ptr_, code_a, code_b);
+  }
+
+  std::vector<float> l2_sq_asymmetric_batch(
+      const std::vector<float> &query,
+      const uint8_t *codes,
+      uint32_t count) const {
+    if (query.size() != dim()) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<float> out(count);
+    detail::check(nbase_sq8_l2_sq_asymmetric_batch(
+        ptr_, query.data(), codes, count, out.empty() ? nullptr : out.data()));
+    return out;
+  }
+
+  std::vector<float> l2_sq_asymmetric_batch(
+      const std::vector<float> &query,
+      const std::vector<uint8_t> &codes) const {
+    uint32_t d = dim();
+    if (d == 0U || (codes.size() % d) != 0U) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    uint32_t count = static_cast<uint32_t>(codes.size() / d);
+    return l2_sq_asymmetric_batch(query, codes.data(), count);
+  }
+
   void save(const std::string &file_path) const {
     detail::check(nbase_sq8_save(ptr_, file_path.c_str()));
   }
@@ -558,6 +592,31 @@ class Bq {
 
   uint32_t hamming(const uint64_t *a, const uint64_t *b) const noexcept {
     return nbase_bq_hamming(a, b, words_per_vec());
+  }
+
+  std::vector<uint32_t> hamming_batch(
+      const uint64_t *query_words,
+      const uint64_t *codes,
+      uint32_t count) const {
+    std::vector<uint32_t> out(count);
+    detail::check(nbase_bq_hamming_batch(
+        query_words,
+        codes,
+        count,
+        words_per_vec(),
+        out.empty() ? nullptr : out.data()));
+    return out;
+  }
+
+  std::vector<uint32_t> hamming_batch(
+      const std::vector<uint64_t> &query_words,
+      const std::vector<uint64_t> &codes) const {
+    uint32_t wpv = words_per_vec();
+    if (wpv == 0U || query_words.size() < wpv || (codes.size() % wpv) != 0U) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    uint32_t count = static_cast<uint32_t>(codes.size() / wpv);
+    return hamming_batch(query_words.data(), codes.data(), count);
   }
 
   void save(const std::string &file_path) const {
@@ -818,7 +877,30 @@ class Lsh {
     add(id, vec.data(), static_cast<uint32_t>(vec.size()));
   }
 
+  void add_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<float> &vectors,
+      uint32_t dim) {
+    if (dim == 0U || vectors.size() != ids.size() * static_cast<size_t>(dim)) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    detail::check(nbase_lsh_add_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        vectors.empty() ? nullptr : vectors.data(),
+        static_cast<uint32_t>(ids.size()),
+        dim));
+  }
+
   void remove(uint64_t id) { detail::check(nbase_lsh_delete(ptr_, id)); }
+
+  bool contains(uint64_t id) const { return nbase_lsh_contains(ptr_, id); }
+
+  nbase_lsh_stats_t stats() const {
+    nbase_lsh_stats_t s{};
+    detail::check(nbase_lsh_stats(ptr_, &s));
+    return s;
+  }
 
   std::vector<nbase_result_t> search(
       const std::vector<float> &query,
@@ -1002,6 +1084,12 @@ class PartitionedDatabase {
         pdb_, offset, limit, limit > 0U ? ids.data() : nullptr, &count, out_total));
     ids.resize(count);
     return ids;
+  }
+
+  uint64_t count(const nbase_meta_filter_t *filter = nullptr) const {
+    uint64_t out = 0ULL;
+    detail::check(nbase_pdb_count(pdb_, filter, &out));
+    return out;
   }
 
   std::vector<nbase_result_t> search_radius(

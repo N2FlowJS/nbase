@@ -1,5 +1,7 @@
 #include "test_common.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
 static bool lsh_even_filter(uint64_t id, void *ctx) {
@@ -136,7 +138,89 @@ static void test_lsh_euclidean_save_load_and_errors(void) {
   test_rm_rf(dir);
 }
 
+typedef struct lsh_tsan_ctx {
+  nbase_lsh_t *lsh;
+  const float *query;
+  uint32_t dim;
+  atomic_bool stop;
+  atomic_int errors;
+} lsh_tsan_ctx_t;
+
+static void *lsh_reader_fn(void *raw) {
+  lsh_tsan_ctx_t *ctx = (lsh_tsan_ctx_t *)raw;
+  for (uint32_t i = 0U; i < 40U && !atomic_load_explicit(&ctx->stop, memory_order_relaxed); i++) {
+    nbase_result_t hits[5];
+    uint32_t got = 0U;
+    if (nbase_lsh_search_filtered(ctx->lsh, ctx->query, ctx->dim, 5U, 2U, lsh_even_filter, NULL, hits, &got) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    nbase_lsh_stats_t st;
+    if (nbase_lsh_stats(ctx->lsh, &st) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    (void)nbase_lsh_contains(ctx->lsh, 100ULL);
+  }
+  return NULL;
+}
+
+static void test_lsh_add_batch_contains_and_concurrent_tsan(void) {
+  const uint32_t dim = 16U;
+  nbase_lsh_config_t cfg = nbase_lsh_config_default(dim);
+  cfg.metric = NBASE_METRIC_COSINE;
+  cfg.num_tables = 6U;
+  cfg.num_bits = 8U;
+  nbase_lsh_t *lsh = NULL;
+  ASSERT_STATUS(nbase_lsh_create(&cfg, &lsh), NBASE_OK);
+
+  const uint32_t n = 120U;
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL);
+  test_fill_vectors(vecs, n, dim, 5500ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = (uint64_t)i + 1ULL;
+  }
+
+  /* Atomicity: duplicate within batch rejects without inserting any ID. */
+  uint64_t dup_ids[3] = {1ULL, 2ULL, 1ULL};
+  ASSERT_STATUS(nbase_lsh_add_batch(lsh, dup_ids, vecs, 3U, dim), NBASE_ERR_ALREADY_EXISTS);
+  ASSERT_TRUE(!nbase_lsh_contains(lsh, 1ULL));
+
+  ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids, vecs, 80U, dim), NBASE_OK);
+  ASSERT_TRUE(nbase_lsh_contains(lsh, 1ULL));
+  ASSERT_TRUE(!nbase_lsh_contains(lsh, 81ULL));
+
+  /* Existing ID inside batch rejects cleanly without adding 81. */
+  uint64_t overlap_ids[2] = {81ULL, 1ULL};
+  ASSERT_STATUS(nbase_lsh_add_batch(lsh, overlap_ids, vecs, 2U, dim), NBASE_ERR_ALREADY_EXISTS);
+  ASSERT_TRUE(!nbase_lsh_contains(lsh, 81ULL));
+
+  lsh_tsan_ctx_t ctx = {lsh, vecs, dim, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, lsh_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, lsh_reader_fn, &ctx) == 0);
+
+  for (uint32_t i = 80U; i < n; i += 4U) {
+    ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids + i, vecs + (size_t)i * dim, 4U, dim), NBASE_OK);
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  nbase_lsh_stats_t st;
+  ASSERT_STATUS(nbase_lsh_stats(lsh, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.active_vectors, n);
+
+  free(vecs);
+  free(ids);
+  nbase_lsh_destroy(lsh);
+}
+
 void test_lsh_run(void) {
   RUN_TEST(test_lsh_cosine_and_multiprobe);
   RUN_TEST(test_lsh_euclidean_save_load_and_errors);
+  RUN_TEST(test_lsh_add_batch_contains_and_concurrent_tsan);
 }

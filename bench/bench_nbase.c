@@ -350,11 +350,25 @@ static void bench_batch_threads_and_pq(void) {
         }
       }
       uint64_t sq_s1 = now_ns();
+      double asym_batch_us = 0.0;
+      float *sq_out = malloc((size_t)count * sizeof(float));
+      if (sq_out) {
+        uint64_t sb0 = now_ns();
+        for (uint32_t q = 0U; q < 20U; q++) {
+          (void)nbase_sq8_l2_sq_asymmetric_batch(
+              sq8, queries + (size_t)q * dim, sq_codes, count, sq_out);
+          sq_sink += sq_out[0];
+        }
+        uint64_t sb1 = now_ns();
+        asym_batch_us = (double)(sb1 - sb0) / 20.0 / 1e3;
+        free(sq_out);
+      }
       (void)sq_sink;
-      printf("  sq8  train=%5.2f ms  encode(8000)=%5.2f ms  compression=4x  asym_scan_8000=%6.2f us/query\n",
+      printf("  sq8  train=%5.2f ms  encode(8000)=%5.2f ms  compression=4x  asym_scan_8000=%6.2f us/query  asym_batch=%6.2f us/query\n",
              (double)(sq_t1 - sq_t0) / 1e6,
              (double)(sq_e1 - sq_e0) / 1e6,
-             (double)(sq_s1 - sq_s0) / 20.0 / 1e3);
+             (double)(sq_s1 - sq_s0) / 20.0 / 1e3,
+             asym_batch_us);
       free(sq_codes);
     }
     nbase_sq8_destroy(sq8);
@@ -405,11 +419,24 @@ static void bench_batch_threads_and_pq(void) {
         }
       }
       uint64_t bq_s1 = now_ns();
+      double bq_batch_us = 0.0;
+      uint32_t *bq_out = malloc((size_t)count * sizeof(uint32_t));
+      if (bq_out) {
+        uint64_t bb0 = now_ns();
+        for (uint32_t q = 0U; q < 20U; q++) {
+          (void)nbase_bq_hamming_batch(q_words, bq_words, count, wpv, bq_out);
+          ham_sink += bq_out[0];
+        }
+        uint64_t bb1 = now_ns();
+        bq_batch_us = (double)(bb1 - bb0) / 20.0 / 1e3;
+        free(bq_out);
+      }
       (void)ham_sink;
-      printf("  bq(dim=64)  train=%5.2f ms  encode(8000)=%5.2f ms  compression=32x  hamming_scan_8000=%5.2f us/query\n",
+      printf("  bq(dim=64)  train=%5.2f ms  encode(8000)=%5.2f ms  compression=32x  hamming_scan_8000=%5.2f us/query  hamming_batch=%5.2f us/query\n",
              (double)(bq_t1 - bq_t0) / 1e6,
              (double)(bq_e1 - bq_e0) / 1e6,
-             (double)(bq_s1 - bq_s0) / 20.0 / 1e3);
+             (double)(bq_s1 - bq_s0) / 20.0 / 1e3,
+             bq_batch_us);
       free(bq_words);
     }
     nbase_bq_destroy(bq);

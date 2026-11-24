@@ -23,11 +23,15 @@ static void print_usage(const char *prog) {
       "  get <dir> <id>\n"
       "  get-batch <dir> <id1,id2,...>\n"
       "  list <dir> [--offset <N>] [--limit <M>]\n"
+      "  count <dir> [--filter <json>]\n"
       "  delete <dir> <id>\n"
       "  delete-batch <dir> <id1,id2,...>\n"
       "  set-meta <dir> <id> <json-object> [--update]\n"
       "  get-meta <dir> <id>\n"
+      "  delete-meta <dir> <id>\n"
       "  set-text <dir> <id> <text>\n"
+      "  get-text <dir> <id>\n"
+      "  delete-text <dir> <id>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--max-distance <D>]\n"
       "  search-text <dir> <query> [--k <K>]\n"
       "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>]\n"
@@ -196,6 +200,136 @@ static bool parse_json_u64_val(const nbase_json_t *v, uint64_t *out) {
 
 static bool is_dangerous_meta_key(const char *k) {
   return strcmp(k, "__proto__") == 0 || strcmp(k, "constructor") == 0 || strcmp(k, "prototype") == 0;
+}
+
+static bool cli_fill_meta_value(const nbase_json_t *val, nbase_meta_value_t *out) {
+  if (!val || val->type == NBASE_JSON_NULL || val->type == NBASE_JSON_ARRAY || val->type == NBASE_JSON_OBJECT) {
+    return false;
+  }
+  if (val->type == NBASE_JSON_BOOL) {
+    out->type = NBASE_META_BOOL;
+    out->as.b = val->b;
+  } else if (val->type == NBASE_JSON_STRING) {
+    out->type = NBASE_META_STRING;
+    out->as.str = val->str;
+  } else if (val->type == NBASE_JSON_NUMBER) {
+    if (val->is_int) {
+      out->type = NBASE_META_INT64;
+      out->as.i64 = val->i64;
+    } else {
+      out->type = NBASE_META_DOUBLE;
+      out->as.f64 = val->num;
+    }
+  } else {
+    return false;
+  }
+  return true;
+}
+
+static bool cli_parse_meta_op(const char *s, nbase_meta_op_t *out) {
+  if (strcmp(s, "eq") == 0) {
+    *out = NBASE_OP_EQ;
+  } else if (strcmp(s, "ne") == 0) {
+    *out = NBASE_OP_NE;
+  } else if (strcmp(s, "gt") == 0) {
+    *out = NBASE_OP_GT;
+  } else if (strcmp(s, "gte") == 0) {
+    *out = NBASE_OP_GTE;
+  } else if (strcmp(s, "lt") == 0) {
+    *out = NBASE_OP_LT;
+  } else if (strcmp(s, "lte") == 0) {
+    *out = NBASE_OP_LTE;
+  } else if (strcmp(s, "exists") == 0) {
+    *out = NBASE_OP_EXISTS;
+  } else if (strcmp(s, "contains") == 0) {
+    *out = NBASE_OP_CONTAINS;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+static nbase_status_t cli_parse_meta_filter_json(
+    const nbase_json_t *flt,
+    nbase_meta_cond_t **out_conds,
+    nbase_meta_filter_t *out_filter) {
+  *out_conds = NULL;
+  out_filter->conds = NULL;
+  out_filter->count = 0U;
+  if (!flt || flt->type == NBASE_JSON_NULL) {
+    return NBASE_OK;
+  }
+  if (flt->type == NBASE_JSON_OBJECT) {
+    if (flt->len == 0U) {
+      return NBASE_OK;
+    }
+    nbase_meta_cond_t *conds = calloc(flt->len, sizeof(*conds));
+    if (!conds) {
+      return NBASE_ERR_NOMEM;
+    }
+    uint32_t n = 0U;
+    for (size_t i = 0U; i < flt->len; i++) {
+      if (!flt->keys[i] || flt->keys[i][0] == '\0' || is_dangerous_meta_key(flt->keys[i])) {
+        continue;
+      }
+      if (!cli_fill_meta_value(flt->vals[i], &conds[n].value)) {
+        free(conds);
+        return NBASE_ERR_INVALID_ARG;
+      }
+      conds[n].key = flt->keys[i];
+      conds[n].op = NBASE_OP_EQ;
+      n++;
+    }
+    *out_conds = conds;
+    out_filter->conds = conds;
+    out_filter->count = n;
+    return NBASE_OK;
+  }
+  if (flt->type == NBASE_JSON_ARRAY) {
+    if (flt->len == 0U) {
+      return NBASE_OK;
+    }
+    nbase_meta_cond_t *conds = calloc(flt->len, sizeof(*conds));
+    if (!conds) {
+      return NBASE_ERR_NOMEM;
+    }
+    uint32_t n = 0U;
+    for (size_t i = 0U; i < flt->len; i++) {
+      const nbase_json_t *c = flt->items[i];
+      if (!c || c->type != NBASE_JSON_OBJECT) {
+        free(conds);
+        return NBASE_ERR_INVALID_ARG;
+      }
+      const nbase_json_t *jk = nbase_json_obj_get(c, "key");
+      const nbase_json_t *jop = nbase_json_obj_get(c, "op");
+      const nbase_json_t *jval = nbase_json_obj_get(c, "value");
+      if (!jk || jk->type != NBASE_JSON_STRING || jk->str[0] == '\0' ||
+          !jop || jop->type != NBASE_JSON_STRING) {
+        free(conds);
+        return NBASE_ERR_INVALID_ARG;
+      }
+      nbase_meta_op_t op = NBASE_OP_EQ;
+      if (!cli_parse_meta_op(jop->str, &op)) {
+        free(conds);
+        return NBASE_ERR_INVALID_ARG;
+      }
+      conds[n].key = jk->str;
+      conds[n].op = op;
+      if (op == NBASE_OP_EXISTS) {
+        conds[n].value.type = NBASE_META_BOOL;
+        conds[n].value.as.b = (jval && jval->type == NBASE_JSON_BOOL) ? jval->b : true;
+      } else if (!cli_fill_meta_value(jval, &conds[n].value)) {
+        free(conds);
+        return NBASE_ERR_INVALID_ARG;
+      }
+      n++;
+    }
+    *out_conds = conds;
+    out_filter->conds = conds;
+    out_filter->count = n;
+    return NBASE_OK;
+  }
+  return NBASE_ERR_INVALID_ARG;
 }
 
 static nbase_status_t cli_parse_meta_obj(
@@ -784,6 +918,76 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  if (strcmp(cmd, "count") == 0) {
+    if (argc < 3) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    const char *flt_json = NULL;
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    uint64_t total = 0ULL;
+    if (st == NBASE_OK) {
+      st = nbase_count(db, flt.count > 0U ? &flt : NULL, &total);
+    }
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "count failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"count\":%llu}\n", (unsigned long long)total);
+    return 0;
+  }
+
+  if (strcmp(cmd, "delete-meta") == 0) {
+    if (argc != 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t id = 0ULL;
+    if (!parse_u64(argv[3], &id)) {
+      fprintf(stderr, "Invalid uint64 id: %s\n", argv[3]);
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st == NBASE_OK) {
+      st = nbase_delete_meta(db, id);
+    }
+    if (st == NBASE_OK) {
+      st = nbase_save(db, argv[2]);
+    }
+    nbase_close(db);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "delete-meta failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"id\":%llu,\"deleted_meta\":true}\n", (unsigned long long)id);
+    return 0;
+  }
+
   if (strcmp(cmd, "set-text") == 0) {
     if (argc != 5) {
       print_usage(argv[0]);
@@ -808,6 +1012,69 @@ int main(int argc, char **argv) {
       return 1;
     }
     printf("Set text for vector %llu\n", (unsigned long long)id);
+    return 0;
+  }
+
+  if (strcmp(cmd, "get-text") == 0) {
+    if (argc != 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t id = 0ULL;
+    if (!parse_u64(argv[3], &id)) {
+      fprintf(stderr, "Invalid uint64 id: %s\n", argv[3]);
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    size_t len = 0U;
+    if (st == NBASE_OK) {
+      st = nbase_get_text(db, id, NULL, 0U, &len);
+    }
+    char *buf = NULL;
+    if (st == NBASE_OK) {
+      buf = malloc(len + 1U);
+      if (!buf) {
+        st = NBASE_ERR_NOMEM;
+      } else {
+        st = nbase_get_text(db, id, buf, len + 1U, &len);
+      }
+    }
+    nbase_close(db);
+    if (st != NBASE_OK) {
+      free(buf);
+      fprintf(stderr, "get-text failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("%s\n", buf);
+    free(buf);
+    return 0;
+  }
+
+  if (strcmp(cmd, "delete-text") == 0) {
+    if (argc != 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t id = 0ULL;
+    if (!parse_u64(argv[3], &id)) {
+      fprintf(stderr, "Invalid uint64 id: %s\n", argv[3]);
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st == NBASE_OK) {
+      st = nbase_delete_text(db, id);
+    }
+    if (st == NBASE_OK) {
+      st = nbase_save(db, argv[2]);
+    }
+    nbase_close(db);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "delete-text failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"id\":%llu,\"deleted_text\":true}\n", (unsigned long long)id);
     return 0;
   }
 

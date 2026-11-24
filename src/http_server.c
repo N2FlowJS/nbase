@@ -1609,7 +1609,12 @@ static void handle_get_similar(const http_conn_t *c, uint64_t id, const char *qu
   nbase_sbuf_free(&sb);
 }
 
-static void handle_patch_metadata(const http_conn_t *c, uint64_t id, const char *body, size_t body_len) {
+static void handle_id_metadata_write(
+    const http_conn_t *c,
+    uint64_t id,
+    const char *body,
+    size_t body_len,
+    bool is_update) {
   nbase_json_t *root = NULL;
   if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
     nbase_json_free(root);
@@ -1624,8 +1629,14 @@ static void handle_patch_metadata(const http_conn_t *c, uint64_t id, const char 
   nbase_meta_field_t *fields = NULL;
   uint32_t fcnt = 0U;
   nbase_status_t st = parse_meta_fields_obj(src, &fields, &fcnt);
-  if (st == NBASE_OK && fcnt > 0U) {
-    st = nbase_update_meta(c->srv->db, id, fields, fcnt);
+  if (st == NBASE_OK) {
+    if (!is_update) {
+      st = nbase_set_meta(c->srv->db, id, fields, fcnt);
+    } else if (fcnt > 0U) {
+      st = nbase_update_meta(c->srv->db, id, fields, fcnt);
+    } else if (!nbase_contains(c->srv->db, id)) {
+      st = NBASE_ERR_NOT_FOUND;
+    }
   }
   free(fields);
   nbase_json_free(root);
@@ -1799,6 +1810,46 @@ static void handle_batch_text(const http_conn_t *c, const char *body, size_t bod
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
   nbase_sbuf_appendf(&sb, "{\"success\":true,\"updated\":%u}", cnt);
+  send_sbuf_json(c, 200, &sb);
+  nbase_sbuf_free(&sb);
+}
+
+static void handle_count_vectors(const http_conn_t *c, const char *body, size_t body_len) {
+  nbase_json_t *root = NULL;
+  nbase_meta_cond_t *conds = NULL;
+  nbase_meta_filter_t meta_flt = {NULL, 0U};
+  bool has_filter = false;
+
+  if (body != NULL && body_len > 0U) {
+    if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
+      nbase_json_free(root);
+      send_error_json(c, 400, "invalid JSON request body");
+      return;
+    }
+    const nbase_json_t *jflt = nbase_json_obj_get(root, "filters");
+    if (jflt != NULL) {
+      if (parse_meta_filter_json(jflt, &conds, &meta_flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(root);
+        send_error_json(c, 400, "invalid metadata filters");
+        return;
+      }
+      has_filter = (meta_flt.count > 0U);
+    }
+  }
+
+  uint64_t cnt = 0ULL;
+  nbase_status_t st = nbase_count(c->srv->db, has_filter ? &meta_flt : NULL, &cnt);
+  free(conds);
+  nbase_json_free(root);
+  if (st != NBASE_OK) {
+    send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(&sb, "{\"success\":true,\"count\":%llu}", (unsigned long long)cnt);
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
 }
@@ -3098,6 +3149,18 @@ static void dispatch_request(
     handle_batch_text(c, body, body_len);
     return;
   }
+  if (strcmp(path, "/api/vectors/count") == 0) {
+    if (strcmp(method, "GET") == 0) {
+      handle_count_vectors(c, NULL, 0U);
+      return;
+    }
+    if (strcmp(method, "POST") == 0) {
+      handle_count_vectors(c, body, body_len);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
   if (strcmp(method, "POST") == 0 && strcmp(path, "/api/search") == 0) {
     handle_search(c, body, body_len);
     return;
@@ -3218,11 +3281,56 @@ static void dispatch_request(
       handle_get_similar(c, id, query_str);
       return;
     }
-    if (strcmp(slash, "/metadata") == 0 && strcmp(method, "PATCH") == 0) {
-      handle_patch_metadata(c, id, body, body_len);
+    if (strcmp(slash, "/metadata") == 0) {
+      if (strcmp(method, "GET") == 0) {
+        if (!nbase_contains(srv->db, id)) {
+          send_error_json(c, 404, nbase_strerror(NBASE_ERR_NOT_FOUND));
+          return;
+        }
+        nbase_sbuf_t sb;
+        nbase_sbuf_init(&sb);
+        nbase_sbuf_appendf(&sb, "{\"success\":true,\"id\":%llu,\"metadata\":", (unsigned long long)id);
+        append_meta_json(&sb, srv->db, id);
+        nbase_sbuf_append_n(&sb, "}", 1U);
+        send_sbuf_json(c, 200, &sb);
+        nbase_sbuf_free(&sb);
+        return;
+      }
+      if (strcmp(method, "PUT") == 0) {
+        handle_id_metadata_write(c, id, body, body_len, false);
+        return;
+      }
+      if (strcmp(method, "PATCH") == 0) {
+        handle_id_metadata_write(c, id, body, body_len, true);
+        return;
+      }
+      if (strcmp(method, "DELETE") == 0) {
+        nbase_status_t st = nbase_delete_meta(srv->db, id);
+        if (st != NBASE_OK) {
+          send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+        } else {
+          send_json_response(c, 200, "{\"success\":true}", 16U);
+        }
+        return;
+      }
+      send_error_json(c, 405, "method not allowed");
       return;
     }
     if (strcmp(slash, "/text") == 0) {
+      if (strcmp(method, "GET") == 0) {
+        if (!nbase_contains(srv->db, id)) {
+          send_error_json(c, 404, nbase_strerror(NBASE_ERR_NOT_FOUND));
+          return;
+        }
+        nbase_sbuf_t sb;
+        nbase_sbuf_init(&sb);
+        nbase_sbuf_appendf(&sb, "{\"success\":true,\"id\":%llu,\"text\":", (unsigned long long)id);
+        append_text_json(&sb, srv->db, id);
+        nbase_sbuf_append_n(&sb, "}", 1U);
+        send_sbuf_json(c, 200, &sb);
+        nbase_sbuf_free(&sb);
+        return;
+      }
       if (strcmp(method, "PUT") == 0) {
         handle_put_vector_text(c, id, body, body_len);
         return;

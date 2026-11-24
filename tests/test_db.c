@@ -363,7 +363,7 @@ static void test_db_query_lru_cache_and_invalidation(void) {
 }
 
 static void test_db_upsert_batch_and_get_batch(void) {
-  ASSERT_TRUE(strcmp(nbase_version(), "1.3.0") == 0);
+  ASSERT_TRUE(strcmp(nbase_version(), "1.4.0") == 0);
 
   const uint32_t dim = 3U;
   char dir[256];
@@ -505,6 +505,61 @@ static void test_db_list_ids_and_search_radius(void) {
   nbase_close(db);
 }
 
+static void test_db_count_filtered_and_unfiltered(void) {
+  const uint32_t dim = 3U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  uint64_t cnt = 999ULL;
+  ASSERT_STATUS(nbase_count(db, NULL, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 0ULL);
+  ASSERT_STATUS(nbase_count(NULL, NULL, &cnt), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_count(db, NULL, NULL), NBASE_ERR_INVALID_ARG);
+  nbase_meta_filter_t bad_flt = {NULL, 1U};
+  ASSERT_STATUS(nbase_count(db, &bad_flt, &cnt), NBASE_ERR_INVALID_ARG);
+
+  uint64_t ids[4] = {1ULL, 2ULL, 3ULL, 4ULL};
+  float vecs[12] = {
+      1, 0, 0,
+      0, 1, 0,
+      0, 0, 1,
+      1, 1, 0};
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 4U, dim, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_count(db, NULL, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 4ULL);
+
+  nbase_meta_field_t f_a[2] = {
+      {"team", {.type = NBASE_META_STRING, .as = {.str = "blue"}}},
+      {"score", {.type = NBASE_META_INT64, .as = {.i64 = 10}}}};
+  nbase_meta_field_t f_b[2] = {
+      {"team", {.type = NBASE_META_STRING, .as = {.str = "blue"}}},
+      {"score", {.type = NBASE_META_INT64, .as = {.i64 = 30}}}};
+  nbase_meta_field_t f_c[2] = {
+      {"team", {.type = NBASE_META_STRING, .as = {.str = "red"}}},
+      {"score", {.type = NBASE_META_INT64, .as = {.i64 = 50}}}};
+  nbase_meta_batch_item_t mitems[3] = {
+      {1ULL, f_a, 2U}, {2ULL, f_b, 2U}, {3ULL, f_c, 2U}};
+  ASSERT_STATUS(nbase_set_meta_batch(db, mitems, 3U), NBASE_OK);
+
+  nbase_meta_cond_t conds[2] = {
+      {"team", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "blue"}}},
+      {"score", NBASE_OP_GTE, {.type = NBASE_META_INT64, .as = {.i64 = 20}}}};
+  nbase_meta_filter_t flt = {conds, 2U};
+  ASSERT_STATUS(nbase_count(db, &flt, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 1ULL);
+
+  /* Delete matching vector -> count reflects live state accurately. */
+  ASSERT_STATUS(nbase_delete(db, 2ULL), NBASE_OK);
+  ASSERT_STATUS(nbase_count(db, NULL, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 3ULL);
+  ASSERT_STATUS(nbase_count(db, &flt, &cnt), NBASE_OK);
+  ASSERT_EQ_U64(cnt, 0ULL);
+
+  nbase_close(db);
+}
+
 void test_db_run(void) {
   RUN_TEST(test_db_upsert_with_and_without_hnsw);
   RUN_TEST(test_db_batch_search);
@@ -514,4 +569,5 @@ void test_db_run(void) {
   RUN_TEST(test_db_query_lru_cache_and_invalidation);
   RUN_TEST(test_db_upsert_batch_and_get_batch);
   RUN_TEST(test_db_list_ids_and_search_radius);
+  RUN_TEST(test_db_count_filtered_and_unfiltered);
 }
