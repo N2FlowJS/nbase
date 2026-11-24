@@ -27,17 +27,18 @@ static void print_usage(const char *prog) {
       "  count <dir> [--filter <json>]\n"
       "  delete <dir> <id>\n"
       "  delete-batch <dir> <id1,id2,...>\n"
+      "  delete-by-filter <dir> --filter <json>\n"
       "  set-meta <dir> <id> <json-object> [--update]\n"
       "  get-meta <dir> <id>\n"
       "  delete-meta <dir> <id>\n"
       "  set-text <dir> <id> <text>\n"
       "  get-text <dir> <id>\n"
       "  delete-text <dir> <id>\n"
-      "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--max-distance <D>]\n"
+      "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]\n"
       "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--filter <json>]\n"
       "  relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
-      "  search-text <dir> <query> [--k <K>]\n"
-      "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>]\n"
+      "  search-text <dir> <query> [--k <K>] [--filter <json>]\n"
+      "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>]\n"
       "  rebuild <dir> [--threads <T>]\n"
       "  compact <dir>\n"
       "  checkpoint <dir>\n"
@@ -964,6 +965,54 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  if (strcmp(cmd, "delete-by-filter") == 0) {
+    if (argc < 5) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    const char *flt_json = NULL;
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+    if (!flt_json) {
+      fprintf(stderr, "delete-by-filter requires --filter <json>\n");
+      return 1;
+    }
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+        cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "Invalid --filter JSON\n");
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    uint32_t deleted = 0U;
+    if (st == NBASE_OK) {
+      st = nbase_delete_by_filter(db, flt.count > 0U ? &flt : NULL, &deleted);
+    }
+    if (st == NBASE_OK && deleted > 0U) {
+      st = nbase_save(db, argv[2]);
+    }
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "delete-by-filter failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"deleted\":%u}\n", deleted);
+    return 0;
+  }
+
   if (strcmp(cmd, "delete-meta") == 0) {
     if (argc != 4) {
       print_usage(argv[0]);
@@ -1087,31 +1136,52 @@ int main(int argc, char **argv) {
       return 1;
     }
     uint32_t k = 10U;
+    const char *flt_json = NULL;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
           fprintf(stderr, "Invalid --k\n");
           return 1;
         }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
         return 1;
       }
     }
     nbase_db_t *db = NULL;
     nbase_status_t st = nbase_open(argv[2], &db);
     if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
     }
     nbase_scored_id_t *res = malloc((size_t)k * sizeof(nbase_scored_id_t));
     if (!res) {
       nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
       return 1;
     }
     uint32_t got = 0U;
-    st = nbase_search_text(db, argv[3], k, NULL, res, &got);
+    st = nbase_search_text(db, argv[3], k, flt.count > 0U ? &flt : NULL, res, &got);
     nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
     if (st != NBASE_OK) {
       free(res);
       fprintf(stderr, "search-text failed: %s\n", nbase_strerror(st));
@@ -1132,6 +1202,8 @@ int main(int argc, char **argv) {
     uint32_t k = 10U;
     float alpha = 0.5f;
     float rrf_k = 60.0f;
+    nbase_search_opts_t opts = nbase_search_opts_default();
+    const char *flt_json = NULL;
     for (int i = 5; i < argc; i++) {
       if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
@@ -1148,15 +1220,41 @@ int main(int argc, char **argv) {
           fprintf(stderr, "Invalid --rrf-k\n");
           return 1;
         }
+      } else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc) {
+        if (!parse_metric(argv[++i], &opts.metric)) {
+          fprintf(stderr, "Invalid --metric\n");
+          return 1;
+        }
+        opts.use_metric_override = true;
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
       }
     }
 
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+      if (flt.count > 0U) {
+        opts.meta_filter = &flt;
+      }
+    }
+
     nbase_db_t *db = NULL;
     nbase_status_t st = nbase_open(argv[2], &db);
     if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
     }
@@ -1168,6 +1266,8 @@ int main(int argc, char **argv) {
     if (strcmp(argv[3], "-") != 0) {
       if (!parse_csv_vec(argv[3], s.dim, &q)) {
         nbase_close(db);
+        free(conds);
+        nbase_json_free(flt_root);
         fprintf(stderr, "Invalid query CSV (expected %u floats)\n", s.dim);
         return 1;
       }
@@ -1178,12 +1278,16 @@ int main(int argc, char **argv) {
     if (!res) {
       free(q);
       nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
       return 1;
     }
     uint32_t got = 0U;
-    st = nbase_search_hybrid(db, q, qdim, qtext, k, alpha, rrf_k, NULL, res, &got);
+    st = nbase_search_hybrid(db, q, qdim, qtext, k, alpha, rrf_k, &opts, res, &got);
     free(q);
     nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
     if (st != NBASE_OK) {
       free(res);
       fprintf(stderr, "search-hybrid failed: %s\n", nbase_strerror(st));
@@ -1261,6 +1365,7 @@ int main(int argc, char **argv) {
     bool use_radius = false;
     float max_dist = 0.0f;
     nbase_search_opts_t opts = nbase_search_opts_default();
+    const char *flt_json = NULL;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--exact") == 0) {
         opts.mode = NBASE_SEARCH_EXACT;
@@ -1274,21 +1379,47 @@ int main(int argc, char **argv) {
           fprintf(stderr, "Invalid --ef\n");
           return 1;
         }
+      } else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc) {
+        if (!parse_metric(argv[++i], &opts.metric)) {
+          fprintf(stderr, "Invalid --metric\n");
+          return 1;
+        }
+        opts.use_metric_override = true;
       } else if (strcmp(argv[i], "--max-distance") == 0 && i + 1 < argc) {
         if (!parse_float_arg(argv[++i], &max_dist)) {
           fprintf(stderr, "Invalid --max-distance\n");
           return 1;
         }
         use_radius = true;
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
       }
     }
 
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+      if (flt.count > 0U) {
+        opts.meta_filter = &flt;
+      }
+    }
+
     nbase_db_t *db = NULL;
     nbase_status_t st = nbase_open(argv[2], &db);
     if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
     }
@@ -1297,6 +1428,8 @@ int main(int argc, char **argv) {
     float *q = NULL;
     if (!parse_csv_vec(argv[3], s.dim, &q)) {
       nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
       fprintf(stderr, "Invalid query CSV (expected %u floats)\n", s.dim);
       return 1;
     }
@@ -1304,6 +1437,8 @@ int main(int argc, char **argv) {
     if (!res) {
       free(q);
       nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
       return 1;
     }
     uint32_t got = 0U;
@@ -1312,6 +1447,8 @@ int main(int argc, char **argv) {
              : nbase_search(db, q, s.dim, k, &opts, res, &got);
     free(q);
     nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
     if (st != NBASE_OK) {
       free(res);
       fprintf(stderr, "search failed: %s\n", nbase_strerror(st));

@@ -257,6 +257,57 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_asymmetric_batch_avx2(
     out_distances[i] = sum;
   }
 }
+
+static __attribute__((target("avx2,fma"))) void sq8_l2_sq_symmetric_batch_avx2(
+    const nbase_sq8_t *sq8,
+    const uint8_t *query_code,
+    const uint8_t *codes,
+    uint32_t count,
+    float *out_distances) {
+  const uint32_t dim = sq8->dim;
+  const float *scales = sq8->scales;
+  for (uint32_t i = 0U; i < count; i++) {
+    const uint8_t *code = codes + (size_t)i * (size_t)dim;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    uint32_t d = 0U;
+    for (; d + 16U <= dim; d += 16U) {
+      __m128i qa16, cb16;
+      memcpy(&qa16, query_code + d, 16U);
+      memcpy(&cb16, code + d, 16U);
+      __m256 d0 = _mm256_mul_ps(
+          _mm256_cvtepi32_ps(_mm256_sub_epi32(
+              _mm256_cvtepu8_epi32(qa16), _mm256_cvtepu8_epi32(cb16))),
+          _mm256_loadu_ps(scales + d));
+      __m256 d1 = _mm256_mul_ps(
+          _mm256_cvtepi32_ps(_mm256_sub_epi32(
+              _mm256_cvtepu8_epi32(_mm_srli_si128(qa16, 8)),
+              _mm256_cvtepu8_epi32(_mm_srli_si128(cb16, 8)))),
+          _mm256_loadu_ps(scales + d + 8U));
+      acc0 = _mm256_fmadd_ps(d0, d0, acc0);
+      acc1 = _mm256_fmadd_ps(d1, d1, acc1);
+    }
+    if (d + 8U <= dim) {
+      uint64_t ra = 0ULL;
+      uint64_t rb = 0ULL;
+      memcpy(&ra, query_code + d, 8U);
+      memcpy(&rb, code + d, 8U);
+      __m256 diff = _mm256_mul_ps(
+          _mm256_cvtepi32_ps(_mm256_sub_epi32(
+              _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)ra)),
+              _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)rb)))),
+          _mm256_loadu_ps(scales + d));
+      acc0 = _mm256_fmadd_ps(diff, diff, acc0);
+      d += 8U;
+    }
+    float sum = sq8_hsum256_ps(_mm256_add_ps(acc0, acc1));
+    for (; d < dim; d++) {
+      float diff = ((float)query_code[d] - (float)code[d]) * scales[d];
+      sum += diff * diff;
+    }
+    out_distances[i] = sum;
+  }
+}
 #endif
 
 float nbase_sq8_l2_sq_asymmetric(const nbase_sq8_t *sq8, const float *query, const uint8_t *code) {
@@ -340,6 +391,41 @@ nbase_status_t nbase_sq8_l2_sq_asymmetric_batch(
   }
   if (q_shifted != stack_buf) {
     free(q_shifted);
+  }
+  return NBASE_OK;
+}
+
+nbase_status_t nbase_sq8_l2_sq_symmetric_batch(
+    const nbase_sq8_t *sq8,
+    const uint8_t *query_code,
+    const uint8_t *codes,
+    uint32_t count,
+    float *out_distances) {
+  if (!sq8 || !query_code || (count > 0U && (!codes || !out_distances))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  if ((size_t)count > SIZE_MAX / (size_t)sq8->dim) {
+    return NBASE_ERR_NOMEM;
+  }
+
+#if NBASE_SQ8_HAS_AVX2
+  if (nbase_cpu_has_avx2_fma()) {
+    sq8_l2_sq_symmetric_batch_avx2(sq8, query_code, codes, count, out_distances);
+    return NBASE_OK;
+  }
+#endif
+
+  for (uint32_t i = 0U; i < count; i++) {
+    const uint8_t *code = codes + (size_t)i * (size_t)sq8->dim;
+    float sum = 0.0f;
+    for (uint32_t d = 0U; d < sq8->dim; d++) {
+      float diff = ((float)query_code[d] - (float)code[d]) * sq8->scales[d];
+      sum += diff * diff;
+    }
+    out_distances[i] = sum;
   }
   return NBASE_OK;
 }

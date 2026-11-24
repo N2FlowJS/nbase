@@ -14,7 +14,7 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 
 ## Version, Diagnostics & Distance
 
-- `const char *nbase_version(void);` -> `"1.5.0"`
+- `const char *nbase_version(void);` -> `"1.6.0"`
 - `const char *nbase_strerror(nbase_status_t status);`
 - `const char *nbase_simd_backend(void);` -> `"avx2+fma"`, `"neon"`, or `"scalar"`
 - `nbase_config_t nbase_config_default(uint32_t dim);` (`initial_capacity=64`, `enable_hnsw=true`, `hnsw_m=16`, `hnsw_ef_construction=200`, `hnsw_ef_search=50`, `cache_capacity=0`)
@@ -67,8 +67,8 @@ All functions in [`include/nbase.h`](../include/nbase.h) return `nbase_status_t`
 
 - **K-Means++**: `nbase_kmeans_train`
 - **Product Quantization (`nbase_pq_t`)**: `nbase_pq_train`, `destroy`, `dim`, `num_subvectors`, `num_centroids`, `encode`, `decode`, `build_lut`, `adc_distance`, `adc_distance_batch`, `save`, `load`
-- **IVF-PQ (`nbase_ivfpq_t`, `.nbiv`)**: `nbase_ivfpq_config_default`, `train`, `add`, `search`, `search_filtered`, `save`, `load`, `stats`, `destroy`
-- **Scalar Quantization SQ8 (`nbase_sq8_t`, `.nbsq`)**: `nbase_sq8_train`, `destroy`, `dim`, `encode`, `decode`, `l2_sq_asymmetric`, `l2_sq_symmetric`, `l2_sq_asymmetric_batch`, `save`, `load`
+- **IVF-PQ (`nbase_ivfpq_t`, `.nbiv`)**: `nbase_ivfpq_config_default`, `train`, `add`, `search`, `search_filtered`, `search_batch`, `save`, `load`, `stats`, `destroy`
+- **Scalar Quantization SQ8 (`nbase_sq8_t`, `.nbsq`)**: `nbase_sq8_train`, `destroy`, `dim`, `encode`, `decode`, `l2_sq_asymmetric`, `l2_sq_symmetric`, `l2_sq_asymmetric_batch`, `l2_sq_symmetric_batch`, `save`, `load`
 - **Binary Quantization BQ (`nbase_bq_t`, `.nbbq`)**: `nbase_bq_train`, `destroy`, `dim`, `words_per_vec`, `encode`, `hamming`, `hamming_batch`, `save`, `load`
 - **Multi-Probe LSH (`nbase_lsh_t`, `.nblh`)**: `nbase_lsh_config_default`, `create`, `destroy`, `add`, `add_batch`, `delete`, `contains`, `search`, `search_filtered`, `stats`, `save`, `load`
 - **Standalone BM25 & RRF (`nbase_bm25_t`, `.nbbm`)**: `nbase_bm25_create`, `destroy`, `doc_count`, `index`, `get`, `delete`, `search`, `search_filtered`, `save`, `load`, `nbase_hybrid_rrf`
@@ -83,4 +83,4 @@ All handles wrap C ownership with move semantics, RAII cleanup, and `nbase::Erro
 - `nbase::Database` (`create`, `open`, `open_mmap`, `open_wal`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `count`, `list_ids`, `set_meta`, `set_meta_batch`, `update_meta`, `update_meta_batch`, `delete_meta`, `query_meta`, `set_text`, `set_text_batch`, `get_text`, `delete_text`, `search`, `search_radius`, `find_similar`, `search_text`, `search_hybrid`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `extract_communities`, `compact`, `rebuild_hnsw_mt`, `cache_configure`, `cache_clear`, `stats`)
 - `nbase::PartitionedDatabase` (`open`, `save`, `add`, `add_batch`, `upsert`, `upsert_batch`, `remove`, `delete_batch`, `delete_by_filter`, `get`, `get_batch`, `contains`, `count`, `list_ids`, `set_meta`, `set_meta_batch`, `update_meta`, `update_meta_batch`, `delete_meta`, `query_meta`, `set_text`, `set_text_batch`, `get_text`, `delete_text`, `search`, `search_radius`, `search_batch`, `search_text`, `search_hybrid`, `find_similar`, `rerank_mmr`, `rerank_weighted`, `extract_relationships`, `compact`, `rebuild_hnsw_mt`, `stats`)
 - `nbase::distance_batch(metric, query, vectors)`
-- `nbase::ClusteredDatabase` (`upsert_batch`, `list_ids`), `nbase::Pq` (`adc_distance_batch`), `nbase::IvfPq` (`search_filtered`, `stats`), `nbase::Lsh` (`add_batch`, `contains`, `search_filtered`, `stats`), `nbase::Sq8` (`l2_sq_symmetric`, `l2_sq_asymmetric_batch`), `nbase::Bq` (`hamming_batch`), `nbase::Bm25`, `nbase::HttpServer`
+- `nbase::ClusteredDatabase` (`upsert_batch`, `list_ids`), `nbase::Pq` (`adc_distance_batch`), `nbase::IvfPq` (`search_filtered`, `search_batch`, `stats`), `nbase::Lsh` (`add_batch`, `contains`, `search_filtered`, `stats`), `nbase::Sq8` (`l2_sq_symmetric`, `l2_sq_asymmetric_batch`, `l2_sq_symmetric_batch`), `nbase::Bq` (`hamming_batch`), `nbase::Bm25`, `nbase::HttpServer`

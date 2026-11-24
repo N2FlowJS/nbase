@@ -341,9 +341,20 @@ static void bench_batch_threads_and_pq(void) {
       uint64_t rb0 = now_ns();
       (void)nbase_rebuild_hnsw_mt(mt_db, 4U);
       uint64_t rb1 = now_ns();
-      printf("  add_batch_mt(4t)=%6.2f ms  rebuild_mt(4t)=%6.2f ms\n",
+      nbase_search_opts_t ex_opts = nbase_search_opts_default();
+      ex_opts.mode = NBASE_SEARCH_EXACT;
+      ex_opts.skip_cache = true;
+      nbase_result_t ex_hits[10];
+      uint32_t ex_got = 0U;
+      uint64_t ex0 = now_ns();
+      for (uint32_t q = 0U; q < 20U; q++) {
+        (void)nbase_search(mt_db, queries + (size_t)q * dim, dim, k, &ex_opts, ex_hits, &ex_got);
+      }
+      uint64_t ex1 = now_ns();
+      printf("  add_batch_mt(4t)=%6.2f ms  rebuild_mt(4t)=%6.2f ms  exact_scan_8000=%6.2f us/query\n",
              (double)(mt1 - mt0) / 1e6,
-             (double)(rb1 - rb0) / 1e6);
+             (double)(rb1 - rb0) / 1e6,
+             (double)(ex1 - ex0) / 20.0 / 1e3);
       nbase_close(mt_db);
     }
 
@@ -365,10 +376,17 @@ static void bench_batch_threads_and_pq(void) {
       }
       uint64_t iq1 = now_ns();
       double ivf_q_us = (double)(iq1 - iq0) / (double)nqueries / 1e3;
-      printf("  ivfpq(nlist=32,M=8)  train=%6.2f ms  add=%6.2f ms  search(nprobe=4)=%6.2f us/query\n",
+      uint64_t ib0 = now_ns();
+      (void)nbase_ivfpq_search_batch(ivf, queries, nqueries, k, 4U, 4U, res, counts);
+      uint64_t ib1 = now_ns();
+      double ivf_batch_ms = (double)(ib1 - ib0) / 1e6;
+      double ivf_batch_qps = (ivf_batch_ms > 0.0) ? ((double)nqueries * 1000.0 / ivf_batch_ms) : 0.0;
+      printf("  ivfpq(nlist=32,M=8)  train=%6.2f ms  add=%6.2f ms  search(nprobe=4)=%6.2f us/query  search_batch(4t)=%.2f ms (%.0f QPS)\n",
              (double)(it1 - it0) / 1e6,
              (double)(ia1 - ia0) / 1e6,
-             ivf_q_us);
+             ivf_q_us,
+             ivf_batch_ms,
+             ivf_batch_qps);
       nbase_ivfpq_destroy(ivf);
     }
     free(batch_ids);
@@ -394,6 +412,8 @@ static void bench_batch_threads_and_pq(void) {
       }
       uint64_t sq_s1 = now_ns();
       double asym_batch_us = 0.0;
+      double sym_scan_us = 0.0;
+      double sym_batch_us = 0.0;
       float *sq_out = malloc((size_t)count * sizeof(float));
       if (sq_out) {
         uint64_t sb0 = now_ns();
@@ -404,14 +424,35 @@ static void bench_batch_threads_and_pq(void) {
         }
         uint64_t sb1 = now_ns();
         asym_batch_us = (double)(sb1 - sb0) / 20.0 / 1e3;
+
+        uint64_t sy0 = now_ns();
+        for (uint32_t q = 0U; q < 20U; q++) {
+          const uint8_t *qc = sq_codes + (size_t)q * dim;
+          for (uint32_t i = 0U; i < count; i++) {
+            sq_sink += nbase_sq8_l2_sq_symmetric(sq8, qc, sq_codes + (size_t)i * dim);
+          }
+        }
+        uint64_t sy1 = now_ns();
+        sym_scan_us = (double)(sy1 - sy0) / 20.0 / 1e3;
+
+        uint64_t syb0 = now_ns();
+        for (uint32_t q = 0U; q < 20U; q++) {
+          (void)nbase_sq8_l2_sq_symmetric_batch(
+              sq8, sq_codes + (size_t)q * dim, sq_codes, count, sq_out);
+          sq_sink += sq_out[0];
+        }
+        uint64_t syb1 = now_ns();
+        sym_batch_us = (double)(syb1 - syb0) / 20.0 / 1e3;
         free(sq_out);
       }
       (void)sq_sink;
-      printf("  sq8  train=%5.2f ms  encode(8000)=%5.2f ms  compression=4x  asym_scan_8000=%6.2f us/query  asym_batch=%6.2f us/query\n",
+      printf("  sq8  train=%5.2f ms  encode(8000)=%5.2f ms  compression=4x  asym_scan_8000=%6.2f us/query  asym_batch=%6.2f us/query  sym_scan=%6.2f us  sym_batch=%6.2f us\n",
              (double)(sq_t1 - sq_t0) / 1e6,
              (double)(sq_e1 - sq_e0) / 1e6,
              (double)(sq_s1 - sq_s0) / 20.0 / 1e3,
-             asym_batch_us);
+             asym_batch_us,
+             sym_scan_us,
+             sym_batch_us);
       free(sq_codes);
     }
     nbase_sq8_destroy(sq8);

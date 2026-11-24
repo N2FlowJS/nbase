@@ -5,6 +5,7 @@
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -73,39 +74,26 @@ static void normalize_vec(const float *src, float *dst, uint32_t dim) {
   }
 }
 
-static uint32_t find_nearest_coarse(
-    const float *coarse,
-    uint32_t nlist,
-    uint32_t dim,
-    const float *vec,
-    nbase_dist_fn l2sq_fn) {
-  uint32_t best = 0U;
-  float best_d = FLT_MAX;
-  for (uint32_t c = 0U; c < nlist; c++) {
-    float d = l2sq_fn(vec, coarse + (size_t)c * (size_t)dim, dim);
-    if (d < best_d) {
-      best_d = d;
-      best = c;
-    }
-  }
-  return best;
-}
-
-static void build_dot_lut(const nbase_pq_t *pq, const float *query, float *out_lut) {
+static nbase_status_t build_dot_lut(const nbase_pq_t *pq, const float *query, float *out_lut) {
   uint32_t m_sub = nbase_pq_num_subvectors(pq);
   uint32_t k_cent = nbase_pq_num_centroids(pq);
   uint32_t sub_dim = nbase_pq_dim(pq) / m_sub;
   const float *codebooks = nbase_pq_codebooks(pq);
-  nbase_dist_fn ip_fn = nbase_get_distance_fn(NBASE_METRIC_INNER_PRODUCT);
 
   for (uint32_t m = 0U; m < m_sub; m++) {
     const float *q_sub = query + (size_t)m * (size_t)sub_dim;
     const float *cb_m = codebooks + (size_t)m * (size_t)k_cent * (size_t)sub_dim;
+    float *lut_row = out_lut + (size_t)m * (size_t)k_cent;
+    nbase_status_t st = nbase_distance_batch(
+        NBASE_METRIC_INNER_PRODUCT, q_sub, cb_m, k_cent, sub_dim, lut_row);
+    if (st != NBASE_OK) {
+      return st;
+    }
     for (uint32_t c = 0U; c < k_cent; c++) {
-      const float *cent = cb_m + (size_t)c * (size_t)sub_dim;
-      out_lut[(size_t)m * (size_t)k_cent + c] = -ip_fn(q_sub, cent, sub_dim);
+      lut_row[c] = -lut_row[c];
     }
   }
+  return NBASE_OK;
 }
 
 typedef struct res_maxheap {
@@ -284,15 +272,16 @@ static nbase_status_t ivfpq_add_unlocked(
 
   float *vec_buf = malloc((size_t)index->dim * sizeof(float));
   float *res_buf = malloc((size_t)index->dim * sizeof(float));
+  float *coarse_dists = malloc((size_t)index->nlist * sizeof(float));
   uint8_t *code_buf = malloc((size_t)index->num_subvectors);
-  if (!vec_buf || !res_buf || !code_buf) {
+  if (!vec_buf || !res_buf || !coarse_dists || !code_buf) {
     free(vec_buf);
     free(res_buf);
+    free(coarse_dists);
     free(code_buf);
     return NBASE_ERR_NOMEM;
   }
 
-  nbase_dist_fn l2sq_fn = nbase_get_distance_fn(NBASE_METRIC_SQUARED_EUCLIDEAN);
   nbase_status_t st = NBASE_OK;
   for (uint32_t i = 0U; i < count; i++) {
     const float *src = vectors + (size_t)i * (size_t)index->dim;
@@ -302,7 +291,24 @@ static nbase_status_t ivfpq_add_unlocked(
       memcpy(vec_buf, src, (size_t)index->dim * sizeof(float));
     }
 
-    uint32_t list_id = find_nearest_coarse(index->coarse_centroids, index->nlist, index->dim, vec_buf, l2sq_fn);
+    st = nbase_distance_batch(
+        NBASE_METRIC_SQUARED_EUCLIDEAN,
+        vec_buf,
+        index->coarse_centroids,
+        index->nlist,
+        index->dim,
+        coarse_dists);
+    if (st != NBASE_OK) {
+      break;
+    }
+    uint32_t list_id = 0U;
+    float best_cd = FLT_MAX;
+    for (uint32_t c = 0U; c < index->nlist; c++) {
+      if (coarse_dists[c] < best_cd) {
+        best_cd = coarse_dists[c];
+        list_id = c;
+      }
+    }
     const float *c = index->coarse_centroids + (size_t)list_id * (size_t)index->dim;
     for (uint32_t d = 0U; d < index->dim; d++) {
       res_buf[d] = vec_buf[d] - c[d];
@@ -341,6 +347,7 @@ static nbase_status_t ivfpq_add_unlocked(
 
   free(vec_buf);
   free(res_buf);
+  free(coarse_dists);
   free(code_buf);
   return st;
 }
@@ -384,12 +391,14 @@ static nbase_status_t ivfpq_search_filtered_unlocked(
 
   float *q_buf = malloc((size_t)index->dim * sizeof(float));
   float *q_res = malloc((size_t)index->dim * sizeof(float));
+  float *coarse_dists = malloc((size_t)index->nlist * sizeof(float));
   probe_cand_t *probes = malloc((size_t)index->nlist * sizeof(probe_cand_t));
   float *lut = malloc((size_t)index->num_subvectors * (size_t)index->num_centroids * sizeof(float));
   nbase_result_t *heap_buf = malloc((size_t)k * sizeof(nbase_result_t));
-  if (!q_buf || !q_res || !probes || !lut || !heap_buf) {
+  if (!q_buf || !q_res || !coarse_dists || !probes || !lut || !heap_buf) {
     free(q_buf);
     free(q_res);
+    free(coarse_dists);
     free(probes);
     free(lut);
     free(heap_buf);
@@ -402,17 +411,23 @@ static nbase_status_t ivfpq_search_filtered_unlocked(
     memcpy(q_buf, query, (size_t)index->dim * sizeof(float));
   }
 
-  nbase_dist_fn ip_fn = nbase_get_distance_fn(NBASE_METRIC_INNER_PRODUCT);
-  nbase_dist_fn l2sq_fn = nbase_get_distance_fn(NBASE_METRIC_SQUARED_EUCLIDEAN);
-
+  nbase_metric_t coarse_metric = (index->metric == NBASE_METRIC_INNER_PRODUCT)
+                                     ? NBASE_METRIC_INNER_PRODUCT
+                                     : NBASE_METRIC_SQUARED_EUCLIDEAN;
+  nbase_status_t st = nbase_distance_batch(
+      coarse_metric, q_buf, index->coarse_centroids, index->nlist, index->dim, coarse_dists);
+  if (st != NBASE_OK) {
+    free(q_buf);
+    free(q_res);
+    free(coarse_dists);
+    free(probes);
+    free(lut);
+    free(heap_buf);
+    return st;
+  }
   for (uint32_t c = 0U; c < index->nlist; c++) {
-    const float *cent = index->coarse_centroids + (size_t)c * (size_t)index->dim;
     probes[c].list_id = c;
-    if (index->metric == NBASE_METRIC_INNER_PRODUCT) {
-      probes[c].dist = ip_fn(q_buf, cent, index->dim);
-    } else {
-      probes[c].dist = l2sq_fn(q_buf, cent, index->dim);
-    }
+    probes[c].dist = coarse_dists[c];
   }
   qsort(probes, index->nlist, sizeof(probe_cand_t), cmp_probe_asc);
 
@@ -430,6 +445,7 @@ static nbase_status_t ivfpq_search_filtered_unlocked(
       if (!list_dists) {
         free(q_buf);
         free(q_res);
+        free(coarse_dists);
         free(probes);
         free(lut);
         free(heap_buf);
@@ -439,10 +455,10 @@ static nbase_status_t ivfpq_search_filtered_unlocked(
   }
 
   res_maxheap_t heap = {heap_buf, 0U, k};
-  nbase_status_t st = NBASE_OK;
+  nbase_dist_fn ip_fn = nbase_get_distance_fn(NBASE_METRIC_INNER_PRODUCT);
 
   if (index->metric == NBASE_METRIC_INNER_PRODUCT) {
-    build_dot_lut(index->pq, q_buf, lut);
+    st = build_dot_lut(index->pq, q_buf, lut);
   }
 
   for (uint32_t p = 0U; p < eff_probe && st == NBASE_OK; p++) {
@@ -508,6 +524,7 @@ static nbase_status_t ivfpq_search_filtered_unlocked(
   free(list_dists);
   free(q_buf);
   free(q_res);
+  free(coarse_dists);
   free(probes);
   free(lut);
   free(heap_buf);
@@ -546,6 +563,119 @@ nbase_status_t nbase_ivfpq_search(
     nbase_result_t *out_results,
     uint32_t *out_count) {
   return nbase_ivfpq_search_filtered(index, query, k, nprobe, NULL, NULL, out_results, out_count);
+}
+
+typedef struct ivfpq_batch_ctx {
+  const nbase_ivfpq_t *index;
+  const float *queries;
+  uint32_t query_count;
+  uint32_t k;
+  uint32_t nprobe;
+  nbase_result_t *out_results;
+  uint32_t *out_counts;
+  atomic_uint next_q;
+  atomic_int first_err;
+} ivfpq_batch_ctx_t;
+
+static void *ivfpq_search_batch_worker(void *raw) {
+  ivfpq_batch_ctx_t *ctx = (ivfpq_batch_ctx_t *)raw;
+  while (true) {
+    if (atomic_load_explicit(&ctx->first_err, memory_order_acquire) != (int)NBASE_OK) {
+      break;
+    }
+    uint32_t q = atomic_fetch_add_explicit(&ctx->next_q, 1U, memory_order_relaxed);
+    if (q >= ctx->query_count) {
+      break;
+    }
+    uint32_t got = 0U;
+    nbase_status_t st = ivfpq_search_filtered_unlocked(
+        ctx->index,
+        ctx->queries + (size_t)q * (size_t)ctx->index->dim,
+        ctx->k,
+        ctx->nprobe,
+        NULL,
+        NULL,
+        ctx->out_results + (size_t)q * (size_t)ctx->k,
+        &got);
+    ctx->out_counts[q] = got;
+    if (st != NBASE_OK) {
+      int expected = (int)NBASE_OK;
+      (void)atomic_compare_exchange_strong(&ctx->first_err, &expected, (int)st);
+      break;
+    }
+  }
+  return NULL;
+}
+
+nbase_status_t nbase_ivfpq_search_batch(
+    const nbase_ivfpq_t *index,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  if (!index) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (query_count == 0U) {
+    return NBASE_OK;
+  }
+  if (!queries || !out_counts || (k > 0U && !out_results)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if ((size_t)query_count > SIZE_MAX / (size_t)index->dim ||
+      (k > 0U && (size_t)query_count > SIZE_MAX / (size_t)k)) {
+    return NBASE_ERR_NOMEM;
+  }
+  for (uint32_t q = 0U; q < query_count; q++) {
+    out_counts[q] = 0U;
+    if (!nbase_vec_is_finite(queries + (size_t)q * (size_t)index->dim, index->dim)) {
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+  if (k == 0U) {
+    return NBASE_OK;
+  }
+
+  uint32_t workers = (num_threads == 0U) ? 4U : num_threads;
+  if (workers > 8U) {
+    workers = 8U;
+  }
+  if (workers > query_count) {
+    workers = query_count;
+  }
+
+  nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
+  pthread_rwlock_rdlock(&mutable_idx->rwlock);
+
+  ivfpq_batch_ctx_t ctx;
+  ctx.index = index;
+  ctx.queries = queries;
+  ctx.query_count = query_count;
+  ctx.k = k;
+  ctx.nprobe = nprobe;
+  ctx.out_results = out_results;
+  ctx.out_counts = out_counts;
+  atomic_init(&ctx.next_q, 0U);
+  atomic_init(&ctx.first_err, (int)NBASE_OK);
+
+  pthread_t tids[7];
+  uint32_t spawned = 0U;
+  for (uint32_t t = 1U; t < workers; t++) {
+    if (pthread_create(&tids[spawned], NULL, ivfpq_search_batch_worker, &ctx) == 0) {
+      spawned++;
+    }
+  }
+  (void)ivfpq_search_batch_worker(&ctx);
+  for (uint32_t t = 0U; t < spawned; t++) {
+    pthread_join(tids[t], NULL);
+  }
+
+  nbase_status_t st = (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
+  pthread_rwlock_unlock(&mutable_idx->rwlock);
+  return st;
 }
 
 static nbase_status_t ivfpq_save_unlocked(const nbase_ivfpq_t *index, const char *file_path) {

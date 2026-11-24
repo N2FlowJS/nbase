@@ -1371,6 +1371,107 @@ static void test_http_server_post_similar_and_distance(void) {
   nbase_close(db);
 }
 
+static void test_http_server_ndjson_import_export(void) {
+  nbase_config_t cfg1 = nbase_config_default(3U);
+  cfg1.enable_hnsw = false;
+  nbase_db_t *db1 = NULL;
+  ASSERT_STATUS(nbase_create(&cfg1, &db1), NBASE_OK);
+
+  nbase_http_config_t hcfg1 = nbase_http_config_default();
+  hcfg1.port = 0U;
+  hcfg1.num_workers = 2U;
+  nbase_http_server_t *srv1 = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db1, &hcfg1, &srv1), NBASE_OK);
+  uint16_t port1 = nbase_http_server_port(srv1);
+
+  http_resp_t r;
+  ASSERT_TRUE(http_req(port1, "POST", "/api/vectors/import", NULL, "", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"imported\":0") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port1,
+      "POST",
+      "/api/vectors/import",
+      NULL,
+      "{\"id\":10,\"vector\":[1,0,0],\"metadata\":{\"tag\":\"a\"},\"text\":\"doc ten\"}\n"
+      "\r\n"
+      "{\"id\":20,\"vector\":[0,1,0],\"metadata\":{\"tag\":\"b\"},\"text\":\"doc twenty\"}\n",
+      &r));
+  ASSERT_EQ_I64(r.status, 201);
+  ASSERT_TRUE(strstr(r.body, "\"imported\":2") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port1,
+      "POST",
+      "/api/vectors/import?upsert=true",
+      NULL,
+      "{\"id\":20,\"vector\":[0,2,0],\"metadata\":{\"tag\":\"updated\"}}\n"
+      "{\"id\":30,\"vector\":[0,0,1]}\n",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"imported\":2") != NULL);
+  free(r.body);
+
+  /* Error cases: malformed JSON line -> 400, wrong method -> 405 */
+  ASSERT_TRUE(http_req(port1, "POST", "/api/vectors/import", NULL, "{bad json}\n", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port1, "GET", "/api/vectors/import", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port1, "POST", "/api/vectors/export", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  /* Export NDJSON from srv1 and import directly into empty srv2 */
+  ASSERT_TRUE(http_req(port1, "GET", "/api/vectors/export", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"tag\":\"updated\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  char *exported = r.body;
+
+  nbase_config_t cfg2 = nbase_config_default(3U);
+  cfg2.enable_hnsw = false;
+  nbase_db_t *db2 = NULL;
+  ASSERT_STATUS(nbase_create(&cfg2, &db2), NBASE_OK);
+  nbase_http_config_t hcfg2 = nbase_http_config_default();
+  hcfg2.port = 0U;
+  hcfg2.num_workers = 2U;
+  nbase_http_server_t *srv2 = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db2, &hcfg2, &srv2), NBASE_OK);
+  uint16_t port2 = nbase_http_server_port(srv2);
+
+  ASSERT_TRUE(http_req(port2, "POST", "/api/vectors/import", NULL, exported, &r));
+  ASSERT_EQ_I64(r.status, 201);
+  ASSERT_TRUE(strstr(r.body, "\"imported\":3") != NULL);
+  free(r.body);
+  free(exported);
+
+  ASSERT_TRUE(http_req(
+      port2,
+      "GET",
+      "/api/vectors/10?includeVector=true&includeMetadata=true&includeText=true",
+      NULL,
+      NULL,
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"tag\":\"a\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"doc ten\"") != NULL);
+  free(r.body);
+
+  nbase_http_server_stop(srv2);
+  nbase_close(db2);
+  nbase_http_server_stop(srv1);
+  nbase_close(db1);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1383,4 +1484,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_batch_meta_text_and_filtered_graph);
   RUN_TEST(test_http_server_count_and_resource_crud);
   RUN_TEST(test_http_server_post_similar_and_distance);
+  RUN_TEST(test_http_server_ndjson_import_export);
 }

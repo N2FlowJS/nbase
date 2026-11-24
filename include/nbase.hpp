@@ -558,6 +558,27 @@ class Sq8 {
     return l2_sq_asymmetric_batch(query, codes.data(), count);
   }
 
+  std::vector<float> l2_sq_symmetric_batch(
+      const uint8_t *query_code,
+      const uint8_t *codes,
+      uint32_t count) const {
+    std::vector<float> out(count);
+    detail::check(nbase_sq8_l2_sq_symmetric_batch(
+        ptr_, query_code, codes, count, out.empty() ? nullptr : out.data()));
+    return out;
+  }
+
+  std::vector<float> l2_sq_symmetric_batch(
+      const std::vector<uint8_t> &query_code,
+      const std::vector<uint8_t> &codes) const {
+    uint32_t d = dim();
+    if (d == 0U || query_code.size() != d || (codes.size() % d) != 0U) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    uint32_t count = static_cast<uint32_t>(codes.size() / d);
+    return l2_sq_symmetric_batch(query_code.data(), codes.data(), count);
+  }
+
   void save(const std::string &file_path) const {
     detail::check(nbase_sq8_save(ptr_, file_path.c_str()));
   }
@@ -1443,6 +1464,38 @@ class IvfPq {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_result_t>> search_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t k,
+      uint32_t nprobe = 8U,
+      uint32_t num_threads = 0U) const {
+    if (query_count == 0U) {
+      return {};
+    }
+    uint32_t d = stats().dim;
+    if (d == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(d)) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_ivfpq_search_batch(
+        ptr_,
+        queries.data(),
+        query_count,
+        k,
+        nprobe,
+        num_threads,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    std::vector<std::vector<nbase_result_t>> res(query_count);
+    for (uint32_t q = 0U; q < query_count; q++) {
+      const nbase_result_t *row = flat.data() + static_cast<size_t>(q) * static_cast<size_t>(k);
+      res[q].assign(row, row + counts[q]);
+    }
+    return res;
   }
 
   void save(const std::string &file_path) const {

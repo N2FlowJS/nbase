@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 5
+#define NBASE_VERSION_MINOR 6
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -424,6 +424,15 @@ nbase_status_t nbase_ivfpq_train(const nbase_ivfpq_config_t *cfg, const float *t
 nbase_status_t nbase_ivfpq_add(nbase_ivfpq_t *index, const uint64_t *ids, const float *vectors, uint32_t count);
 nbase_status_t nbase_ivfpq_search(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_ivfpq_search_filtered(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_ivfpq_search_batch(
+    const nbase_ivfpq_t *index,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_ivfpq_save(const nbase_ivfpq_t *index, const char *file_path);
 nbase_status_t nbase_ivfpq_load(const char *file_path, nbase_ivfpq_t **out_index);
 nbase_status_t nbase_ivfpq_stats(const nbase_ivfpq_t *index, nbase_ivfpq_stats_t *out_stats);
@@ -450,6 +459,12 @@ nbase_status_t nbase_sq8_decode(const nbase_sq8_t *sq8, const uint8_t *codes, ui
 float nbase_sq8_l2_sq_asymmetric(const nbase_sq8_t *sq8, const float *query, const uint8_t *code);
 float nbase_sq8_l2_sq_symmetric(const nbase_sq8_t *sq8, const uint8_t *code_a, const uint8_t *code_b);
 nbase_status_t nbase_sq8_l2_sq_asymmetric_batch(const nbase_sq8_t *sq8, const float *query, const uint8_t *codes, uint32_t count, float *out_distances);
+nbase_status_t nbase_sq8_l2_sq_symmetric_batch(
+    const nbase_sq8_t *sq8,
+    const uint8_t *query_code,
+    const uint8_t *codes,
+    uint32_t count,
+    float *out_distances);
 nbase_status_t nbase_sq8_save(const nbase_sq8_t *sq8, const char *file_path);
 nbase_status_t nbase_sq8_load(const char *file_path, nbase_sq8_t **out_sq8);
 

@@ -210,8 +210,88 @@ static void test_wal_batch_meta_and_text_crash_recovery(void) {
   test_rm_rf(dir);
 }
 
+static void test_wal_fuzz_truncation_and_crc_recovery(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  const uint32_t dim = 4U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.seed = 909ULL;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  ASSERT_STATUS(nbase_add(db, 1ULL, v0, dim), NBASE_OK);
+  ASSERT_STATUS(nbase_save(db, dir), NBASE_OK);
+  ASSERT_STATUS(nbase_wal_enable(db, dir), NBASE_OK);
+
+  for (uint64_t i = 2ULL; i <= 5ULL; i++) {
+    float v[4] = {(float)i, 0.5f, 0.25f, 0.0f};
+    ASSERT_STATUS(nbase_add(db, i, v, dim), NBASE_OK);
+  }
+  ASSERT_STATUS(nbase_upsert(db, 3ULL, v0, dim), NBASE_OK);
+  ASSERT_STATUS(nbase_delete(db, 4ULL), NBASE_OK);
+  nbase_meta_field_t mf = {"k", {.type = NBASE_META_STRING, .as = {.str = "wal_fuzz"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 2ULL, &mf, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 5ULL, "wal fuzz durable text"), NBASE_OK);
+  nbase_close(db);
+
+  char wal_path[300];
+  snprintf(wal_path, sizeof(wal_path), "%s/wal.nbw", dir);
+  FILE *fp = fopen(wal_path, "rb");
+  ASSERT_TRUE(fp != NULL);
+  ASSERT_TRUE(fseek(fp, 0L, SEEK_END) == 0);
+  long sz = ftell(fp);
+  ASSERT_TRUE(sz > 64L);
+  rewind(fp);
+  uint8_t *wal_bytes = malloc((size_t)sz);
+  ASSERT_TRUE(wal_bytes != NULL);
+  ASSERT_TRUE(fread(wal_bytes, 1U, (size_t)sz, fp) == (size_t)sz);
+  fclose(fp);
+
+  /* Sweep truncation cut lengths across header+frame boundaries without crashing or leaking */
+  for (long cut = 64L; cut <= sz; cut += 19L) {
+    FILE *wfp = fopen(wal_path, "wb");
+    ASSERT_TRUE(wfp != NULL);
+    ASSERT_TRUE(fwrite(wal_bytes, 1U, (size_t)cut, wfp) == (size_t)cut);
+    fclose(wfp);
+
+    nbase_db_t *rec = NULL;
+    ASSERT_STATUS(nbase_open_wal(dir, &rec), NBASE_OK);
+    ASSERT_TRUE(nbase_contains(rec, 1ULL));
+    nbase_stats_t st;
+    ASSERT_STATUS(nbase_stats(rec, &st), NBASE_OK);
+    ASSERT_TRUE(st.active_vectors >= 1ULL && st.active_vectors <= 5ULL);
+    nbase_close(rec);
+  }
+
+  /* Full WAL intact recovery */
+  FILE *wfp = fopen(wal_path, "wb");
+  ASSERT_TRUE(wfp != NULL);
+  ASSERT_TRUE(fwrite(wal_bytes, 1U, (size_t)sz, wfp) == (size_t)sz);
+  fclose(wfp);
+
+  /* Deterministic frame CRC bitflips in payload must cleanly truncate torn frame */
+  for (long off = 72L; off < sz; off += 41L) {
+    FILE *bfp = fopen(wal_path, "wb");
+    ASSERT_TRUE(bfp != NULL);
+    ASSERT_TRUE(fwrite(wal_bytes, 1U, (size_t)sz, bfp) == (size_t)sz);
+    fclose(bfp);
+    ASSERT_TRUE(test_flip_file_byte(wal_path, off));
+
+    nbase_db_t *rec = NULL;
+    ASSERT_STATUS(nbase_open_wal(dir, &rec), NBASE_OK);
+    ASSERT_TRUE(nbase_contains(rec, 1ULL));
+    nbase_close(rec);
+  }
+
+  free(wal_bytes);
+  test_rm_rf(dir);
+}
+
 void test_wal_run(void) {
   RUN_TEST(test_wal_enable_add_upsert_delete_meta_and_crash_recovery);
   RUN_TEST(test_wal_torn_tail_truncation_and_checkpoint);
   RUN_TEST(test_wal_batch_meta_and_text_crash_recovery);
+  RUN_TEST(test_wal_fuzz_truncation_and_crc_recovery);
 }

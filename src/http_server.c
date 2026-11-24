@@ -925,6 +925,68 @@ static void handle_stats(const http_conn_t *c) {
   nbase_sbuf_free(&sb);
 }
 
+static nbase_status_t apply_json_items_meta_and_text(
+    nbase_db_t *db,
+    const uint64_t *ids,
+    nbase_json_t **items,
+    uint32_t count) {
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+  nbase_meta_batch_item_t *meta_items = calloc(count, sizeof(*meta_items));
+  nbase_meta_field_t **field_bufs = calloc(count, sizeof(*field_bufs));
+  uint64_t *text_ids = malloc((size_t)count * sizeof(uint64_t));
+  const char **text_ptrs = malloc((size_t)count * sizeof(const char *));
+  if (!meta_items || !field_bufs || !text_ids || !text_ptrs) {
+    free(meta_items);
+    free(field_bufs);
+    free(text_ids);
+    free((void *)text_ptrs);
+    return NBASE_ERR_NOMEM;
+  }
+
+  nbase_status_t st = NBASE_OK;
+  uint32_t meta_cnt = 0U;
+  uint32_t text_cnt = 0U;
+  for (uint32_t i = 0U; i < count && st == NBASE_OK; i++) {
+    const nbase_json_t *jmeta = nbase_json_obj_get(items[i], "metadata");
+    if (jmeta != NULL && jmeta->type != NBASE_JSON_NULL) {
+      nbase_meta_field_t *fields = NULL;
+      uint32_t fcnt = 0U;
+      st = parse_meta_fields_obj(jmeta, &fields, &fcnt);
+      if (st == NBASE_OK && fcnt > 0U) {
+        field_bufs[meta_cnt] = fields;
+        meta_items[meta_cnt].id = ids[i];
+        meta_items[meta_cnt].fields = fields;
+        meta_items[meta_cnt].field_count = fcnt;
+        meta_cnt++;
+      } else {
+        free(fields);
+      }
+    }
+    const nbase_json_t *jtxt = nbase_json_obj_get(items[i], "text");
+    if (st == NBASE_OK && jtxt != NULL && jtxt->type == NBASE_JSON_STRING) {
+      text_ids[text_cnt] = ids[i];
+      text_ptrs[text_cnt] = jtxt->str;
+      text_cnt++;
+    }
+  }
+  if (st == NBASE_OK && meta_cnt > 0U) {
+    st = nbase_set_meta_batch(db, meta_items, meta_cnt);
+  }
+  if (st == NBASE_OK && text_cnt > 0U) {
+    st = nbase_set_text_batch(db, text_ids, text_ptrs, text_cnt);
+  }
+  for (uint32_t i = 0U; i < meta_cnt; i++) {
+    free(field_bufs[i]);
+  }
+  free(meta_items);
+  free(field_bufs);
+  free(text_ids);
+  free((void *)text_ptrs);
+  return st;
+}
+
 static void handle_write_vectors(
     const http_conn_t *c,
     const char *body,
@@ -1018,66 +1080,9 @@ static void handle_write_vectors(
                             ? nbase_upsert_batch(srv->db, ids, vecs, count, dim, threads)
                             : nbase_add_batch(srv->db, ids, vecs, count, dim, threads);
     free(vecs);
-    if (st != NBASE_OK) {
-      free(ids);
-      nbase_json_free(root);
-      send_error_json(c, http_code_for_status(st), nbase_strerror(st));
-      return;
+    if (st == NBASE_OK) {
+      st = apply_json_items_meta_and_text(srv->db, ids, jbulk->items, count);
     }
-
-    nbase_meta_batch_item_t *meta_items = calloc(count > 0U ? count : 1U, sizeof(*meta_items));
-    nbase_meta_field_t **field_bufs = calloc(count > 0U ? count : 1U, sizeof(*field_bufs));
-    uint64_t *text_ids = malloc((size_t)(count > 0U ? count : 1U) * sizeof(uint64_t));
-    const char **text_ptrs = malloc((size_t)(count > 0U ? count : 1U) * sizeof(const char *));
-    if (!meta_items || !field_bufs || !text_ids || !text_ptrs) {
-      free(meta_items);
-      free(field_bufs);
-      free(text_ids);
-      free((void *)text_ptrs);
-      free(ids);
-      nbase_json_free(root);
-      send_error_json(c, 500, "out of memory");
-      return;
-    }
-
-    uint32_t meta_cnt = 0U;
-    uint32_t text_cnt = 0U;
-    for (uint32_t i = 0U; i < count && st == NBASE_OK; i++) {
-      const nbase_json_t *jmeta = nbase_json_obj_get(jbulk->items[i], "metadata");
-      if (jmeta != NULL && jmeta->type != NBASE_JSON_NULL) {
-        nbase_meta_field_t *fields = NULL;
-        uint32_t fcnt = 0U;
-        st = parse_meta_fields_obj(jmeta, &fields, &fcnt);
-        if (st == NBASE_OK && fcnt > 0U) {
-          field_bufs[meta_cnt] = fields;
-          meta_items[meta_cnt].id = ids[i];
-          meta_items[meta_cnt].fields = fields;
-          meta_items[meta_cnt].field_count = fcnt;
-          meta_cnt++;
-        } else {
-          free(fields);
-        }
-      }
-      const nbase_json_t *jtxt = nbase_json_obj_get(jbulk->items[i], "text");
-      if (st == NBASE_OK && jtxt != NULL && jtxt->type == NBASE_JSON_STRING) {
-        text_ids[text_cnt] = ids[i];
-        text_ptrs[text_cnt] = jtxt->str;
-        text_cnt++;
-      }
-    }
-    if (st == NBASE_OK && meta_cnt > 0U) {
-      st = nbase_set_meta_batch(srv->db, meta_items, meta_cnt);
-    }
-    if (st == NBASE_OK && text_cnt > 0U) {
-      st = nbase_set_text_batch(srv->db, text_ids, text_ptrs, text_cnt);
-    }
-    for (uint32_t i = 0U; i < meta_cnt; i++) {
-      free(field_bufs[i]);
-    }
-    free(meta_items);
-    free(field_bufs);
-    free(text_ids);
-    free((void *)text_ptrs);
     if (st != NBASE_OK) {
       free(ids);
       nbase_json_free(root);
@@ -1306,6 +1311,262 @@ static void handle_get_vectors_batch(const http_conn_t *c, const char *body, siz
   free(vecs);
   free(found);
   send_sbuf_json(c, 200, &sb);
+  nbase_sbuf_free(&sb);
+}
+
+static void handle_export_vectors(const http_conn_t *c, const char *query_str) {
+  nbase_http_server_t *srv = c->srv;
+  bool inc_vec = query_param_bool(query_str, "includeVectors", true);
+  bool inc_meta = query_param_bool(query_str, "includeMetadata", true);
+  bool inc_text = query_param_bool(query_str, "includeText", true);
+
+  nbase_stats_t db_st;
+  nbase_status_t st = nbase_stats(srv->db, &db_st);
+  if (st != NBASE_OK) {
+    send_error_json(c, 500, nbase_strerror(st));
+    return;
+  }
+  if (db_st.active_vectors == 0ULL) {
+    send_http_response(c, 200, "application/x-ndjson", "", 0U);
+    return;
+  }
+
+  const uint32_t page_cap = 1024U;
+  uint64_t *ids = malloc((size_t)page_cap * sizeof(uint64_t));
+  float *vecs = inc_vec ? malloc((size_t)page_cap * (size_t)db_st.dim * sizeof(float)) : NULL;
+  bool *found = inc_vec ? malloc((size_t)page_cap * sizeof(bool)) : NULL;
+  if (!ids || (inc_vec && (!vecs || !found))) {
+    free(ids);
+    free(vecs);
+    free(found);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  uint64_t offset = 0ULL;
+  uint64_t total = 0ULL;
+  while (true) {
+    uint32_t got = 0U;
+    st = nbase_list_ids(srv->db, offset, page_cap, ids, &got, &total);
+    if (st != NBASE_OK || got == 0U) {
+      break;
+    }
+    if (inc_vec) {
+      st = nbase_get_batch(srv->db, ids, got, db_st.dim, vecs, found);
+      if (st != NBASE_OK) {
+        break;
+      }
+    }
+    for (uint32_t i = 0U; i < got; i++) {
+      nbase_sbuf_appendf(&sb, "{\"id\":%llu", (unsigned long long)ids[i]);
+      if (inc_vec && found[i]) {
+        nbase_sbuf_append(&sb, ",\"vector\":[");
+        const float *v = vecs + (size_t)i * (size_t)db_st.dim;
+        for (uint32_t d = 0U; d < db_st.dim; d++) {
+          nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+        }
+        nbase_sbuf_append_n(&sb, "]", 1U);
+      }
+      if (inc_meta) {
+        nbase_sbuf_append(&sb, ",\"metadata\":");
+        append_meta_json(&sb, srv->db, ids[i]);
+      }
+      if (inc_text) {
+        size_t tlen = 0U;
+        if (nbase_get_text(srv->db, ids[i], NULL, 0U, &tlen) == NBASE_OK) {
+          nbase_sbuf_append(&sb, ",\"text\":");
+          append_text_json(&sb, srv->db, ids[i]);
+        }
+      }
+      nbase_sbuf_append(&sb, "}\n");
+    }
+    if (sb.oom) {
+      st = NBASE_ERR_NOMEM;
+      break;
+    }
+    offset += (uint64_t)got;
+    if (offset >= total) {
+      break;
+    }
+  }
+
+  free(ids);
+  free(vecs);
+  free(found);
+  if (st != NBASE_OK || sb.oom) {
+    nbase_sbuf_free(&sb);
+    send_error_json(c, http_code_for_status(st != NBASE_OK ? st : NBASE_ERR_NOMEM), nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
+    return;
+  }
+  send_http_response(c, 200, "application/x-ndjson", sb.data ? sb.data : "", sb.len);
+  nbase_sbuf_free(&sb);
+}
+
+static void handle_import_vectors(
+    const http_conn_t *c,
+    const char *query_str,
+    const char *body,
+    size_t body_len) {
+  nbase_http_server_t *srv = c->srv;
+  bool is_upsert = query_param_bool(query_str, "upsert", false);
+  uint32_t threads = 0U;
+  char tbuf[32];
+  if (query_param_get(query_str, "threads", tbuf, sizeof(tbuf))) {
+    uint64_t tv = 0ULL;
+    if (!parse_u64_str(tbuf, strlen(tbuf), &tv) || tv > 64ULL) {
+      send_error_json(c, 400, "invalid threads parameter");
+      return;
+    }
+    threads = (uint32_t)tv;
+  }
+
+  nbase_stats_t db_st;
+  if (nbase_stats(srv->db, &db_st) != NBASE_OK) {
+    send_error_json(c, 500, "failed to read db stats");
+    return;
+  }
+  if (!body || body_len == 0U) {
+    send_json_response(c, 200, "{\"success\":true,\"imported\":0}", 29U);
+    return;
+  }
+
+  size_t est_lines = 1U;
+  for (size_t i = 0U; i < body_len; i++) {
+    if (body[i] == '\n') {
+      est_lines++;
+    }
+  }
+  size_t cap = (est_lines < 10000U) ? est_lines : 10000U;
+
+  uint64_t *ids = malloc(cap * sizeof(uint64_t));
+  float *vecs = malloc(cap * (size_t)db_st.dim * sizeof(float));
+  nbase_json_t **roots = calloc(cap, sizeof(nbase_json_t *));
+  if (!ids || !vecs || !roots) {
+    free(ids);
+    free(vecs);
+    free(roots);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+
+  uint32_t count = 0U;
+  size_t pos = 0U;
+  while (pos < body_len) {
+    size_t line_start = pos;
+    while (pos < body_len && body[pos] != '\n') {
+      pos++;
+    }
+    size_t line_end = pos;
+    if (pos < body_len && body[pos] == '\n') {
+      pos++;
+    }
+    while (line_start < line_end &&
+           (body[line_start] == ' ' || body[line_start] == '\t' || body[line_start] == '\r')) {
+      line_start++;
+    }
+    while (line_end > line_start &&
+           (body[line_end - 1U] == ' ' || body[line_end - 1U] == '\t' || body[line_end - 1U] == '\r')) {
+      line_end--;
+    }
+    if (line_start == line_end) {
+      continue;
+    }
+    if (count >= 10000U) {
+      for (uint32_t j = 0U; j < count; j++) {
+        nbase_json_free(roots[j]);
+      }
+      free(ids);
+      free(vecs);
+      free(roots);
+      send_error_json(c, 400, "at most 10000 NDJSON records per import request");
+      return;
+    }
+
+    nbase_json_t *obj = NULL;
+    if (nbase_json_parse(body + line_start, line_end - line_start, &obj) != NBASE_OK ||
+        obj->type != NBASE_JSON_OBJECT) {
+      nbase_json_free(obj);
+      for (uint32_t j = 0U; j < count; j++) {
+        nbase_json_free(roots[j]);
+      }
+      free(ids);
+      free(vecs);
+      free(roots);
+      send_error_json(c, 400, "invalid JSON line in NDJSON body");
+      return;
+    }
+    uint64_t id = 0ULL;
+    if (!parse_json_u64(nbase_json_obj_get(obj, "id"), &id)) {
+      nbase_json_free(obj);
+      for (uint32_t j = 0U; j < count; j++) {
+        nbase_json_free(roots[j]);
+      }
+      free(ids);
+      free(vecs);
+      free(roots);
+      send_error_json(c, 400, "each NDJSON item requires uint64 id");
+      return;
+    }
+    const nbase_json_t *jtxt = nbase_json_obj_get(obj, "text");
+    if (jtxt != NULL && jtxt->type != NBASE_JSON_NULL && jtxt->type != NBASE_JSON_STRING) {
+      nbase_json_free(obj);
+      for (uint32_t j = 0U; j < count; j++) {
+        nbase_json_free(roots[j]);
+      }
+      free(ids);
+      free(vecs);
+      free(roots);
+      send_error_json(c, 400, "text must be a string");
+      return;
+    }
+    float *tmp_v = NULL;
+    uint32_t item_dim = 0U;
+    if (!parse_float_array(nbase_json_obj_get(obj, "vector"), &tmp_v, &item_dim) ||
+        item_dim != db_st.dim) {
+      free(tmp_v);
+      nbase_json_free(obj);
+      for (uint32_t j = 0U; j < count; j++) {
+        nbase_json_free(roots[j]);
+      }
+      free(ids);
+      free(vecs);
+      free(roots);
+      send_error_json(c, 400, "invalid vector or dimension mismatch");
+      return;
+    }
+    memcpy(vecs + (size_t)count * (size_t)db_st.dim, tmp_v, (size_t)db_st.dim * sizeof(float));
+    free(tmp_v);
+    ids[count] = id;
+    roots[count] = obj;
+    count++;
+  }
+
+  nbase_status_t st = NBASE_OK;
+  if (count > 0U) {
+    st = is_upsert
+             ? nbase_upsert_batch(srv->db, ids, vecs, count, db_st.dim, threads)
+             : nbase_add_batch(srv->db, ids, vecs, count, db_st.dim, threads);
+    if (st == NBASE_OK) {
+      st = apply_json_items_meta_and_text(srv->db, ids, roots, count);
+    }
+  }
+  for (uint32_t j = 0U; j < count; j++) {
+    nbase_json_free(roots[j]);
+  }
+  free(roots);
+  free(vecs);
+  free(ids);
+
+  if (st != NBASE_OK) {
+    send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(&sb, "{\"success\":true,\"imported\":%u}", count);
+  send_sbuf_json(c, (is_upsert || count == 0U) ? 200 : 201, &sb);
   nbase_sbuf_free(&sb);
 }
 
@@ -3407,6 +3668,22 @@ static void dispatch_request(
     }
     if (strcmp(method, "POST") == 0) {
       handle_count_vectors(c, body, body_len);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
+  if (strcmp(path, "/api/vectors/export") == 0) {
+    if (strcmp(method, "GET") == 0) {
+      handle_export_vectors(c, query_str);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
+  if (strcmp(path, "/api/vectors/import") == 0) {
+    if (strcmp(method, "POST") == 0) {
+      handle_import_vectors(c, query_str, body, body_len);
       return;
     }
     send_error_json(c, 405, "method not allowed");

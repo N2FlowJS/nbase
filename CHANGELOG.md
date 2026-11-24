@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-24
+
+Performance, batching, reliability, and NDJSON tooling increment adding SIMD-batched exact store scanning, symmetric SQ8 batch quantization distance (`nbase_sq8_l2_sq_symmetric_batch`), multi-threaded IVF-PQ batch search (`nbase_ivfpq_search_batch`), HTTP NDJSON streaming import/export (`GET /api/vectors/export`, `POST /api/vectors/import`), CLI filter/metric extensions (`delete-by-filter`, `--filter`, `--metric`), and deterministic WAL truncation & CRC bitflip fuzz verification.
+
+### Added
+- **SIMD Exact Store Scan & Quantization/IVF-PQ Acceleration (`src/store.c`, `src/sq8.c`, `src/ivfpq.c`)**:
+  - Upgraded unfiltered `nbase_store_exact_search` and `nbase_store_exact_search_radius` to evaluate contiguous active slot runs of up to 256 vectors via `nbase_distance_batch`.
+  - Added `nbase_sq8_l2_sq_symmetric_batch` with 16-way unrolled AVX2+FMA integer-difference quantization distance kernel.
+  - Added thread-pooled work-stealing `nbase_ivfpq_search_batch` under shared `pthread_rwlock_rdlock` and upgraded IVF-PQ coarse quantization (`nbase_ivfpq_add` + search) and `build_dot_lut` to evaluate batches via `nbase_distance_batch`.
+- **HTTP/1.1 NDJSON Import/Export, CLI & C++17 Wrapper (`src/http_server.c`, `apps/nbase_cli.c`, `include/nbase.hpp`)**:
+  - Added `GET /api/vectors/export` (`application/x-ndjson` paginated serialization) and `POST /api/vectors/import` (NDJSON ingest with `?upsert=true`, `?threads=N`, batch metadata, and batch text).
+  - Added `nbase-cli delete-by-filter <dir> --filter <json>` and optional `--filter <json>` / `--metric <M>` flags on `search`, `search-text`, and `search-hybrid`.
+  - Updated `include/nbase.hpp` (`Sq8::l2_sq_symmetric_batch`, `IvfPq::search_batch`).
+- **WAL Fuzz & Concurrency Coverage (`tests/test_wal.c`, `tests/test_ivfpq.c`, `tests/test_sq8.c`, `tests/test_server.c`)**:
+  - Added deterministic WAL truncation-sweep and payload/header CRC bitflip fuzz verification alongside `test_ivfpq_search_batch_mt_and_tsan`, `test_sq8_l2_sq_symmetric_batch`, and `test_http_server_ndjson_import_export`.
+
 ## [1.5.0] - 2026-11-24
 
 Performance, batching, and API ergonomics increment introducing SIMD 1-to-N batch distance (`nbase_distance_batch`), faster K-Means++ training, deterministic multi-threaded PQ codebook training, clustered batch upsert & paginated ID listing, `POST /api/vectors/:id/similar` & `POST /api/distance`, and `nbase-cli find-similar` / `relationships`.

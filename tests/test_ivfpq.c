@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <string.h>
 
 static bool ivfpq_even_filter(uint64_t id, void *ctx) {
   (void)ctx;
@@ -223,8 +224,110 @@ static void test_ivfpq_concurrent_readers_writer_tsan(void) {
   nbase_ivfpq_destroy(index);
 }
 
+static void *ivfpq_batch_reader_fn(void *raw) {
+  ivfpq_tsan_ctx_t *ctx = (ivfpq_tsan_ctx_t *)raw;
+  const uint32_t qcnt = 6U;
+  const uint32_t k = 5U;
+  nbase_result_t *res = malloc((size_t)qcnt * (size_t)k * sizeof(nbase_result_t));
+  uint32_t *counts = malloc((size_t)qcnt * sizeof(uint32_t));
+  if (!res || !counts) {
+    free(res);
+    free(counts);
+    atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+    return NULL;
+  }
+  for (uint32_t i = 0U; i < 20U && !atomic_load_explicit(&ctx->stop, memory_order_relaxed); i++) {
+    nbase_status_t st = nbase_ivfpq_search_batch(ctx->index, ctx->query, qcnt, k, 4U, 2U, res, counts);
+    if (st != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+  }
+  free(res);
+  free(counts);
+  return NULL;
+}
+
+static void test_ivfpq_search_batch_mt_and_tsan(void) {
+  const uint32_t dim = 16U;
+  const uint32_t n = 160U;
+  const uint32_t qcnt = 10U;
+  const uint32_t k = 5U;
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  nbase_result_t *batch_res = malloc((size_t)qcnt * k * sizeof(nbase_result_t));
+  nbase_result_t *single_res = malloc((size_t)k * sizeof(nbase_result_t));
+  uint32_t *batch_cnts = malloc((size_t)qcnt * sizeof(uint32_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL && batch_res != NULL && single_res != NULL && batch_cnts != NULL);
+
+  make_clustered_vectors(vecs, 4U, 40U, dim, 8800ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = (uint64_t)i + 1ULL;
+  }
+
+  static const nbase_metric_t ms[2] = {NBASE_METRIC_EUCLIDEAN, NBASE_METRIC_COSINE};
+  for (int mi = 0; mi < 2; mi++) {
+    nbase_ivfpq_config_t cfg = nbase_ivfpq_config_default(dim, 8U, 4U);
+    cfg.metric = ms[mi];
+    cfg.num_centroids = 32U;
+    cfg.max_iters = 10U;
+    nbase_ivfpq_t *index = NULL;
+    ASSERT_STATUS(nbase_ivfpq_train(&cfg, vecs, n, &index), NBASE_OK);
+    ASSERT_STATUS(nbase_ivfpq_add(index, ids, vecs, n), NBASE_OK);
+
+    ASSERT_STATUS(nbase_ivfpq_search_batch(index, vecs, 0U, k, 4U, 4U, NULL, NULL), NBASE_OK);
+    ASSERT_STATUS(nbase_ivfpq_search_batch(index, vecs, qcnt, k, 4U, 4U, batch_res, batch_cnts), NBASE_OK);
+
+    for (uint32_t q = 0U; q < qcnt; q++) {
+      uint32_t s_cnt = 0U;
+      ASSERT_STATUS(nbase_ivfpq_search(index, vecs + (size_t)q * dim, k, 4U, single_res, &s_cnt), NBASE_OK);
+      ASSERT_EQ_U64(batch_cnts[q], s_cnt);
+      for (uint32_t r = 0U; r < s_cnt; r++) {
+        ASSERT_EQ_U64(batch_res[(size_t)q * k + r].id, single_res[r].id);
+        ASSERT_NEAR(batch_res[(size_t)q * k + r].distance, single_res[r].distance, 1e-6, 1e-6);
+      }
+    }
+
+    float bad_q[16];
+    memcpy(bad_q, vecs, sizeof(bad_q));
+    bad_q[3] = (float)NAN;
+    ASSERT_STATUS(nbase_ivfpq_search_batch(index, bad_q, 1U, k, 4U, 2U, batch_res, batch_cnts), NBASE_ERR_INVALID_VECTOR);
+    ASSERT_STATUS(nbase_ivfpq_search_batch(index, NULL, 1U, k, 4U, 2U, batch_res, batch_cnts), NBASE_ERR_INVALID_ARG);
+
+    nbase_ivfpq_destroy(index);
+  }
+
+  /* Concurrent MT batch search readers + writer add under TSan */
+  nbase_ivfpq_config_t cfg = nbase_ivfpq_config_default(dim, 8U, 4U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.num_centroids = 32U;
+  nbase_ivfpq_t *mt_idx = NULL;
+  ASSERT_STATUS(nbase_ivfpq_train(&cfg, vecs, n, &mt_idx), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_add(mt_idx, ids, vecs, 80U), NBASE_OK);
+
+  ivfpq_tsan_ctx_t ctx = {mt_idx, vecs, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, ivfpq_batch_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, ivfpq_batch_reader_fn, &ctx) == 0);
+  for (uint32_t i = 80U; i < n; i += 10U) {
+    ASSERT_STATUS(nbase_ivfpq_add(mt_idx, ids + i, vecs + (size_t)i * dim, 10U), NBASE_OK);
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  nbase_ivfpq_destroy(mt_idx);
+  free(batch_cnts);
+  free(single_res);
+  free(batch_res);
+  free(ids);
+  free(vecs);
+}
+
 void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_train_add_search_euclidean_and_save_load);
   RUN_TEST(test_ivfpq_cosine_and_inner_product);
   RUN_TEST(test_ivfpq_concurrent_readers_writer_tsan);
+  RUN_TEST(test_ivfpq_search_batch_mt_and_tsan);
 }

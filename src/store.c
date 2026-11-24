@@ -544,6 +544,23 @@ const float *nbase_store_get_vector(const nbase_store_t *store, uint32_t slot) {
   return store->vectors + (size_t)slot * (size_t)store->dim;
 }
 
+static bool exact_heap_consider(
+    nbase_heap_t *heap,
+    uint32_t k,
+    const uint64_t *ids,
+    uint32_t slot,
+    float dist) {
+  if (heap->len < k) {
+    return nbase_heap_push(heap, (nbase_heap_item_t){slot, dist});
+  }
+  nbase_heap_item_t top = heap->data[0];
+  if (dist < top.dist || (dist == top.dist && ids[slot] < ids[top.slot])) {
+    (void)nbase_heap_pop(heap);
+    return nbase_heap_push(heap, (nbase_heap_item_t){slot, dist});
+  }
+  return true;
+}
+
 static nbase_status_t store_exact_search_internal(
     const nbase_store_t *store,
     const float *query,
@@ -564,35 +581,65 @@ static nbase_status_t store_exact_search_internal(
     return NBASE_OK;
   }
 
-  nbase_dist_fn dist_fn = nbase_get_distance_fn(metric);
   nbase_heap_t heap;
   nbase_heap_init(&heap, true);
 
-  for (uint32_t slot = 0; slot < store->slot_count; slot++) {
-    if (store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
-      continue;
-    }
-    uint64_t id = store->ids[slot];
-    if (filter && !filter(id, filter_ctx)) {
-      continue;
-    }
-    float dist = dist_fn(query, store->vectors + (size_t)slot * (size_t)store->dim, store->dim);
-    if (use_radius && dist > max_distance) {
-      continue;
-    }
-    if (heap.len < k) {
-      if (!nbase_heap_push(&heap, (nbase_heap_item_t){slot, dist})) {
-        nbase_heap_free(&heap);
-        return NBASE_ERR_NOMEM;
+  if (filter == NULL) {
+    float batch_dists[256] = {0.0f};
+    uint32_t slot = 0U;
+    while (slot < store->slot_count) {
+      while (slot < store->slot_count && store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
+        slot++;
       }
-    } else {
-      nbase_heap_item_t top = heap.data[0];
-      if (dist < top.dist || (dist == top.dist && id < store->ids[top.slot])) {
-        (void)nbase_heap_pop(&heap);
-        if (!nbase_heap_push(&heap, (nbase_heap_item_t){slot, dist})) {
+      if (slot >= store->slot_count) {
+        break;
+      }
+      uint32_t start = slot;
+      while (slot < store->slot_count &&
+             store->slot_flags[slot] == NBASE_SLOT_ACTIVE &&
+             (slot - start) < 256U) {
+        slot++;
+      }
+      uint32_t run_len = slot - start;
+      nbase_status_t st = nbase_distance_batch(
+          metric,
+          query,
+          store->vectors + (size_t)start * (size_t)store->dim,
+          run_len,
+          store->dim,
+          batch_dists);
+      if (st != NBASE_OK) {
+        nbase_heap_free(&heap);
+        return st;
+      }
+      for (uint32_t bi = 0U; bi < run_len; bi++) {
+        float dist = batch_dists[bi];
+        if (use_radius && dist > max_distance) {
+          continue;
+        }
+        if (!exact_heap_consider(&heap, k, store->ids, start + bi, dist)) {
           nbase_heap_free(&heap);
           return NBASE_ERR_NOMEM;
         }
+      }
+    }
+  } else {
+    nbase_dist_fn dist_fn = nbase_get_distance_fn(metric);
+    for (uint32_t slot = 0U; slot < store->slot_count; slot++) {
+      if (store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
+        continue;
+      }
+      uint64_t id = store->ids[slot];
+      if (!filter(id, filter_ctx)) {
+        continue;
+      }
+      float dist = dist_fn(query, store->vectors + (size_t)slot * (size_t)store->dim, store->dim);
+      if (use_radius && dist > max_distance) {
+        continue;
+      }
+      if (!exact_heap_consider(&heap, k, store->ids, slot, dist)) {
+        nbase_heap_free(&heap);
+        return NBASE_ERR_NOMEM;
       }
     }
   }
