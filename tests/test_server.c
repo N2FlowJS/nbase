@@ -2032,6 +2032,34 @@ static void test_http_server_text_and_hybrid_batch_search(void) {
   ASSERT_EQ_I64(r.status, 400);
   free(r.body);
 
+  /* 2b. POST /api/search/batch with includeMetadata/includeVectors/includeText flags */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/batch",
+      NULL,
+      "{\"queries\":[[1,0,0],[0,0,1]],\"k\":1,"
+      "\"includeMetadata\":true,\"includeVectors\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"success\":true,\"results\":[[") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"metadata\":{") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"simd vector hnsw kernel\"") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/batch",
+      NULL,
+      "{\"queries\":[[1,0,0]],\"k\":1,\"includeVectors\":\"yes\"}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
   /* 3. DELETE /api/vectors/text & POST /api/vectors/text/delete */
   ASSERT_TRUE(http_req(port, "PUT", "/api/vectors/text", NULL, "{\"ids\":[10]}", &r));
   ASSERT_EQ_I64(r.status, 405);

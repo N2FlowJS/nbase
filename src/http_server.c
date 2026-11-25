@@ -3150,6 +3150,14 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
     k = (uint32_t)jk->i64;
   }
 
+  bool inc_meta = false;
+  bool inc_vec = false;
+  bool inc_text = false;
+  if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
+    nbase_json_free(root);
+    return;
+  }
+
   nbase_search_opts_t opts;
   nbase_meta_cond_t *conds = NULL;
   nbase_meta_filter_t meta_flt;
@@ -3221,13 +3229,7 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
     nbase_sbuf_append(&sb, qi == 0U ? "[" : ",[");
     uint32_t got = counts[qi];
     const nbase_result_t *row = results + (size_t)qi * (size_t)k;
-    for (uint32_t r = 0U; r < got; r++) {
-      nbase_sbuf_appendf(
-          &sb,
-          r == 0U ? "{\"id\":%llu,\"distance\":%.7g}" : ",{\"id\":%llu,\"distance\":%.7g}",
-          (unsigned long long)row[r].id,
-          (double)row[r].distance);
-    }
+    append_result_entries_json(&sb, srv->db, row, got, dim, inc_meta, inc_vec, inc_text);
     nbase_sbuf_append(&sb, "]");
   }
   nbase_sbuf_append(&sb, "]}");

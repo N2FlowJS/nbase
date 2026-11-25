@@ -249,8 +249,45 @@ static void test_bm25_crud_batch_compact_and_tsan(void) {
   test_rm_rf(dir);
 }
 
+static void test_bm25_delete_batch_and_errors(void) {
+  nbase_bm25_t *bm25 = NULL;
+  ASSERT_STATUS(nbase_bm25_create(1.5f, 0.75f, &bm25), NBASE_OK);
+
+  for (uint64_t id = 1ULL; id <= 8ULL; id++) {
+    ASSERT_STATUS(nbase_bm25_index(bm25, id, "vector similarity engine batch delete bm25"), NBASE_OK);
+  }
+  ASSERT_EQ_U64(nbase_bm25_doc_count(bm25), 8ULL);
+
+  uint32_t del_cnt = 99U;
+  ASSERT_STATUS(nbase_bm25_delete_batch(bm25, NULL, 0U, &del_cnt), NBASE_OK);
+  ASSERT_EQ_U64(del_cnt, 0ULL);
+  ASSERT_STATUS(nbase_bm25_delete_batch(NULL, (const uint64_t[]){1ULL}, 1U, &del_cnt), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_bm25_delete_batch(bm25, NULL, 1U, &del_cnt), NBASE_ERR_INVALID_ARG);
+
+  uint64_t del_ids[5] = {2ULL, 999ULL, 2ULL, 5ULL, 7ULL};
+  ASSERT_STATUS(nbase_bm25_delete_batch(bm25, del_ids, 5U, &del_cnt), NBASE_OK);
+  ASSERT_EQ_U64(del_cnt, 3ULL);
+  ASSERT_EQ_U64(nbase_bm25_doc_count(bm25), 5ULL);
+  ASSERT_TRUE(!nbase_bm25_contains(bm25, 2ULL));
+  ASSERT_TRUE(!nbase_bm25_contains(bm25, 5ULL));
+  ASSERT_TRUE(!nbase_bm25_contains(bm25, 7ULL));
+  ASSERT_TRUE(nbase_bm25_contains(bm25, 1ULL));
+  ASSERT_TRUE(nbase_bm25_contains(bm25, 8ULL));
+
+  nbase_scored_id_t res[8];
+  uint32_t res_cnt = 0U;
+  ASSERT_STATUS(nbase_bm25_search(bm25, "vector batch delete", 8U, res, &res_cnt), NBASE_OK);
+  ASSERT_EQ_U64(res_cnt, 5ULL);
+  for (uint32_t i = 0U; i < res_cnt; i++) {
+    ASSERT_TRUE(res[i].id != 2ULL && res[i].id != 5ULL && res[i].id != 7ULL);
+  }
+
+  nbase_bm25_destroy(bm25);
+}
+
 void test_bm25_run(void) {
   RUN_TEST(test_bm25_index_search_delete_and_persistence);
   RUN_TEST(test_hybrid_rrf_fusion);
   RUN_TEST(test_bm25_crud_batch_compact_and_tsan);
+  RUN_TEST(test_bm25_delete_batch_and_errors);
 }

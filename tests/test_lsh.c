@@ -459,10 +459,108 @@ static void test_lsh_upsert_get_list_compact_and_tsan(void) {
   nbase_lsh_destroy(lsh);
 }
 
+static void test_lsh_upsert_delete_get_batch_and_tsan(void) {
+  const uint32_t dim = 16U;
+  nbase_lsh_config_t cfg = nbase_lsh_config_default(dim);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.num_tables = 6U;
+  cfg.num_bits = 8U;
+  cfg.seed = 4242ULL;
+
+  nbase_lsh_t *lsh = NULL;
+  ASSERT_STATUS(nbase_lsh_create(&cfg, &lsh), NBASE_OK);
+
+  const uint32_t init_n = 6U;
+  uint64_t ids[6] = {5000ULL, 5001ULL, 5002ULL, 5003ULL, 5004ULL, 5005ULL};
+  float *vecs = calloc((size_t)init_n * (size_t)dim, sizeof(float));
+  ASSERT_TRUE(vecs != NULL);
+  for (uint32_t i = 0U; i < init_n; i++) {
+    vecs[(size_t)i * (size_t)dim + (i % dim)] = (float)(i + 1U);
+  }
+
+  ASSERT_STATUS(nbase_lsh_upsert_batch(lsh, NULL, NULL, 0U, dim), NBASE_OK);
+  ASSERT_STATUS(nbase_lsh_upsert_batch(NULL, ids, vecs, init_n, dim), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_lsh_upsert_batch(lsh, ids, vecs, init_n, dim + 1U), NBASE_ERR_DIM_MISMATCH);
+  ASSERT_STATUS(nbase_lsh_upsert_batch(lsh, ids, vecs, init_n, dim), NBASE_OK);
+
+  /* Reject duplicate IDs within one batch cleanly, then upsert mixed overwrite + new IDs. */
+  uint64_t dup_ids[4] = {5001ULL, 5006ULL, 5001ULL, 5007ULL};
+  uint64_t up_ids[3] = {5001ULL, 5006ULL, 5007ULL};
+  float *up_vecs = calloc((size_t)4U * (size_t)dim, sizeof(float));
+  ASSERT_TRUE(up_vecs != NULL);
+  up_vecs[0U * dim + 0U] = 13.5f;
+  up_vecs[1U * dim + 1U] = 12.0f;
+  up_vecs[2U * dim + 2U] = 14.0f;
+  ASSERT_STATUS(nbase_lsh_upsert_batch(lsh, dup_ids, up_vecs, 4U, dim), NBASE_ERR_ALREADY_EXISTS);
+  ASSERT_STATUS(nbase_lsh_upsert_batch(lsh, up_ids, up_vecs, 3U, dim), NBASE_OK);
+
+  nbase_lsh_stats_t st;
+  ASSERT_STATUS(nbase_lsh_stats(lsh, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.active_vectors, 8ULL);
+
+  /* get_batch with mix of valid, missing, and duplicate IDs. */
+  uint64_t get_ids[4] = {5001ULL, 999999ULL, 5006ULL, 5007ULL};
+  float *got_vecs = calloc((size_t)4U * (size_t)dim, sizeof(float));
+  bool got_found[4] = {false, true, false, false};
+  ASSERT_TRUE(got_vecs != NULL);
+  ASSERT_STATUS(nbase_lsh_get_batch(lsh, NULL, 0U, dim, NULL, NULL), NBASE_OK);
+  ASSERT_STATUS(nbase_lsh_get_batch(lsh, get_ids, 4U, dim + 1U, got_vecs, got_found), NBASE_ERR_DIM_MISMATCH);
+  ASSERT_STATUS(nbase_lsh_get_batch(lsh, get_ids, 4U, dim, got_vecs, got_found), NBASE_OK);
+  ASSERT_TRUE(got_found[0] == true);
+  ASSERT_TRUE(got_found[1] == false);
+  ASSERT_TRUE(got_found[2] == true);
+  ASSERT_TRUE(got_found[3] == true);
+  ASSERT_NEAR(got_vecs[0U * dim + 0U], 13.5, 1e-6, 0.0);
+  ASSERT_NEAR(got_vecs[2U * dim + 1U], 12.0, 1e-6, 0.0);
+  ASSERT_NEAR(got_vecs[3U * dim + 2U], 14.0, 1e-6, 0.0);
+
+  /* delete_batch with missing + duplicate IDs. */
+  uint64_t del_ids[4] = {5002ULL, 888888ULL, 5002ULL, 5004ULL};
+  uint32_t del_cnt = 99U;
+  ASSERT_STATUS(nbase_lsh_delete_batch(lsh, NULL, 0U, &del_cnt), NBASE_OK);
+  ASSERT_EQ_U64(del_cnt, 0ULL);
+  ASSERT_STATUS(nbase_lsh_delete_batch(NULL, del_ids, 4U, &del_cnt), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_lsh_delete_batch(lsh, del_ids, 4U, &del_cnt), NBASE_OK);
+  ASSERT_EQ_U64(del_cnt, 2ULL);
+  ASSERT_TRUE(!nbase_lsh_contains(lsh, 5002ULL));
+  ASSERT_TRUE(!nbase_lsh_contains(lsh, 5004ULL));
+  ASSERT_TRUE(nbase_lsh_contains(lsh, 5001ULL));
+  ASSERT_STATUS(nbase_lsh_stats(lsh, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.active_vectors, 6ULL);
+
+  /* Concurrent readers vs upsert_batch/delete_batch under TSan. */
+  float qvec[16] = {0.0f};
+  qvec[0] = 13.5f;
+  lsh_tsan_ctx_t ctx = {lsh, qvec, dim, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, lsh_crud_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, lsh_crud_reader_fn, &ctx) == 0);
+  for (uint32_t step = 0U; step < 12U; step++) {
+    uint64_t bid[2] = {6000ULL + (step % 3ULL), 6100ULL + (step % 3ULL)};
+    float bv[32] = {0.0f};
+    bv[step % dim] = 2.0f + (float)step * 0.1f;
+    bv[dim + ((step + 1U) % dim)] = 3.0f;
+    ASSERT_STATUS(nbase_lsh_upsert_batch(lsh, bid, bv, 2U, dim), NBASE_OK);
+    if ((step % 3U) == 2U) {
+      ASSERT_STATUS(nbase_lsh_delete_batch(lsh, bid, 2U, &del_cnt), NBASE_OK);
+    }
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  free(got_vecs);
+  free(up_vecs);
+  free(vecs);
+  nbase_lsh_destroy(lsh);
+}
+
 void test_lsh_run(void) {
   RUN_TEST(test_lsh_cosine_and_multiprobe);
   RUN_TEST(test_lsh_euclidean_save_load_and_errors);
   RUN_TEST(test_lsh_add_batch_contains_and_concurrent_tsan);
   RUN_TEST(test_lsh_search_batch_mt_and_parity);
   RUN_TEST(test_lsh_upsert_get_list_compact_and_tsan);
+  RUN_TEST(test_lsh_upsert_delete_get_batch_and_tsan);
 }

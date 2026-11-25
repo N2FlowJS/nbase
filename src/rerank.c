@@ -2,6 +2,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -323,6 +324,131 @@ static void rel_knn_consider(
   }
 }
 
+typedef struct rel_extract_ctx {
+  const nbase_store_t *store;
+  const nbase_hnsw_t *hnsw;
+  const nbase_meta_store_t *meta;
+  const nbase_meta_filter_t *meta_filter;
+  const uint32_t *slots;
+  const float *dense_vecs;
+  nbase_dist_fn dist_fn;
+  nbase_edge_t *edges;
+  uint32_t active_cnt;
+  uint32_t eff_k;
+  float max_distance;
+  bool use_hnsw;
+  bool has_filter;
+  uint32_t total_workers;
+  size_t counts[4];
+  nbase_status_t statuses[4];
+} rel_extract_ctx_t;
+
+typedef struct rel_extract_arg {
+  rel_extract_ctx_t *ctx;
+  uint32_t tid;
+} rel_extract_arg_t;
+
+static void rel_extract_slice(rel_extract_ctx_t *ctx, uint32_t tid) {
+  uint32_t start =
+      (uint32_t)(((uint64_t)tid * (uint64_t)ctx->active_cnt) / (uint64_t)ctx->total_workers);
+  uint32_t end = (uint32_t)(((uint64_t)(tid + 1U) * (uint64_t)ctx->active_cnt) /
+                            (uint64_t)ctx->total_workers);
+
+  nbase_result_t *knn = malloc(((size_t)ctx->eff_k + 1U) * sizeof(nbase_result_t));
+  float *row_dists = (!ctx->use_hnsw && ctx->dense_vecs != NULL)
+                         ? malloc((size_t)ctx->active_cnt * sizeof(float))
+                         : NULL;
+  if (!knn || (!ctx->use_hnsw && ctx->dense_vecs != NULL && !row_dists)) {
+    free(knn);
+    free(row_dists);
+    ctx->counts[tid] = 0U;
+    ctx->statuses[tid] = NBASE_ERR_NOMEM;
+    return;
+  }
+
+  rel_filter_ctx_t fctx = {ctx->meta, ctx->meta_filter};
+  size_t base_off = (size_t)start * (size_t)ctx->eff_k;
+  size_t wlen = 0U;
+  nbase_status_t st = NBASE_OK;
+
+  for (uint32_t i = start; i < end && st == NBASE_OK; i++) {
+    uint32_t self_slot = ctx->slots[i];
+    uint64_t self_id = ctx->store->ids[self_slot];
+    const float *self_vec = nbase_store_get_vector(ctx->store, self_slot);
+    uint32_t got = 0U;
+
+    if (ctx->use_hnsw) {
+      st = nbase_hnsw_search(
+          ctx->hnsw,
+          ctx->store,
+          self_vec,
+          ctx->eff_k + 1U,
+          0U,
+          ctx->store->metric,
+          ctx->has_filter ? rel_filter_cb : NULL,
+          ctx->has_filter ? &fctx : NULL,
+          knn,
+          &got);
+      if (st != NBASE_OK) {
+        break;
+      }
+    } else if (row_dists != NULL &&
+               nbase_distance_batch(
+                   ctx->store->metric,
+                   self_vec,
+                   ctx->dense_vecs,
+                   ctx->active_cnt,
+                   ctx->store->dim,
+                   row_dists) == NBASE_OK) {
+      for (uint32_t j = 0U; j < ctx->active_cnt; j++) {
+        uint32_t other_slot = ctx->slots[j];
+        if (other_slot == self_slot) {
+          continue;
+        }
+        rel_knn_consider(knn, &got, ctx->eff_k, ctx->store->ids[other_slot], row_dists[j]);
+      }
+    } else {
+      for (uint32_t j = 0U; j < ctx->active_cnt; j++) {
+        uint32_t other_slot = ctx->slots[j];
+        if (other_slot == self_slot) {
+          continue;
+        }
+        float d =
+            ctx->dist_fn(self_vec, nbase_store_get_vector(ctx->store, other_slot), ctx->store->dim);
+        rel_knn_consider(knn, &got, ctx->eff_k, ctx->store->ids[other_slot], d);
+      }
+    }
+
+    uint32_t added_for_node = 0U;
+    for (uint32_t r = 0U; r < got && added_for_node < ctx->eff_k; r++) {
+      if (knn[r].id == self_id) {
+        continue;
+      }
+      if (knn[r].distance <= ctx->max_distance) {
+        uint64_t a = self_id < knn[r].id ? self_id : knn[r].id;
+        uint64_t b = self_id < knn[r].id ? knn[r].id : self_id;
+        nbase_edge_t *dst_e = &ctx->edges[base_off + wlen];
+        dst_e->src_id = a;
+        dst_e->dst_id = b;
+        dst_e->weight = knn[r].distance;
+        wlen++;
+      }
+      added_for_node++;
+    }
+  }
+
+  free(row_dists);
+  free(knn);
+  ctx->counts[tid] = wlen;
+  ctx->statuses[tid] = st;
+}
+
+static void *rel_extract_worker(void *raw) {
+  rel_extract_arg_t *arg = (rel_extract_arg_t *)raw;
+  rel_extract_slice(arg->ctx, arg->tid);
+  return NULL;
+}
+
 nbase_status_t nbase_extract_relationships_filtered(
     const nbase_db_t *db,
     uint32_t k_neighbors,
@@ -371,26 +497,19 @@ nbase_status_t nbase_extract_relationships_filtered(
   uint32_t eff_k = (k_neighbors < active_cnt - 1U) ? k_neighbors : (active_cnt - 1U);
   size_t raw_cap = (size_t)active_cnt * (size_t)eff_k;
   nbase_edge_t *edges = malloc(raw_cap * sizeof(nbase_edge_t));
-  nbase_result_t *knn = malloc(((size_t)eff_k + 1U) * sizeof(nbase_result_t));
-  if (!edges || !knn) {
-    free(edges);
-    free(knn);
+  if (!edges) {
     free(slots);
     nbase_db_unlock(db);
     return NBASE_ERR_NOMEM;
   }
 
-  size_t edge_len = 0U;
   const nbase_hnsw_t *hnsw = nbase_db_hnsw(db);
   bool use_hnsw = nbase_db_hnsw_enabled(db) && hnsw != NULL && active_cnt > 64U;
-  rel_filter_ctx_t fctx = {meta, meta_filter};
   nbase_dist_fn dist_fn = nbase_get_distance_fn(store->metric);
   float *dense_vecs = NULL;
-  float *row_dists = NULL;
   if (!use_hnsw && (size_t)active_cnt <= SIZE_MAX / ((size_t)store->dim * sizeof(float))) {
     dense_vecs = malloc((size_t)active_cnt * (size_t)store->dim * sizeof(float));
-    row_dists = malloc((size_t)active_cnt * sizeof(float));
-    if (dense_vecs && row_dists) {
+    if (dense_vecs) {
       size_t row_bytes = (size_t)store->dim * sizeof(float);
       for (uint32_t j = 0U; j < active_cnt; j++) {
         memcpy(
@@ -398,77 +517,73 @@ nbase_status_t nbase_extract_relationships_filtered(
             nbase_store_get_vector(store, slots[j]),
             row_bytes);
       }
-    } else {
-      free(dense_vecs);
-      free(row_dists);
-      dense_vecs = NULL;
-      row_dists = NULL;
     }
   }
-  nbase_status_t st = NBASE_OK;
 
-  for (uint32_t i = 0U; i < active_cnt && st == NBASE_OK; i++) {
-    uint32_t self_slot = slots[i];
-    uint64_t self_id = store->ids[self_slot];
-    const float *self_vec = nbase_store_get_vector(store, self_slot);
-    uint32_t got = 0U;
+  rel_extract_ctx_t ctx;
+  ctx.store = store;
+  ctx.hnsw = hnsw;
+  ctx.meta = meta;
+  ctx.meta_filter = meta_filter;
+  ctx.slots = slots;
+  ctx.dense_vecs = dense_vecs;
+  ctx.dist_fn = dist_fn;
+  ctx.edges = edges;
+  ctx.active_cnt = active_cnt;
+  ctx.eff_k = eff_k;
+  ctx.max_distance = max_distance;
+  ctx.use_hnsw = use_hnsw;
+  ctx.has_filter = has_filter;
+  ctx.total_workers = (active_cnt >= 128U) ? 4U : 1U;
+  for (uint32_t w = 0U; w < 4U; w++) {
+    ctx.counts[w] = 0U;
+    ctx.statuses[w] = NBASE_OK;
+  }
 
-    if (use_hnsw) {
-      st = nbase_hnsw_search(
-          hnsw,
-          store,
-          self_vec,
-          eff_k + 1U,
-          0U,
-          store->metric,
-          has_filter ? rel_filter_cb : NULL,
-          has_filter ? &fctx : NULL,
-          knn,
-          &got);
-      if (st != NBASE_OK) {
+  pthread_t workers[3];
+  rel_extract_arg_t args[3];
+  uint32_t spawned = 0U;
+  if (ctx.total_workers > 1U) {
+    for (uint32_t w = 1U; w < ctx.total_workers; w++) {
+      args[w - 1U].ctx = &ctx;
+      args[w - 1U].tid = w;
+      if (pthread_create(&workers[spawned], NULL, rel_extract_worker, &args[w - 1U]) != 0) {
         break;
       }
-    } else if (dense_vecs &&
-               nbase_distance_batch(
-                   store->metric, self_vec, dense_vecs, active_cnt, store->dim, row_dists) == NBASE_OK) {
-      for (uint32_t j = 0U; j < active_cnt; j++) {
-        uint32_t other_slot = slots[j];
-        if (other_slot == self_slot) {
-          continue;
-        }
-        rel_knn_consider(knn, &got, eff_k, store->ids[other_slot], row_dists[j]);
-      }
-    } else {
-      for (uint32_t j = 0U; j < active_cnt; j++) {
-        uint32_t other_slot = slots[j];
-        if (other_slot == self_slot) {
-          continue;
-        }
-        float d = dist_fn(self_vec, nbase_store_get_vector(store, other_slot), store->dim);
-        rel_knn_consider(knn, &got, eff_k, store->ids[other_slot], d);
-      }
+      spawned++;
     }
+  }
+  rel_extract_slice(&ctx, 0U);
+  for (uint32_t w = spawned + 1U; w < ctx.total_workers; w++) {
+    rel_extract_slice(&ctx, w);
+  }
+  for (uint32_t w = 0U; w < spawned; w++) {
+    pthread_join(workers[w], NULL);
+  }
 
-    uint32_t added_for_node = 0U;
-    for (uint32_t r = 0U; r < got && added_for_node < eff_k; r++) {
-      if (knn[r].id == self_id) {
-        continue;
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t w = 0U; w < ctx.total_workers; w++) {
+    if (ctx.statuses[w] != NBASE_OK) {
+      st = ctx.statuses[w];
+      break;
+    }
+  }
+
+  size_t edge_len = ctx.counts[0];
+  if (st == NBASE_OK && ctx.total_workers > 1U) {
+    for (uint32_t w = 1U; w < ctx.total_workers; w++) {
+      uint32_t start_w =
+          (uint32_t)(((uint64_t)w * (uint64_t)active_cnt) / (uint64_t)ctx.total_workers);
+      size_t src_off = (size_t)start_w * (size_t)eff_k;
+      size_t cnt_w = ctx.counts[w];
+      if (cnt_w > 0U && edge_len != src_off) {
+        memmove(edges + edge_len, edges + src_off, cnt_w * sizeof(nbase_edge_t));
       }
-      if (knn[r].distance <= max_distance) {
-        uint64_t a = self_id < knn[r].id ? self_id : knn[r].id;
-        uint64_t b = self_id < knn[r].id ? knn[r].id : self_id;
-        edges[edge_len].src_id = a;
-        edges[edge_len].dst_id = b;
-        edges[edge_len].weight = knn[r].distance;
-        edge_len++;
-      }
-      added_for_node++;
+      edge_len += cnt_w;
     }
   }
 
   free(dense_vecs);
-  free(row_dists);
-  free(knn);
   free(slots);
   nbase_db_unlock(db);
 

@@ -1000,6 +1000,16 @@ class Bm25 {
 
   void remove(uint64_t id) { detail::check(nbase_bm25_delete(ptr_, id)); }
 
+  uint32_t delete_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_bm25_delete_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        static_cast<uint32_t>(ids.size()),
+        &deleted));
+    return deleted;
+  }
+
   std::vector<uint64_t> list_ids(
       uint64_t offset, uint32_t limit, uint64_t *out_total = nullptr) const {
     std::vector<uint64_t> ids(limit);
@@ -1144,6 +1154,16 @@ class Lsh {
 
   void remove(uint64_t id) { detail::check(nbase_lsh_delete(ptr_, id)); }
 
+  uint32_t delete_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_lsh_delete_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        static_cast<uint32_t>(ids.size()),
+        &deleted));
+    return deleted;
+  }
+
   void upsert(uint64_t id, const float *vec, uint32_t dim) {
     detail::check(nbase_lsh_upsert(ptr_, id, vec, dim));
   }
@@ -1152,10 +1172,44 @@ class Lsh {
     upsert(id, vec.data(), static_cast<uint32_t>(vec.size()));
   }
 
+  void upsert_batch(
+      const std::vector<uint64_t> &ids,
+      const std::vector<float> &vectors,
+      uint32_t dim) {
+    if (dim == 0U || vectors.size() != ids.size() * static_cast<size_t>(dim)) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    detail::check(nbase_lsh_upsert_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        vectors.empty() ? nullptr : vectors.data(),
+        static_cast<uint32_t>(ids.size()),
+        dim));
+  }
+
   std::vector<float> get(uint64_t id, uint32_t dim) const {
     std::vector<float> out(dim);
     detail::check(nbase_lsh_get(ptr_, id, out.data(), dim));
     return out;
+  }
+
+  void get_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t dim,
+      std::vector<float> &out_vectors,
+      std::vector<bool> &out_found) const {
+    const size_t n = ids.size();
+    out_vectors.resize(n * static_cast<size_t>(dim));
+    out_found.assign(n, false);
+    if (n == 0U) {
+      return;
+    }
+    std::unique_ptr<bool[]> found_buf(new bool[n]);
+    detail::check(nbase_lsh_get_batch(
+        ptr_, ids.data(), static_cast<uint32_t>(n), dim, out_vectors.data(), found_buf.get()));
+    for (size_t i = 0U; i < n; ++i) {
+      out_found[i] = found_buf[i];
+    }
   }
 
   bool contains(uint64_t id) const { return nbase_lsh_contains(ptr_, id); }
@@ -1809,6 +1863,16 @@ class IvfPq {
   }
 
   void remove(uint64_t id) { detail::check(nbase_ivfpq_delete(ptr_, id)); }
+
+  uint32_t delete_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_ivfpq_delete_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        static_cast<uint32_t>(ids.size()),
+        &deleted));
+    return deleted;
+  }
 
   bool contains(uint64_t id) const { return nbase_ivfpq_contains(ptr_, id); }
 

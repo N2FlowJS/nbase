@@ -693,6 +693,66 @@ nbase_status_t nbase_ivfpq_delete(nbase_ivfpq_t *index, uint64_t id) {
   return removed > 0ULL ? NBASE_OK : NBASE_ERR_NOT_FOUND;
 }
 
+nbase_status_t nbase_ivfpq_delete_batch(
+    nbase_ivfpq_t *index,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  if (!index || (count > 0U && !ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (out_deleted != NULL) {
+    *out_deleted = 0U;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  uint64_t *sorted = malloc((size_t)count * sizeof(uint64_t));
+  if (!sorted) {
+    return NBASE_ERR_NOMEM;
+  }
+  memcpy(sorted, ids, (size_t)count * sizeof(uint64_t));
+  if (count > 1U) {
+    qsort(sorted, count, sizeof(uint64_t), cmp_u64_asc);
+  }
+  size_t uniq = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    if (uniq == 0U || sorted[i] != sorted[uniq - 1U]) {
+      sorted[uniq++] = sorted[i];
+    }
+  }
+
+  pthread_rwlock_wrlock(&index->rwlock);
+  uint64_t removed = 0ULL;
+  for (uint32_t c = 0U; c < index->nlist; c++) {
+    ivf_list_t *list = &index->lists[c];
+    for (uint32_t j = 0U; j < list->len;) {
+      if (bsearch(&list->ids[j], sorted, uniq, sizeof(uint64_t), cmp_u64_asc) != NULL) {
+        uint32_t last = list->len - 1U;
+        if (j != last) {
+          list->ids[j] = list->ids[last];
+          memcpy(
+              list->codes + (size_t)j * (size_t)index->num_subvectors,
+              list->codes + (size_t)last * (size_t)index->num_subvectors,
+              index->num_subvectors);
+        }
+        list->len--;
+        index->count--;
+        removed++;
+      } else {
+        j++;
+      }
+    }
+  }
+  pthread_rwlock_unlock(&index->rwlock);
+  free(sorted);
+  if (out_deleted != NULL) {
+    *out_deleted = (removed > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)removed;
+  }
+  return NBASE_OK;
+}
+
 bool nbase_ivfpq_contains(const nbase_ivfpq_t *index, uint64_t id) {
   if (!index) {
     return false;

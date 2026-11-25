@@ -542,6 +542,42 @@ nbase_status_t nbase_bm25_delete(nbase_bm25_t *bm25, uint64_t id) {
   return st;
 }
 
+nbase_status_t nbase_bm25_delete_batch(
+    nbase_bm25_t *bm25,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  if (!bm25 || (count > 0U && !ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (out_deleted != NULL) {
+    *out_deleted = 0U;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&bm25->rwlock);
+  nbase_status_t st = NBASE_OK;
+  uint32_t deleted = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    nbase_status_t ds = bm25_delete_unlocked(bm25, ids[i]);
+    if (ds == NBASE_ERR_NOT_FOUND) {
+      continue;
+    }
+    if (ds != NBASE_OK) {
+      st = ds;
+      break;
+    }
+    deleted++;
+  }
+  pthread_rwlock_unlock(&bm25->rwlock);
+  if (out_deleted != NULL) {
+    *out_deleted = deleted;
+  }
+  return st;
+}
+
 static nbase_status_t bm25_index_unlocked(nbase_bm25_t *bm25, uint64_t id, const char *text) {
   size_t tlen = strlen(text);
   if (tlen > (size_t)UINT32_MAX - 1U) {

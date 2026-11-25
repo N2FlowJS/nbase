@@ -1,5 +1,9 @@
 #include "test_common.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
+#include <string.h>
+
 static void test_mmr_diversity_vs_relevance_lambda(void) {
   const uint32_t dim = 3U;
   nbase_config_t cfg = nbase_config_default(dim);
@@ -280,6 +284,95 @@ static void test_extract_relationships_no_hnsw_batch(void) {
   nbase_close(db);
 }
 
+typedef struct rerank_tsan_ctx {
+  nbase_db_t *db;
+  const nbase_meta_filter_t *flt;
+  atomic_int errors;
+} rerank_tsan_ctx_t;
+
+static void *rerank_parallel_reader_fn(void *raw) {
+  rerank_tsan_ctx_t *ctx = (rerank_tsan_ctx_t *)raw;
+  for (int iter = 0; iter < 3; iter++) {
+    nbase_edge_t *e = NULL;
+    uint64_t ec = 0ULL;
+    if (nbase_extract_relationships_filtered(ctx->db, 4U, 2.0f, ctx->flt, &e, &ec) != NBASE_OK ||
+        ec == 0ULL || !e) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      nbase_free_edges(e);
+      break;
+    }
+    nbase_free_edges(e);
+  }
+  return NULL;
+}
+
+static void test_extract_relationships_parallel_hnsw_and_exact_tsan(void) {
+  const uint32_t dim = 8U;
+  const uint32_t n = 160U;
+
+  for (int mode = 0; mode < 2; mode++) {
+    nbase_config_t cfg = nbase_config_default(dim);
+    cfg.metric = NBASE_METRIC_EUCLIDEAN;
+    cfg.enable_hnsw = (mode == 0);
+
+    nbase_db_t *db = NULL;
+    ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+    for (uint32_t i = 0U; i < n; i++) {
+      uint64_t id = 1000ULL + i;
+      float v[8] = {0.0f};
+      v[i % 4U] = 1.0f;
+      v[(i % 4U) + 4U] = 0.01f * (float)(i / 4U);
+      ASSERT_STATUS(nbase_add(db, id, v, dim), NBASE_OK);
+
+      const char *grp = (i < 132U) ? "big" : "small";
+      nbase_meta_field_t mf = {"grp", {.type = NBASE_META_STRING, .as = {.str = grp}}};
+      ASSERT_STATUS(nbase_set_meta(db, id, &mf, 1U), NBASE_OK);
+    }
+
+    /* Unfiltered parallel extraction (>= 128 active): deterministic across repeated calls. */
+    nbase_edge_t *e1 = NULL;
+    nbase_edge_t *e2 = NULL;
+    uint64_t c1 = 0ULL;
+    uint64_t c2 = 0ULL;
+    ASSERT_STATUS(nbase_extract_relationships(db, 4U, 2.0f, &e1, &c1), NBASE_OK);
+    ASSERT_STATUS(nbase_extract_relationships(db, 4U, 2.0f, &e2, &c2), NBASE_OK);
+    ASSERT_TRUE(c1 > 0ULL && e1 != NULL);
+    ASSERT_EQ_U64(c1, c2);
+    for (uint64_t i = 0ULL; i < c1; i++) {
+      ASSERT_TRUE(e1[i].src_id < e1[i].dst_id);
+      ASSERT_EQ_U64(e1[i].src_id, e2[i].src_id);
+      ASSERT_EQ_U64(e1[i].dst_id, e2[i].dst_id);
+      ASSERT_NEAR(e1[i].weight, e2[i].weight, 1e-6, 0.0);
+    }
+    nbase_free_edges(e1);
+    nbase_free_edges(e2);
+
+    /* Filtered parallel extraction (active == 132 >= 128) + concurrent TSan callers. */
+    nbase_meta_cond_t cond = {"grp", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "big"}}};
+    nbase_meta_filter_t flt = {&cond, 1U};
+    nbase_edge_t *fe = NULL;
+    uint64_t fc = 0ULL;
+    ASSERT_STATUS(nbase_extract_relationships_filtered(db, 4U, 2.0f, &flt, &fe, &fc), NBASE_OK);
+    ASSERT_TRUE(fc > 0ULL && fe != NULL);
+    for (uint64_t i = 0ULL; i < fc; i++) {
+      ASSERT_TRUE(fe[i].src_id >= 1000ULL && fe[i].src_id < 1132ULL);
+      ASSERT_TRUE(fe[i].dst_id >= 1000ULL && fe[i].dst_id < 1132ULL);
+    }
+    nbase_free_edges(fe);
+
+    rerank_tsan_ctx_t ctx = {db, &flt, 0};
+    pthread_t t1, t2;
+    ASSERT_TRUE(pthread_create(&t1, NULL, rerank_parallel_reader_fn, &ctx) == 0);
+    ASSERT_TRUE(pthread_create(&t2, NULL, rerank_parallel_reader_fn, &ctx) == 0);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+    nbase_close(db);
+  }
+}
+
 void test_rerank_run(void) {
   RUN_TEST(test_mmr_diversity_vs_relevance_lambda);
   RUN_TEST(test_extract_relationships_and_communities);
@@ -287,4 +380,5 @@ void test_rerank_run(void) {
   RUN_TEST(test_rerank_weighted_metadata_and_edge_cases);
   RUN_TEST(test_extract_relationships_filtered);
   RUN_TEST(test_extract_relationships_no_hnsw_batch);
+  RUN_TEST(test_extract_relationships_parallel_hnsw_and_exact_tsan);
 }

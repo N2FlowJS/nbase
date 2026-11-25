@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 13
+#define NBASE_VERSION_MINOR 14
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -461,6 +461,7 @@ nbase_status_t nbase_ivfpq_train(const nbase_ivfpq_config_t *cfg, const float *t
 nbase_status_t nbase_ivfpq_add(nbase_ivfpq_t *index, const uint64_t *ids, const float *vectors, uint32_t count);
 nbase_status_t nbase_ivfpq_upsert(nbase_ivfpq_t *index, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_ivfpq_delete(nbase_ivfpq_t *index, uint64_t id);
+nbase_status_t nbase_ivfpq_delete_batch(nbase_ivfpq_t *index, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 bool nbase_ivfpq_contains(const nbase_ivfpq_t *index, uint64_t id);
 nbase_status_t nbase_ivfpq_list_ids(
     const nbase_ivfpq_t *index,
@@ -544,8 +545,11 @@ void nbase_lsh_destroy(nbase_lsh_t *lsh);
 nbase_status_t nbase_lsh_add(nbase_lsh_t *lsh, uint64_t id, const float *vec, uint32_t dim);
 nbase_status_t nbase_lsh_add_batch(nbase_lsh_t *lsh, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
 nbase_status_t nbase_lsh_upsert(nbase_lsh_t *lsh, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_lsh_upsert_batch(nbase_lsh_t *lsh, const uint64_t *ids, const float *vectors, uint32_t count, uint32_t dim);
 nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id);
+nbase_status_t nbase_lsh_delete_batch(nbase_lsh_t *lsh, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_lsh_get(const nbase_lsh_t *lsh, uint64_t id, float *out_vec, uint32_t dim);
+nbase_status_t nbase_lsh_get_batch(const nbase_lsh_t *lsh, const uint64_t *ids, uint32_t count, uint32_t dim, float *out_vectors, bool *out_found);
 bool nbase_lsh_contains(const nbase_lsh_t *lsh, uint64_t id);
 nbase_status_t nbase_lsh_list_ids(
     const nbase_lsh_t *lsh,
@@ -601,6 +605,7 @@ nbase_status_t nbase_bm25_index_batch(
 nbase_status_t nbase_bm25_get(const nbase_bm25_t *bm25, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
 bool nbase_bm25_contains(const nbase_bm25_t *bm25, uint64_t id);
 nbase_status_t nbase_bm25_delete(nbase_bm25_t *bm25, uint64_t id);
+nbase_status_t nbase_bm25_delete_batch(nbase_bm25_t *bm25, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_bm25_list_ids(
     const nbase_bm25_t *bm25,
     uint64_t offset,

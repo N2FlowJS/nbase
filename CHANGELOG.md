@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-25
+
+Standalone index batch CRUD parity (`nbase_ivfpq_delete_batch`, `nbase_lsh_upsert_batch`, `nbase_lsh_delete_batch`, `nbase_lsh_get_batch`, `nbase_bm25_delete_batch` + C++17 `nbase.hpp` methods), AVX2 8-lane bit-exact `sq8_encode_avx2`, 4-thread parallel `nbase_extract_relationships_filtered`, HTTP `POST /api/search/batch` `include*` flags, and CLI `set-meta-batch` / `set-text-batch`.
+
+### Added
+- **Standalone Index Batch CRUD Parity (`include/nbase.h`, `src/lsh.c`, `src/ivfpq.c`, `src/bm25.c`, `include/nbase.hpp`)**:
+  - Added `nbase_ivfpq_delete_batch` using sorted+deduped ID matching via `bsearch` across inverted lists and swap-delete compaction under `wrlock`, plus C++17 `nbase::IvfPq::delete_batch`.
+  - Added `nbase_lsh_upsert_batch`, `nbase_lsh_delete_batch`, and `nbase_lsh_get_batch` (sharing `lsh_validate_write_batch` with `nbase_lsh_add_batch`), plus C++17 `nbase::Lsh::{upsert_batch, delete_batch, get_batch}`.
+  - Added `nbase_bm25_delete_batch` using `bm25_delete_unlocked` under `wrlock`, plus C++17 `nbase::Bm25::delete_batch`.
+- **AVX2 SQ8 Encode & Parallel k-NN Relationship Extraction (`src/sq8.c`, `src/rerank.c`, `bench/bench_nbase.c`)**:
+  - Added AVX2 8-lane `sq8_encode_avx2` inside `nbase_sq8_encode` (`dim >= 8`) matching exact scalar `roundf` clamping semantics.
+  - Parallelized `nbase_extract_relationships_filtered` across 4 `pthreads` when `active_cnt >= 128` using disjoint per-worker k-NN buffers and deterministic in-place edge compaction, plus relationship extraction timing in `bench_nbase`.
+- **HTTP/1.1 Server & CLI Parity (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Updated `POST /api/search/batch` to honor `includeMetadata`, `includeVectors`, and `includeText` flags via `parse_include_flags` and `append_result_entries_json`.
+  - Added `nbase-cli set-meta-batch <dir> <file.ndjson|-> [--update]` and `nbase-cli set-text-batch <dir> <file.ndjson|->` sharing a common NDJSON record reader (`cli_read_ndjson_id_records`).
+- **Tests (`tests/test_db.c`, `tests/test_lsh.c`, `tests/test_ivfpq.c`, `tests/test_bm25.c`, `tests/test_sq8.c`, `tests/test_rerank.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.14.0"` and added `test_lsh_upsert_delete_get_batch_and_tsan`, `test_ivfpq_delete_batch_and_tsan`, `test_bm25_delete_batch_and_errors`, `test_sq8_avx2_encode_exact_edge_cases`, `test_extract_relationships_parallel_hnsw_and_exact_tsan`, and HTTP `POST /api/search/batch` `include*` flag assertions.
+
 ## [1.13.0] - 2026-11-25
 
 Batch metadata deletion (`nbase_delete_meta_batch`), full Partitioned Multi-DB batch parity (`nbase_pdb_delete_meta_batch`, `nbase_pdb_delete_text_batch`, `nbase_pdb_search_text_batch`, `nbase_pdb_search_hybrid_batch`), parallel PQ encoding & batched parallel IVF-PQ ingestion, AVX2 SQ8 decoding (`sq8_decode_avx2`), HTTP `DELETE /api/vectors/metadata`, and CLI `delete-meta-batch`.

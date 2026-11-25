@@ -355,8 +355,8 @@ nbase_status_t nbase_lsh_add(nbase_lsh_t *lsh, uint64_t id, const float *vec, ui
   return st;
 }
 
-nbase_status_t nbase_lsh_add_batch(
-    nbase_lsh_t *lsh,
+static nbase_status_t lsh_validate_write_batch(
+    const nbase_lsh_t *lsh,
     const uint64_t *ids,
     const float *vectors,
     uint32_t count,
@@ -390,9 +390,21 @@ nbase_status_t nbase_lsh_add_batch(
     }
     free(sorted);
   }
+  return NBASE_OK;
+}
+
+nbase_status_t nbase_lsh_add_batch(
+    nbase_lsh_t *lsh,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim) {
+  nbase_status_t st = lsh_validate_write_batch(lsh, ids, vectors, count, dim);
+  if (st != NBASE_OK || count == 0U) {
+    return st;
+  }
 
   pthread_rwlock_wrlock(&lsh->rwlock);
-  nbase_status_t st = NBASE_OK;
   for (uint32_t i = 0U; i < count; i++) {
     if (nbase_store_find_slot(lsh->store, ids[i], NULL)) {
       st = NBASE_ERR_ALREADY_EXISTS;
@@ -435,6 +447,31 @@ nbase_status_t nbase_lsh_upsert(nbase_lsh_t *lsh, uint64_t id, const float *vec,
   return st;
 }
 
+nbase_status_t nbase_lsh_upsert_batch(
+    nbase_lsh_t *lsh,
+    const uint64_t *ids,
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim) {
+  nbase_status_t st = lsh_validate_write_batch(lsh, ids, vectors, count, dim);
+  if (st != NBASE_OK || count == 0U) {
+    return st;
+  }
+
+  pthread_rwlock_wrlock(&lsh->rwlock);
+  for (uint32_t i = 0U; i < count && st == NBASE_OK; i++) {
+    if (nbase_store_find_slot(lsh->store, ids[i], NULL)) {
+      st = lsh_delete_unlocked(lsh, ids[i]);
+      if (st != NBASE_OK) {
+        break;
+      }
+    }
+    st = lsh_add_unlocked(lsh, ids[i], vectors + (size_t)i * (size_t)dim, dim);
+  }
+  pthread_rwlock_unlock(&lsh->rwlock);
+  return st;
+}
+
 nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id) {
   if (!lsh) {
     return NBASE_ERR_INVALID_ARG;
@@ -442,6 +479,42 @@ nbase_status_t nbase_lsh_delete(nbase_lsh_t *lsh, uint64_t id) {
   pthread_rwlock_wrlock(&lsh->rwlock);
   nbase_status_t st = lsh_delete_unlocked(lsh, id);
   pthread_rwlock_unlock(&lsh->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_lsh_delete_batch(
+    nbase_lsh_t *lsh,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  if (!lsh || (count > 0U && !ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (out_deleted != NULL) {
+    *out_deleted = 0U;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&lsh->rwlock);
+  nbase_status_t st = NBASE_OK;
+  uint32_t deleted = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    nbase_status_t ds = lsh_delete_unlocked(lsh, ids[i]);
+    if (ds == NBASE_ERR_NOT_FOUND) {
+      continue;
+    }
+    if (ds != NBASE_OK) {
+      st = ds;
+      break;
+    }
+    deleted++;
+  }
+  pthread_rwlock_unlock(&lsh->rwlock);
+  if (out_deleted != NULL) {
+    *out_deleted = deleted;
+  }
   return st;
 }
 
@@ -469,6 +542,40 @@ nbase_status_t nbase_lsh_get(const nbase_lsh_t *lsh, uint64_t id, float *out_vec
   }
   pthread_rwlock_unlock(&mutable_lsh->rwlock);
   return st;
+}
+
+nbase_status_t nbase_lsh_get_batch(
+    const nbase_lsh_t *lsh,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t dim,
+    float *out_vectors,
+    bool *out_found) {
+  if (!lsh || (count > 0U && (!ids || !out_vectors || !out_found))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  nbase_lsh_t *mutable_lsh = (nbase_lsh_t *)(uintptr_t)lsh;
+  pthread_rwlock_rdlock(&mutable_lsh->rwlock);
+  if (dim != lsh->dim) {
+    pthread_rwlock_unlock(&mutable_lsh->rwlock);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    uint32_t slot = NBASE_INVALID_SLOT;
+    float *dst = out_vectors + (size_t)i * (size_t)dim;
+    if (nbase_store_find_slot(lsh->store, ids[i], &slot)) {
+      const float *v = nbase_store_get_vector(lsh->store, slot);
+      if (v != NULL) {
+        memcpy(dst, v, (size_t)dim * sizeof(float));
+        out_found[i] = true;
+        continue;
+      }
+    }
+    memset(dst, 0, (size_t)dim * sizeof(float));
+    out_found[i] = false;
+  }
+  pthread_rwlock_unlock(&mutable_lsh->rwlock);
+  return NBASE_OK;
 }
 
 bool nbase_lsh_contains(const nbase_lsh_t *lsh, uint64_t id) {

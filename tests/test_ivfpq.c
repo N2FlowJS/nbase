@@ -501,6 +501,104 @@ static void test_ivfpq_parallel_batch_add_mt_and_cosine(void) {
   free(vecs);
 }
 
+typedef struct ivfpq_delbatch_tsan_ctx {
+  nbase_ivfpq_t *idx;
+  const float *query;
+  atomic_bool stop;
+  atomic_int errors;
+} ivfpq_delbatch_tsan_ctx_t;
+
+static void *ivfpq_delbatch_reader_fn(void *raw) {
+  ivfpq_delbatch_tsan_ctx_t *ctx = (ivfpq_delbatch_tsan_ctx_t *)raw;
+  nbase_result_t hits[5];
+  uint64_t list_buf[16];
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    uint32_t got = 0U;
+    if (nbase_ivfpq_search(ctx->idx, ctx->query, 5U, 4U, hits, &got) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    uint32_t lcnt = 0U;
+    uint64_t total = 0ULL;
+    if (nbase_ivfpq_list_ids(ctx->idx, 0ULL, 16U, list_buf, &lcnt, &total) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    (void)nbase_ivfpq_contains(ctx->idx, 100ULL);
+  }
+  return NULL;
+}
+
+static void test_ivfpq_delete_batch_and_tsan(void) {
+  const uint32_t dim = 32U;
+  const uint32_t n = 120U;
+  float *vecs = malloc((size_t)n * (size_t)dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL);
+  test_fill_vectors(vecs, n, dim, 8881ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 100ULL + (uint64_t)i;
+  }
+
+  nbase_ivfpq_config_t cfg = nbase_ivfpq_config_default(dim, 8U, 4U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.num_centroids = 32U;
+  cfg.max_iters = 8U;
+  cfg.seed = 4444ULL;
+
+  nbase_ivfpq_t *idx = NULL;
+  ASSERT_STATUS(nbase_ivfpq_train(&cfg, vecs, n, &idx), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_add(idx, ids, vecs, n), NBASE_OK);
+
+  uint32_t del_cnt = 77U;
+  ASSERT_STATUS(nbase_ivfpq_delete_batch(idx, NULL, 0U, &del_cnt), NBASE_OK);
+  ASSERT_EQ_U64(del_cnt, 0ULL);
+  ASSERT_STATUS(nbase_ivfpq_delete_batch(NULL, ids, 1U, &del_cnt), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_ivfpq_delete_batch(idx, NULL, 1U, &del_cnt), NBASE_ERR_INVALID_ARG);
+
+  /* Delete mix of existing, missing, and duplicate input IDs. */
+  uint64_t del_ids[5] = {110ULL, 999999ULL, 110ULL, 125ULL, 200ULL};
+  ASSERT_STATUS(nbase_ivfpq_delete_batch(idx, del_ids, 5U, &del_cnt), NBASE_OK);
+  ASSERT_EQ_U64(del_cnt, 3ULL);
+  ASSERT_TRUE(!nbase_ivfpq_contains(idx, 110ULL));
+  ASSERT_TRUE(!nbase_ivfpq_contains(idx, 125ULL));
+  ASSERT_TRUE(!nbase_ivfpq_contains(idx, 200ULL));
+  ASSERT_TRUE(nbase_ivfpq_contains(idx, 100ULL));
+
+  nbase_ivfpq_stats_t st;
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, n - 3ULL);
+
+  nbase_result_t hits[8];
+  uint32_t got = 0U;
+  ASSERT_STATUS(nbase_ivfpq_search(idx, vecs + (size_t)10U * dim, 8U, 8U, hits, &got), NBASE_OK);
+  for (uint32_t i = 0U; i < got; i++) {
+    ASSERT_TRUE(hits[i].id != 110ULL && hits[i].id != 125ULL && hits[i].id != 200ULL);
+  }
+
+  /* Concurrent readers vs delete_batch + upsert under TSan. */
+  ivfpq_delbatch_tsan_ctx_t ctx = {idx, vecs, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, ivfpq_delbatch_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, ivfpq_delbatch_reader_fn, &ctx) == 0);
+  for (uint32_t b = 0U; b < 5U; b++) {
+    uint64_t batch_del[2] = {150ULL + b * 2ULL, 151ULL + b * 2ULL};
+    ASSERT_STATUS(nbase_ivfpq_delete_batch(idx, batch_del, 2U, &del_cnt), NBASE_OK);
+    ASSERT_EQ_U64(del_cnt, 2ULL);
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, n - 13ULL);
+
+  nbase_ivfpq_destroy(idx);
+  free(ids);
+  free(vecs);
+}
+
 void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_train_add_search_euclidean_and_save_load);
   RUN_TEST(test_ivfpq_cosine_and_inner_product);
@@ -508,4 +606,5 @@ void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_search_batch_mt_and_tsan);
   RUN_TEST(test_ivfpq_crud_upsert_delete_list_compact_and_tsan);
   RUN_TEST(test_ivfpq_parallel_batch_add_mt_and_cosine);
+  RUN_TEST(test_ivfpq_delete_batch_and_tsan);
 }

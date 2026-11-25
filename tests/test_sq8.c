@@ -225,10 +225,78 @@ static void test_sq8_avx2_decode_dims_and_accuracy(void) {
   }
 }
 
+static void test_sq8_avx2_encode_exact_edge_cases(void) {
+  static const uint32_t dims[7] = {1U, 7U, 8U, 9U, 17U, 35U, 64U};
+  static const float edges[9] = {
+      0.0f,
+      0.49999997f,
+      0.5f,
+      1.5f,
+      254.49998f,
+      254.5f,
+      -3.25f,
+      300.0f,
+      42.25f,
+  };
+  const uint32_t batch_cnt = 10U;
+
+  for (size_t di = 0U; di < 7U; di++) {
+    uint32_t dim = dims[di];
+    float train[2U * 64U];
+    for (uint32_t d = 0U; d < dim; d++) {
+      if (dim >= 8U && d == 5U) {
+        /* Constant dim -> inv_scale == 0.0f */
+        train[d] = 42.0f;
+        train[dim + d] = 42.0f;
+      } else {
+        /* Exact span 255 -> scale=1, inv_scale=1 */
+        train[d] = 0.0f;
+        train[dim + d] = 255.0f;
+      }
+    }
+
+    nbase_sq8_t *sq8 = NULL;
+    ASSERT_STATUS(nbase_sq8_train(train, 2U, dim, &sq8), NBASE_OK);
+
+    float *vecs = malloc((size_t)batch_cnt * (size_t)dim * sizeof(float));
+    uint8_t *codes = malloc((size_t)batch_cnt * (size_t)dim);
+    ASSERT_TRUE(vecs != NULL && codes != NULL);
+
+    for (uint32_t i = 0U; i < batch_cnt; i++) {
+      for (uint32_t d = 0U; d < dim; d++) {
+        vecs[(size_t)i * dim + d] = edges[(i * 3U + d) % 9U];
+      }
+    }
+
+    ASSERT_STATUS(nbase_sq8_encode(sq8, vecs, batch_cnt, codes), NBASE_OK);
+    for (uint32_t i = 0U; i < batch_cnt; i++) {
+      for (uint32_t d = 0U; d < dim; d++) {
+        uint8_t expected = 0U;
+        if (!(dim >= 8U && d == 5U)) {
+          float q = roundf(vecs[(size_t)i * dim + d]);
+          if (q <= 0.0f) {
+            expected = 0U;
+          } else if (q >= 255.0f) {
+            expected = 255U;
+          } else {
+            expected = (uint8_t)q;
+          }
+        }
+        ASSERT_EQ_U64(codes[(size_t)i * dim + d], expected);
+      }
+    }
+
+    nbase_sq8_destroy(sq8);
+    free(codes);
+    free(vecs);
+  }
+}
+
 void test_sq8_run(void) {
   RUN_TEST(test_sq8_train_encode_decode_and_distance);
   RUN_TEST(test_sq8_persistence_and_corruption);
   RUN_TEST(test_sq8_l2_sq_asymmetric_batch);
   RUN_TEST(test_sq8_l2_sq_symmetric_batch);
   RUN_TEST(test_sq8_avx2_decode_dims_and_accuracy);
+  RUN_TEST(test_sq8_avx2_encode_exact_edge_cases);
 }
