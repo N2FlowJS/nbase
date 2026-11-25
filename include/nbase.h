@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 10
+#define NBASE_VERSION_MINOR 11
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -585,10 +585,32 @@ nbase_status_t nbase_bm25_create(float k1, float b, nbase_bm25_t **out_bm25);
 void nbase_bm25_destroy(nbase_bm25_t *bm25);
 uint64_t nbase_bm25_doc_count(const nbase_bm25_t *bm25);
 nbase_status_t nbase_bm25_index(nbase_bm25_t *bm25, uint64_t id, const char *text);
+nbase_status_t nbase_bm25_index_batch(
+    nbase_bm25_t *bm25,
+    const uint64_t *ids,
+    const char *const *texts,
+    uint32_t count);
 nbase_status_t nbase_bm25_get(const nbase_bm25_t *bm25, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
+bool nbase_bm25_contains(const nbase_bm25_t *bm25, uint64_t id);
 nbase_status_t nbase_bm25_delete(nbase_bm25_t *bm25, uint64_t id);
+nbase_status_t nbase_bm25_list_ids(
+    const nbase_bm25_t *bm25,
+    uint64_t offset,
+    uint32_t limit,
+    uint64_t *out_ids,
+    uint32_t *out_count,
+    uint64_t *out_total);
+nbase_status_t nbase_bm25_compact(nbase_bm25_t *bm25);
 nbase_status_t nbase_bm25_search(const nbase_bm25_t *bm25, const char *query, uint32_t k, nbase_scored_id_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_bm25_search_filtered(const nbase_bm25_t *bm25, const char *query, uint32_t k, nbase_filter_fn filter, void *filter_ctx, nbase_scored_id_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_bm25_search_batch(
+    const nbase_bm25_t *bm25,
+    const char *const *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t num_threads,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_bm25_save(const nbase_bm25_t *bm25, const char *file_path);
 nbase_status_t nbase_bm25_load(const char *file_path, nbase_bm25_t **out_bm25);
 nbase_status_t nbase_hybrid_rrf(const nbase_result_t *vec_results, uint32_t vec_count, const nbase_scored_id_t *text_results, uint32_t text_count, float alpha, float rrf_k, uint32_t k, nbase_scored_id_t *out_results, uint32_t *out_count);

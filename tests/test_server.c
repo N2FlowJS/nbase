@@ -1922,6 +1922,94 @@ static void test_http_server_patch_vector_head_subresources_and_export_ids(void)
   nbase_close(db);
 }
 
+static void test_http_server_text_and_hybrid_batch_search(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  const uint64_t ids[3] = {10ULL, 20ULL, 30ULL};
+  const float vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f,
+  };
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 3U, 3U, 1U), NBASE_OK);
+  nbase_meta_field_t m10[1] = {{"group", {.type = NBASE_META_STRING, .as = {.str = "alpha"}}}};
+  nbase_meta_field_t m20[1] = {{"group", {.type = NBASE_META_STRING, .as = {.str = "beta"}}}};
+  nbase_meta_field_t m30[1] = {{"group", {.type = NBASE_META_STRING, .as = {.str = "alpha"}}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, m10, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 20ULL, m20, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 30ULL, m30, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 10ULL, "simd vector hnsw kernel"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 20ULL, "bm25 hybrid ranking score"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 30ULL, "wal durability snapshot compact"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. POST /api/search/text/batch */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/text/batch",
+      NULL,
+      "{\"queries\":[\"simd hnsw\",\"wal compact\",\"hybrid bm25\"],"
+      "\"k\":2,\"filters\":{\"group\":\"alpha\"},\"includeMetadata\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"queryCount\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"simd vector hnsw kernel\"") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/search/text/batch", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/search/text/batch", NULL, "{\"queries\":[123]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  /* 2. POST /api/search/hybrid/batch */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/hybrid/batch",
+      NULL,
+      "{\"queries\":["
+      "{\"query\":[1,0,0],\"text\":\"simd\"},"
+      "{\"query\":[0,1,0]},"
+      "{\"text\":\"durability\"}"
+      "],\"k\":2,\"alpha\":0.5,\"rrfK\":60,\"includeVectors\":true,\"includeMetadata\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"queryCount\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "DELETE", "/api/search/hybrid/batch", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/search/hybrid/batch", NULL, "{\"queries\":[{}]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -1939,4 +2027,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_exists_batch_and_radius_endpoint);
   RUN_TEST(test_http_server_head_and_filtered_export);
   RUN_TEST(test_http_server_patch_vector_head_subresources_and_export_ids);
+  RUN_TEST(test_http_server_text_and_hybrid_batch_search);
 }

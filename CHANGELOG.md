@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-25
+
+Thread-safe BM25 concurrency, O(N log k) top-k heap & multi-threaded batch search/lifecycle parity (`index_batch`, `contains`, `list_ids`, `compact`, `search_batch`), AVX2 `bq_encode` + hardware 4-row `popcnt` Hamming kernels, HTTP `/api/search/{text,hybrid}/batch`, and CLI `patch` & `search-batch`.
+
+### Added
+- **BM25 Concurrency, Performance & Lifecycle Parity (`src/bm25.c`, `include/nbase.h`, `include/nbase.hpp`)**:
+  - Added `pthread_rwlock_t` concurrency, cached per-posting `doc_len` (zero struct size growth), hoisted BM25 IDF/norm arithmetic, pre-sized query score maps, and bounded O(N log k) top-k min-heap extraction.
+  - Added `nbase_bm25_index_batch`, `nbase_bm25_contains`, sorted paginated `nbase_bm25_list_ids`, `nbase_bm25_compact` (reclaiming doc tombstones & dead terms + shrinking posting allocations), and work-stealing `pthreads` `nbase_bm25_search_batch`, plus C++17 `Bm25::{index_batch, contains, list_ids, compact, search_batch}`.
+- **Binary Quantization AVX2 Encode & 4-Row POPCNT (`src/bq.c`)**:
+  - Added runtime-dispatched AVX2 `_mm256_cmp_ps`/`_mm256_movemask_ps` bit-packing in `bq_encode_avx2` and 4-row unrolled hardware `popcnt` (`bq_hamming_popcnt`, `bq_hamming_batch_popcnt`).
+- **HTTP/1.1 Server, CLI & Benchmark Enhancements (`src/http_server.c`, `apps/nbase_cli.c`, `bench/bench_nbase.c`)**:
+  - Added `POST /api/search/text/batch` and `POST /api/search/hybrid/batch` sharing `append_scored_entries_json`.
+  - Added `nbase-cli patch <dir> <id>` (`--vector`, `--meta`, `--text`, `--clear-text`) and `nbase-cli search-batch <dir> <file.ndjson|->`.
+  - Added `search_batch(4t)` QPS timing to `bench_nbase`.
+- **Tests (`tests/test_bm25.c`, `tests/test_bq.c`, `tests/test_server.c`, `tests/test_db.c`)**:
+  - Added `test_bm25_crud_batch_compact_and_tsan`, `test_bq_avx2_encode_and_popcnt_batch_edges`, and `test_http_server_text_and_hybrid_batch_search`.
+
 ## [1.10.0] - 2026-11-25
 
 IVF-PQ mutable CRUD & lifecycle parity (`upsert`, `delete`, `contains`, `list_ids`, `compact`), 4-row unrolled AVX2+FMA SQ8 asymmetric/symmetric batch kernels, 4-code interleaved PQ ADC batch lookup with prefetch, HTTP `PATCH /api/vectors/:id`, `HEAD /api/vectors/:id/{metadata,text}`, selective `ids` export, and CLI `import --upsert` / `export --ids`.

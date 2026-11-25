@@ -100,7 +100,58 @@ static void test_bq_hamming_batch(void) {
   }
 }
 
+static void test_bq_avx2_encode_and_popcnt_batch_edges(void) {
+  static const uint32_t dims[10] = {1U, 7U, 8U, 15U, 16U, 63U, 64U, 65U, 130U, 256U};
+  static const uint32_t sub_counts[8] = {0U, 1U, 2U, 3U, 4U, 5U, 7U, 13U};
+  const uint32_t n = 20U;
+
+  for (uint32_t di = 0U; di < 10U; di++) {
+    uint32_t dim = dims[di];
+    float *vecs = malloc((size_t)n * dim * sizeof(float));
+    ASSERT_TRUE(vecs != NULL);
+    test_fill_vectors(vecs, n, dim, 7100ULL + di);
+
+    nbase_bq_t *bq = NULL;
+    ASSERT_STATUS(nbase_bq_train(vecs, n, dim, &bq), NBASE_OK);
+    uint32_t wpv = nbase_bq_words_per_vec(bq);
+    uint64_t *codes = malloc((size_t)n * wpv * sizeof(uint64_t));
+    uint32_t *out = malloc((size_t)n * sizeof(uint32_t));
+    ASSERT_TRUE(codes != NULL && out != NULL);
+
+    ASSERT_STATUS(nbase_bq_encode(bq, vecs, n, codes), NBASE_OK);
+    for (uint32_t i = 0U; i < n; i++) {
+      for (uint32_t d = 0U; d < dim; d++) {
+        uint64_t single_word = 0ULL;
+        uint32_t bit = (codes[(size_t)i * wpv + (d >> 6U)] >> (d & 63U)) & 1ULL;
+        (void)single_word;
+        double sum = 0.0;
+        for (uint32_t k = 0U; k < n; k++) {
+          sum += (double)vecs[(size_t)k * dim + d];
+        }
+        float thresh = (float)(sum / (double)n);
+        uint32_t expected_bit = (vecs[(size_t)i * dim + d] >= thresh) ? 1U : 0U;
+        ASSERT_EQ_U64((uint64_t)bit, (uint64_t)expected_bit);
+      }
+    }
+
+    for (uint32_t si = 0U; si < 8U; si++) {
+      uint32_t sc = sub_counts[si];
+      ASSERT_STATUS(nbase_bq_hamming_batch(codes, codes, sc, wpv, out), NBASE_OK);
+      for (uint32_t i = 0U; i < sc; i++) {
+        uint32_t exact = nbase_bq_hamming(codes, codes + (size_t)i * wpv, wpv);
+        ASSERT_EQ_U64(out[i], exact);
+      }
+    }
+
+    free(out);
+    free(codes);
+    nbase_bq_destroy(bq);
+    free(vecs);
+  }
+}
+
 void test_bq_run(void) {
   RUN_TEST(test_bq_train_encode_hamming_and_persistence);
   RUN_TEST(test_bq_hamming_batch);
+  RUN_TEST(test_bq_avx2_encode_and_popcnt_batch_edges);
 }

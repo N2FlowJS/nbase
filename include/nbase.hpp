@@ -829,6 +829,23 @@ class Bm25 {
     detail::check(nbase_bm25_index(ptr_, id, text.c_str()));
   }
 
+  void index_batch(
+      const std::vector<uint64_t> &ids, const std::vector<std::string> &texts) {
+    if (ids.size() != texts.size()) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    std::vector<const char *> ptrs;
+    ptrs.reserve(texts.size());
+    for (const auto &t : texts) {
+      ptrs.push_back(t.c_str());
+    }
+    detail::check(nbase_bm25_index_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        ptrs.empty() ? nullptr : ptrs.data(),
+        static_cast<uint32_t>(ids.size())));
+  }
+
   std::string get(uint64_t id) const {
     size_t len = 0U;
     detail::check(nbase_bm25_get(ptr_, id, nullptr, 0U, &len));
@@ -837,7 +854,21 @@ class Bm25 {
     return out;
   }
 
+  bool contains(uint64_t id) const { return nbase_bm25_contains(ptr_, id); }
+
   void remove(uint64_t id) { detail::check(nbase_bm25_delete(ptr_, id)); }
+
+  std::vector<uint64_t> list_ids(
+      uint64_t offset, uint32_t limit, uint64_t *out_total = nullptr) const {
+    std::vector<uint64_t> ids(limit);
+    uint32_t got = 0U;
+    detail::check(nbase_bm25_list_ids(
+        ptr_, offset, limit, limit > 0U ? ids.data() : nullptr, &got, out_total));
+    ids.resize(got);
+    return ids;
+  }
+
+  void compact() { detail::check(nbase_bm25_compact(ptr_)); }
 
   std::vector<nbase_scored_id_t> search(const std::string &query, uint32_t k) const {
     std::vector<nbase_scored_id_t> out(k);
@@ -865,6 +896,39 @@ class Bm25 {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_scored_id_t>> search_batch(
+      const std::vector<std::string> &queries,
+      uint32_t k,
+      uint32_t num_threads = 0U) const {
+    if (queries.empty()) {
+      return {};
+    }
+    uint32_t qcnt = static_cast<uint32_t>(queries.size());
+    std::vector<const char *> ptrs;
+    ptrs.reserve(qcnt);
+    for (const auto &q : queries) {
+      ptrs.push_back(q.c_str());
+    }
+    std::vector<nbase_scored_id_t> flat(
+        static_cast<size_t>(qcnt) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(qcnt, 0U);
+    detail::check(nbase_bm25_search_batch(
+        ptr_,
+        ptrs.data(),
+        qcnt,
+        k,
+        num_threads,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    std::vector<std::vector<nbase_scored_id_t>> res(qcnt);
+    for (uint32_t q = 0U; q < qcnt; q++) {
+      const nbase_scored_id_t *row =
+          flat.data() + static_cast<size_t>(q) * static_cast<size_t>(k);
+      res[q].assign(row, row + counts[q]);
+    }
+    return res;
   }
 
   void save(const std::string &file_path) const {

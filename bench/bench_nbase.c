@@ -569,9 +569,24 @@ static void bench_batch_threads_and_pq(void) {
       (void)nbase_bm25_search(bm25, "vector avx2 hnsw", 10U, bhits, &bgot);
     }
     uint64_t bm_s1 = now_ns();
-    printf("  bm25(2000 docs)  index=%5.2f ms  search=%6.2f us/query\n",
+    const char *bm_qs[50];
+    for (uint32_t q = 0U; q < 50U; q++) {
+      bm_qs[q] = "vector avx2 hnsw";
+    }
+    nbase_scored_id_t *bmb_res = malloc(50U * 10U * sizeof(nbase_scored_id_t));
+    uint32_t bmb_cnts[50];
+    double bm_batch_qps = 0.0;
+    if (bmb_res) {
+      uint64_t bmb0 = now_ns();
+      (void)nbase_bm25_search_batch(bm25, bm_qs, 50U, 10U, 4U, bmb_res, bmb_cnts);
+      uint64_t bmb1 = now_ns();
+      bm_batch_qps = 50.0 / ((double)(bmb1 - bmb0) / 1e9);
+      free(bmb_res);
+    }
+    printf("  bm25(2000 docs)  index=%5.2f ms  search=%6.2f us/query  search_batch(4t)=%7.0f QPS\n",
            (double)(bm_i1 - bm_i0) / 1e6,
-           (double)(bm_s1 - bm_s0) / 50.0 / 1e3);
+           (double)(bm_s1 - bm_s0) / 50.0 / 1e3,
+           bm_batch_qps);
     nbase_bm25_destroy(bm25);
   }
 

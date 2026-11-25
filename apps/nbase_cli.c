@@ -21,6 +21,7 @@ static void print_usage(const char *prog) {
       "  info <dir>\n"
       "  add <dir> <id> <v0,v1,...>\n"
       "  upsert <dir> <id> <v0,v1,...>\n"
+      "  patch <dir> <id> [--vector <v0,v1,...>] [--meta <json>] [--text <str>|--clear-text]\n"
       "  get <dir> <id>\n"
       "  get-batch <dir> <id1,id2,...>\n"
       "  exists <dir> <id1,id2,...>\n"
@@ -36,6 +37,7 @@ static void print_usage(const char *prog) {
       "  get-text <dir> <id>\n"
       "  delete-text <dir> <id>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]\n"
+      "  search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>]\n"
       "  search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  rerank <dir> <diversity|weighted|standard> <id1:dist1,id2:dist2,...> [--k <K>] [--lambda <L>] [--weights <json>]\n"
       "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--filter <json>]\n"
@@ -1418,6 +1420,313 @@ int main(int argc, char **argv) {
     }
     printf("]}\n");
     free(ids);
+    return 0;
+  }
+
+  if (strcmp(cmd, "patch") == 0) {
+    if (argc < 5) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t id = 0ULL;
+    if (!parse_u64(argv[3], &id)) {
+      fprintf(stderr, "Invalid id: %s\n", argv[3]);
+      return 1;
+    }
+    const char *vec_csv = NULL;
+    const char *meta_json = NULL;
+    const char *text_val = NULL;
+    bool clear_text = false;
+    for (int i = 4; i < argc; i++) {
+      if (strcmp(argv[i], "--vector") == 0 && i + 1 < argc) {
+        vec_csv = argv[++i];
+      } else if (strcmp(argv[i], "--meta") == 0 && i + 1 < argc) {
+        meta_json = argv[++i];
+      } else if (strcmp(argv[i], "--text") == 0 && i + 1 < argc) {
+        text_val = argv[++i];
+      } else if (strcmp(argv[i], "--clear-text") == 0) {
+        clear_text = true;
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+    if ((!vec_csv && !meta_json && !text_val && !clear_text) || (text_val && clear_text)) {
+      fprintf(stderr, "Specify at least one of --vector, --meta, --text, or --clear-text (not both text flags)\n");
+      return 1;
+    }
+
+    nbase_json_t *meta_root = NULL;
+    nbase_meta_field_t *fields = NULL;
+    uint32_t fcnt = 0U;
+    if (meta_json != NULL) {
+      if (nbase_json_parse(meta_json, strlen(meta_json), &meta_root) != NBASE_OK ||
+          meta_root->type != NBASE_JSON_OBJECT ||
+          cli_parse_meta_obj(meta_root, &fields, &fcnt) != NBASE_OK) {
+        free(fields);
+        nbase_json_free(meta_root);
+        fprintf(stderr, "Invalid --meta JSON object\n");
+        return 1;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(fields);
+      nbase_json_free(meta_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    if (!nbase_contains(db, id)) {
+      nbase_close(db);
+      free(fields);
+      nbase_json_free(meta_root);
+      fprintf(stderr, "vector id %llu not found\n", (unsigned long long)id);
+      return 1;
+    }
+    nbase_stats_t s;
+    (void)nbase_stats(db, &s);
+
+    float *vec = NULL;
+    if (vec_csv != NULL && !parse_csv_vec(vec_csv, s.dim, &vec)) {
+      nbase_close(db);
+      free(fields);
+      nbase_json_free(meta_root);
+      fprintf(stderr, "Invalid --vector CSV (expected %u floats)\n", s.dim);
+      return 1;
+    }
+
+    if (vec != NULL) {
+      st = nbase_upsert(db, id, vec, s.dim);
+    }
+    if (st == NBASE_OK && meta_json != NULL && fcnt > 0U) {
+      st = nbase_update_meta(db, id, fields, fcnt);
+    }
+    if (st == NBASE_OK) {
+      if (clear_text) {
+        st = nbase_delete_text(db, id);
+        if (st == NBASE_ERR_NOT_FOUND) {
+          st = NBASE_OK;
+        }
+      } else if (text_val != NULL) {
+        st = nbase_set_text(db, id, text_val);
+      }
+    }
+    if (st == NBASE_OK) {
+      st = nbase_save(db, argv[2]);
+    }
+    free(vec);
+    free(fields);
+    nbase_json_free(meta_root);
+    nbase_close(db);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "patch failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"id\":%llu,\"patched\":true}\n", (unsigned long long)id);
+    return 0;
+  }
+
+  if (strcmp(cmd, "search-batch") == 0) {
+    if (argc < 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint32_t k = 10U;
+    nbase_search_opts_t opts = nbase_search_opts_default();
+    const char *flt_json = NULL;
+    for (int i = 4; i < argc; i++) {
+      if (strcmp(argv[i], "--exact") == 0) {
+        opts.mode = NBASE_SEARCH_EXACT;
+      } else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--ef") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &opts.ef_search) || opts.ef_search == 0U) {
+          fprintf(stderr, "Invalid --ef\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc) {
+        if (!parse_metric(argv[++i], &opts.metric)) {
+          fprintf(stderr, "Invalid --metric\n");
+          return 1;
+        }
+        opts.use_metric_override = true;
+      } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &opts.num_threads) || opts.num_threads > 64U) {
+          fprintf(stderr, "Invalid --threads\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+      if (flt.count > 0U) {
+        opts.meta_filter = &flt;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    nbase_stats_t s;
+    (void)nbase_stats(db, &s);
+
+    FILE *fp = (strcmp(argv[3], "-") == 0) ? stdin : fopen(argv[3], "r");
+    if (!fp) {
+      fprintf(stderr, "Failed to open query file %s\n", argv[3]);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      return 1;
+    }
+
+    uint32_t cap = 32U;
+    uint32_t qcnt = 0U;
+    float *queries = malloc((size_t)cap * (size_t)s.dim * sizeof(float));
+    char *line = NULL;
+    size_t line_cap = 0U;
+    ssize_t nread;
+    bool ok = (queries != NULL);
+
+    while (ok && (nread = getline(&line, &line_cap, fp)) >= 0) {
+      size_t len = (size_t)nread;
+      while (len > 0U && (line[len - 1U] == '\n' || line[len - 1U] == '\r')) {
+        len--;
+      }
+      line[len] = '\0';
+      const char *trim = line;
+      while (*trim != '\0' && isspace((unsigned char)*trim)) {
+        trim++;
+      }
+      if (*trim == '\0') {
+        continue;
+      }
+      nbase_json_t *qroot = NULL;
+      if (nbase_json_parse(line, len, &qroot) != NBASE_OK) {
+        fprintf(stderr, "Invalid JSON query line\n");
+        nbase_json_free(qroot);
+        ok = false;
+        break;
+      }
+      const nbase_json_t *jarr = (qroot->type == NBASE_JSON_ARRAY) ? qroot : nbase_json_obj_get(qroot, "query");
+      if (!jarr || jarr->type != NBASE_JSON_ARRAY || jarr->len != (size_t)s.dim || qcnt >= 10000U) {
+        fprintf(stderr, "Invalid query vector or dimension mismatch\n");
+        nbase_json_free(qroot);
+        ok = false;
+        break;
+      }
+      if (qcnt == cap) {
+        uint32_t new_cap = cap * 2U;
+        float *grown = realloc(queries, (size_t)new_cap * (size_t)s.dim * sizeof(float));
+        if (!grown) {
+          nbase_json_free(qroot);
+          ok = false;
+          break;
+        }
+        queries = grown;
+        cap = new_cap;
+      }
+      float *dst = queries + (size_t)qcnt * (size_t)s.dim;
+      for (uint32_t d = 0U; d < s.dim; d++) {
+        const nbase_json_t *it = jarr->items[d];
+        if (!it || it->type != NBASE_JSON_NUMBER || !isfinite(it->num) || !isfinite((float)it->num)) {
+          ok = false;
+          break;
+        }
+        dst[d] = (float)it->num;
+      }
+      nbase_json_free(qroot);
+      if (ok) {
+        qcnt++;
+      } else {
+        fprintf(stderr, "Non-finite value in query vector\n");
+      }
+    }
+    free(line);
+    if (fp != stdin) {
+      fclose(fp);
+    }
+
+    if (!ok) {
+      free(queries);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      return 1;
+    }
+
+    if (qcnt == 0U) {
+      free(queries);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      printf("{\"queryCount\":0,\"results\":[]}\n");
+      return 0;
+    }
+
+    nbase_result_t *res = malloc((size_t)qcnt * (size_t)k * sizeof(nbase_result_t));
+    uint32_t *counts = malloc((size_t)qcnt * sizeof(uint32_t));
+    if (!res || !counts) {
+      free(res);
+      free(counts);
+      free(queries);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      return 1;
+    }
+
+    st = nbase_search_batch(db, queries, qcnt, s.dim, k, &opts, res, counts);
+    free(queries);
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+
+    if (st != NBASE_OK) {
+      free(res);
+      free(counts);
+      fprintf(stderr, "search-batch failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    printf("{\"queryCount\":%u,\"results\":[", qcnt);
+    for (uint32_t q = 0U; q < qcnt; q++) {
+      printf(q == 0U ? "[" : ",[");
+      const nbase_result_t *row = res + (size_t)q * (size_t)k;
+      for (uint32_t j = 0U; j < counts[q]; j++) {
+        printf(j == 0U ? "{\"id\":%llu,\"distance\":%.7g}" : ",{\"id\":%llu,\"distance\":%.7g}",
+               (unsigned long long)row[j].id,
+               (double)row[j].distance);
+      }
+      printf("]");
+    }
+    printf("]}\n");
+    free(res);
+    free(counts);
     return 0;
   }
 
