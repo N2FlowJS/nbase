@@ -33,6 +33,7 @@ static void print_usage(const char *prog) {
       "  set-meta <dir> <id> <json-object> [--update]\n"
       "  get-meta <dir> <id>\n"
       "  delete-meta <dir> <id>\n"
+      "  delete-meta-batch <dir> <id1,id2,...>\n"
       "  set-text <dir> <id> <text>\n"
       "  get-text <dir> <id>\n"
       "  delete-text <dir> <id>\n"
@@ -1228,7 +1229,8 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (strcmp(cmd, "delete-text-batch") == 0) {
+  if (strcmp(cmd, "delete-meta-batch") == 0 || strcmp(cmd, "delete-text-batch") == 0) {
+    bool is_meta = (strcmp(cmd, "delete-meta-batch") == 0);
     if (argc != 4) {
       print_usage(argv[0]);
       return 1;
@@ -1242,7 +1244,8 @@ int main(int argc, char **argv) {
     nbase_status_t st = nbase_open(argv[2], &db);
     uint32_t deleted = 0U;
     if (st == NBASE_OK) {
-      st = nbase_delete_text_batch(db, ids, cnt, &deleted);
+      st = is_meta ? nbase_delete_meta_batch(db, ids, cnt, &deleted)
+                   : nbase_delete_text_batch(db, ids, cnt, &deleted);
     }
     if (st == NBASE_OK) {
       st = nbase_save(db, argv[2]);
@@ -1250,7 +1253,7 @@ int main(int argc, char **argv) {
     free(ids);
     nbase_close(db);
     if (st != NBASE_OK) {
-      fprintf(stderr, "delete-text-batch failed: %s\n", nbase_strerror(st));
+      fprintf(stderr, "%s failed: %s\n", cmd, nbase_strerror(st));
       return 1;
     }
     printf("{\"deleted\":%u}\n", deleted);

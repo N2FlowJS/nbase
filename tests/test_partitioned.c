@@ -529,6 +529,122 @@ static void test_pdb_count_filtered_and_unfiltered(void) {
   test_rm_rf(dir);
 }
 
+static void test_pdb_batch_delete_meta_text_and_search_text_hybrid_batch(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  const uint32_t dim = 3U;
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(dim);
+  cfg.partition_capacity = 3U;
+  cfg.max_active_partitions = 2U;
+  cfg.enable_hnsw = false;
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  uint64_t ids[6] = {10ULL, 20ULL, 30ULL, 40ULL, 50ULL, 60ULL};
+  float vecs[18] = {
+      1.0f, 0.0f, 0.0f,
+      0.9f, 0.1f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.9f, 0.1f,
+      0.0f, 0.0f, 1.0f,
+      0.1f, 0.0f, 0.9f};
+  ASSERT_STATUS(nbase_pdb_add_batch(pdb, ids, vecs, 6U, dim, 2U), NBASE_OK);
+
+  nbase_meta_field_t fa = {"grp", {.type = NBASE_META_STRING, .as = {.str = "a"}}};
+  nbase_meta_field_t fb = {"grp", {.type = NBASE_META_STRING, .as = {.str = "b"}}};
+  nbase_meta_batch_item_t mitems[6] = {
+      {10ULL, &fa, 1U}, {20ULL, &fb, 1U}, {30ULL, &fa, 1U},
+      {40ULL, &fb, 1U}, {50ULL, &fa, 1U}, {60ULL, &fb, 1U}};
+  ASSERT_STATUS(nbase_pdb_set_meta_batch(pdb, mitems, 6U), NBASE_OK);
+
+  const char *texts[6] = {
+      "simd hnsw kernel",
+      "simd quantization sq8",
+      "distributed raft storage",
+      "raft wal durability",
+      "hybrid bm25 rrf fusion",
+      "bm25 sparse ranking"};
+  ASSERT_STATUS(nbase_pdb_set_text_batch(pdb, ids, texts, 6U), NBASE_OK);
+
+  const char *tqs[3] = {"simd kernel", "raft durability", "bm25 fusion"};
+  nbase_pdb_search_opts_t popts = nbase_pdb_search_opts_default();
+  popts.search_all_partitions = true;
+  popts.search.num_threads = 2U;
+
+  nbase_scored_id_t tb_res[6];
+  uint32_t tb_cnts[3] = {0U, 0U, 0U};
+  ASSERT_STATUS(nbase_pdb_search_text_batch(pdb, NULL, 0U, 2U, &popts, NULL, NULL), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_search_text_batch(pdb, tqs, 3U, 2U, &popts, tb_res, tb_cnts), NBASE_OK);
+  for (uint32_t q = 0U; q < 3U; q++) {
+    nbase_scored_id_t single[2];
+    uint32_t sc = 0U;
+    ASSERT_STATUS(nbase_pdb_search_text(pdb, tqs[q], 2U, &popts, single, &sc), NBASE_OK);
+    ASSERT_EQ_U64(tb_cnts[q], sc);
+    for (uint32_t j = 0U; j < sc; j++) {
+      ASSERT_EQ_U64(tb_res[(size_t)q * 2U + j].id, single[j].id);
+      ASSERT_NEAR(tb_res[(size_t)q * 2U + j].score, single[j].score, 1e-6, 1e-6);
+    }
+  }
+
+  float hq_vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f};
+  nbase_scored_id_t hb_res[6];
+  uint32_t hb_cnts[3] = {0U, 0U, 0U};
+  ASSERT_STATUS(
+      nbase_pdb_search_hybrid_batch(pdb, NULL, 0U, NULL, 0U, 2U, 0.5f, 60.0f, &popts, NULL, NULL),
+      NBASE_OK);
+  ASSERT_STATUS(
+      nbase_pdb_search_hybrid_batch(pdb, hq_vecs, dim, tqs, 3U, 2U, 0.5f, 60.0f, &popts, hb_res, hb_cnts),
+      NBASE_OK);
+  for (uint32_t q = 0U; q < 3U; q++) {
+    nbase_scored_id_t single[2];
+    uint32_t sc = 0U;
+    ASSERT_STATUS(
+        nbase_pdb_search_hybrid(pdb, hq_vecs + (size_t)q * dim, dim, tqs[q], 2U, 0.5f, 60.0f, &popts, single, &sc),
+        NBASE_OK);
+    ASSERT_EQ_U64(hb_cnts[q], sc);
+    for (uint32_t j = 0U; j < sc; j++) {
+      ASSERT_EQ_U64(hb_res[(size_t)q * 2U + j].id, single[j].id);
+      ASSERT_NEAR(hb_res[(size_t)q * 2U + j].score, single[j].score, 1e-6, 1e-6);
+    }
+  }
+  ASSERT_STATUS(
+      nbase_pdb_search_hybrid_batch(pdb, hq_vecs, dim + 1U, tqs, 3U, 2U, 0.5f, 60.0f, &popts, hb_res, hb_cnts),
+      NBASE_ERR_DIM_MISMATCH);
+
+  /* Batch delete meta & batch delete text across evicted/active partitions */
+  uint64_t del_mids[3] = {10ULL, 999ULL, 50ULL};
+  uint32_t del_m = 0U;
+  ASSERT_STATUS(nbase_pdb_delete_meta_batch(pdb, del_mids, 3U, &del_m), NBASE_OK);
+  ASSERT_EQ_U64(del_m, 2ULL);
+
+  nbase_meta_cond_t ca = {"grp", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "a"}}};
+  nbase_meta_filter_t fa_flt = {&ca, 1U};
+  uint64_t grp_a_cnt = 0ULL;
+  ASSERT_STATUS(nbase_pdb_count(pdb, &fa_flt, &grp_a_cnt), NBASE_OK);
+  ASSERT_EQ_U64(grp_a_cnt, 1ULL); /* only id 30 remains in grp=a */
+
+  uint64_t del_tids[3] = {20ULL, 60ULL, 999ULL};
+  uint32_t del_t = 0U;
+  ASSERT_STATUS(nbase_pdb_delete_text_batch(pdb, del_tids, 3U, &del_t), NBASE_OK);
+  ASSERT_EQ_U64(del_t, 2ULL);
+
+  ASSERT_STATUS(nbase_pdb_save(pdb), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+  size_t len20 = 0U;
+  ASSERT_STATUS(nbase_pdb_get_text(pdb, 20ULL, NULL, 0U, &len20), NBASE_ERR_NOT_FOUND);
+  ASSERT_STATUS(nbase_pdb_get_text(pdb, 10ULL, NULL, 0U, &len20), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_count(pdb, &fa_flt, &grp_a_cnt), NBASE_OK);
+  ASSERT_EQ_U64(grp_a_cnt, 1ULL);
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
@@ -537,4 +653,5 @@ void test_partitioned_run(void) {
   RUN_TEST(test_pdb_list_ids_and_search_radius);
   RUN_TEST(test_pdb_meta_text_batch_and_filtered_relationships);
   RUN_TEST(test_pdb_count_filtered_and_unfiltered);
+  RUN_TEST(test_pdb_batch_delete_meta_text_and_search_text_hybrid_batch);
 }

@@ -359,11 +359,224 @@ static uint64_t ivfpq_delete_unlocked(nbase_ivfpq_t *index, uint64_t id) {
   return removed;
 }
 
+typedef struct ivf_add_prep_ctx {
+  const nbase_ivfpq_t *index;
+  const float *vectors;
+  uint32_t count;
+  uint32_t total_workers;
+  uint32_t *out_list_ids;
+  float *out_residuals;
+  nbase_status_t statuses[4];
+} ivf_add_prep_ctx_t;
+
+typedef struct ivf_add_prep_arg {
+  ivf_add_prep_ctx_t *ctx;
+  uint32_t tid;
+} ivf_add_prep_arg_t;
+
+static void ivf_add_prep_slice(ivf_add_prep_ctx_t *ctx, uint32_t tid) {
+  const nbase_ivfpq_t *index = ctx->index;
+  uint32_t start =
+      (uint32_t)(((uint64_t)tid * (uint64_t)ctx->count) / (uint64_t)ctx->total_workers);
+  uint32_t end =
+      (uint32_t)(((uint64_t)(tid + 1U) * (uint64_t)ctx->count) / (uint64_t)ctx->total_workers);
+  float *vec_buf = malloc((size_t)index->dim * sizeof(float));
+  float *coarse_dists = malloc((size_t)index->nlist * sizeof(float));
+  if (!vec_buf || !coarse_dists) {
+    free(vec_buf);
+    free(coarse_dists);
+    ctx->statuses[tid] = NBASE_ERR_NOMEM;
+    return;
+  }
+
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = start; i < end; i++) {
+    const float *src = ctx->vectors + (size_t)i * (size_t)index->dim;
+    if (index->metric == NBASE_METRIC_COSINE) {
+      normalize_vec(src, vec_buf, index->dim);
+    } else {
+      memcpy(vec_buf, src, (size_t)index->dim * sizeof(float));
+    }
+    st = nbase_distance_batch(
+        NBASE_METRIC_SQUARED_EUCLIDEAN,
+        vec_buf,
+        index->coarse_centroids,
+        index->nlist,
+        index->dim,
+        coarse_dists);
+    if (st != NBASE_OK) {
+      break;
+    }
+    uint32_t list_id = 0U;
+    float best_cd = FLT_MAX;
+    for (uint32_t c = 0U; c < index->nlist; c++) {
+      if (coarse_dists[c] < best_cd) {
+        best_cd = coarse_dists[c];
+        list_id = c;
+      }
+    }
+    ctx->out_list_ids[i] = list_id;
+    const float *cent = index->coarse_centroids + (size_t)list_id * (size_t)index->dim;
+    float *rdst = ctx->out_residuals + (size_t)i * (size_t)index->dim;
+    for (uint32_t d = 0U; d < index->dim; d++) {
+      rdst[d] = vec_buf[d] - cent[d];
+    }
+  }
+
+  free(vec_buf);
+  free(coarse_dists);
+  ctx->statuses[tid] = st;
+}
+
+static void *ivf_add_prep_worker(void *raw) {
+  ivf_add_prep_arg_t *arg = (ivf_add_prep_arg_t *)raw;
+  ivf_add_prep_slice(arg->ctx, arg->tid);
+  return NULL;
+}
+
+static nbase_status_t ivfpq_reserve_list(ivf_list_t *list, uint32_t needed, uint32_t num_subvectors) {
+  if (needed <= list->cap) {
+    return NBASE_OK;
+  }
+  uint32_t new_cap = (list->cap == 0U) ? 16U : list->cap;
+  while (new_cap < needed) {
+    if (new_cap > UINT32_MAX / 2U) {
+      new_cap = needed;
+      break;
+    }
+    new_cap *= 2U;
+  }
+  uint64_t *next_ids = realloc(list->ids, (size_t)new_cap * sizeof(uint64_t));
+  if (next_ids) {
+    list->ids = next_ids;
+  }
+  uint8_t *next_codes = realloc(list->codes, (size_t)new_cap * (size_t)num_subvectors);
+  if (next_codes) {
+    list->codes = next_codes;
+  }
+  if (!next_ids || !next_codes) {
+    return NBASE_ERR_NOMEM;
+  }
+  list->cap = new_cap;
+  return NBASE_OK;
+}
+
 static nbase_status_t ivfpq_add_unlocked(
     nbase_ivfpq_t *index,
     const uint64_t *ids,
     const float *vectors,
     uint32_t count) {
+  if (count >= 32U) {
+    if ((size_t)count > SIZE_MAX / (size_t)index->dim ||
+        (size_t)count > SIZE_MAX / (size_t)index->num_subvectors ||
+        ((size_t)count * (size_t)index->dim) > SIZE_MAX / sizeof(float)) {
+      return NBASE_ERR_NOMEM;
+    }
+    uint32_t *list_ids = malloc((size_t)count * sizeof(uint32_t));
+    float *residuals = malloc((size_t)count * (size_t)index->dim * sizeof(float));
+    uint8_t *all_codes = malloc((size_t)count * (size_t)index->num_subvectors);
+    uint32_t *add_counts = calloc((size_t)index->nlist, sizeof(uint32_t));
+    if (!list_ids || !residuals || !all_codes || !add_counts) {
+      free(list_ids);
+      free(residuals);
+      free(all_codes);
+      free(add_counts);
+      return NBASE_ERR_NOMEM;
+    }
+
+    ivf_add_prep_ctx_t ctx;
+    ctx.index = index;
+    ctx.vectors = vectors;
+    ctx.count = count;
+    ctx.total_workers = 1U;
+    ctx.out_list_ids = list_ids;
+    ctx.out_residuals = residuals;
+    for (uint32_t w = 0U; w < 4U; w++) {
+      ctx.statuses[w] = NBASE_OK;
+    }
+
+    uint64_t work = (uint64_t)count * (uint64_t)index->nlist * (uint64_t)index->dim;
+    if (work >= 262144ULL) {
+      uint32_t want = count / 16U;
+      if (want > 4U) {
+        want = 4U;
+      }
+      if (want < 1U) {
+        want = 1U;
+      }
+      ctx.total_workers = want;
+    }
+
+    pthread_t workers[3];
+    ivf_add_prep_arg_t args[3];
+    uint32_t spawned = 0U;
+    if (ctx.total_workers > 1U) {
+      for (uint32_t w = 1U; w < ctx.total_workers; w++) {
+        args[w - 1U].ctx = &ctx;
+        args[w - 1U].tid = w;
+        if (pthread_create(&workers[spawned], NULL, ivf_add_prep_worker, &args[w - 1U]) != 0) {
+          break;
+        }
+        spawned++;
+      }
+    }
+    ivf_add_prep_slice(&ctx, 0U);
+    for (uint32_t w = spawned + 1U; w < ctx.total_workers; w++) {
+      ivf_add_prep_slice(&ctx, w);
+    }
+    for (uint32_t w = 0U; w < spawned; w++) {
+      pthread_join(workers[w], NULL);
+    }
+
+    nbase_status_t st = NBASE_OK;
+    for (uint32_t w = 0U; w < ctx.total_workers; w++) {
+      if (ctx.statuses[w] != NBASE_OK) {
+        st = ctx.statuses[w];
+        break;
+      }
+    }
+    if (st == NBASE_OK) {
+      st = nbase_pq_encode(index->pq, residuals, count, all_codes);
+    }
+    free(residuals);
+
+    if (st == NBASE_OK) {
+      for (uint32_t i = 0U; i < count; i++) {
+        add_counts[list_ids[i]]++;
+      }
+      for (uint32_t c = 0U; c < index->nlist; c++) {
+        if (add_counts[c] > 0U) {
+          if (index->lists[c].len > UINT32_MAX - add_counts[c]) {
+            st = NBASE_ERR_NOMEM;
+            break;
+          }
+          st = ivfpq_reserve_list(
+              &index->lists[c], index->lists[c].len + add_counts[c], index->num_subvectors);
+          if (st != NBASE_OK) {
+            break;
+          }
+        }
+      }
+    }
+    if (st == NBASE_OK) {
+      for (uint32_t i = 0U; i < count; i++) {
+        ivf_list_t *list = &index->lists[list_ids[i]];
+        list->ids[list->len] = ids[i];
+        memcpy(
+            list->codes + (size_t)list->len * (size_t)index->num_subvectors,
+            all_codes + (size_t)i * (size_t)index->num_subvectors,
+            index->num_subvectors);
+        list->len++;
+      }
+      index->count += (uint64_t)count;
+    }
+
+    free(list_ids);
+    free(all_codes);
+    free(add_counts);
+    return st;
+  }
+
   float *vec_buf = malloc((size_t)index->dim * sizeof(float));
   float *res_buf = malloc((size_t)index->dim * sizeof(float));
   float *coarse_dists = malloc((size_t)index->nlist * sizeof(float));

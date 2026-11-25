@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-11-25
+
+Batch metadata deletion (`nbase_delete_meta_batch`), full Partitioned Multi-DB batch parity (`nbase_pdb_delete_meta_batch`, `nbase_pdb_delete_text_batch`, `nbase_pdb_search_text_batch`, `nbase_pdb_search_hybrid_batch`), parallel PQ encoding & batched parallel IVF-PQ ingestion, AVX2 SQ8 decoding (`sq8_decode_avx2`), HTTP `DELETE /api/vectors/metadata`, and CLI `delete-meta-batch`.
+
+### Added
+- **Single-DB & Partitioned Multi-DB Parity (`include/nbase.h`, `src/nbase.c`, `src/partitioned.c`, `include/nbase.hpp`)**:
+  - Added `nbase_delete_meta_batch` (with single `wrlock`, query cache invalidation, and `NBASE_WAL_OP_DELETE_META` logging) and C++17 `nbase::Database::delete_meta_batch`.
+  - Added `nbase_pdb_delete_meta_batch`, `nbase_pdb_delete_text_batch` (sharing `pdb_delete_attr_batch`), partition-outer `nbase_pdb_search_text_batch` and `nbase_pdb_search_hybrid_batch` (sharing `pdb_alloc_scored_batch_scratch`, `pdb_append_scored_batch_slice`, `pdb_finalize_scored_batch`), plus C++17 `nbase::PartitionedDatabase::{delete_meta_batch, delete_text_batch, search_text_batch, search_hybrid_batch}`.
+- **Parallel PQ Encoding, Batched IVF-PQ Add & AVX2 SQ8 Decode (`src/pq.c`, `src/ivfpq.c`, `src/sq8.c`)**:
+  - Parallelized `nbase_pq_encode` across disjoint row slices using `pthreads` while preserving bit-exact output.
+  - Upgraded `nbase_ivfpq_add` (`count >= 32`) to run parallel coarse assignment + residual extraction, one parallel batch `nbase_pq_encode`, and upfront capacity reservation (`ivfpq_reserve_list`) with atomic zero-partial-mutation rollback on OOM.
+  - Added AVX2 8-lane `sq8_decode_avx2` inside `nbase_sq8_decode`.
+- **HTTP/1.1 Server & CLI Enhancements (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `DELETE /api/vectors/metadata` and `POST /api/vectors/metadata/delete` sharing `handle_delete_ids_attr_batch` with `handle_delete_text_batch`.
+  - Added `nbase-cli delete-meta-batch <dir> <id1,id2,...>` unified cleanly with `delete-text-batch`.
+- **Tests (`tests/test_db.c`, `tests/test_meta.c`, `tests/test_partitioned.c`, `tests/test_pq.c`, `tests/test_ivfpq.c`, `tests/test_sq8.c`, `tests/test_concurrency.c`, `tests/test_server.c`)**:
+  - Added `test_db_delete_meta_batch_cache_and_wal`, `test_pdb_batch_delete_meta_text_and_search_text_hybrid_batch`, `test_pq_encode_parallel_determinism_tsan`, `test_ivfpq_parallel_batch_add_mt_and_cosine`, `test_sq8_avx2_decode_dims_and_accuracy`, concurrent `nbase_delete_meta_batch` TSan coverage, and HTTP `/api/vectors/metadata` batch delete tests.
+
 ## [1.12.0] - 2026-11-25
 
 Single-partition parallel batch text/hybrid search & text deletion (`nbase_search_text_batch`, `nbase_search_hybrid_batch`, `nbase_delete_text_batch`), persistent pthread generation-barrier K-Means++ training (`nbase_kmeans_train_mt`), C++17 `nbase::Database` batch parity, HTTP `DELETE /api/vectors/text` + multi-threaded batch search, and CLI `delete-text-batch` / `search-text-batch` / `search-hybrid-batch`.

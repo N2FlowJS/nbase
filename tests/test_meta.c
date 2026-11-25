@@ -459,10 +459,75 @@ static void test_db_text_and_hybrid_batch_search_and_delete(void) {
   nbase_close(db);
 }
 
+static void test_db_delete_meta_batch_cache_and_wal(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  const uint32_t dim = 3U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = false;
+  cfg.cache_capacity = 8U;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_save(db, dir), NBASE_OK);
+  nbase_close(db);
+
+  ASSERT_STATUS(nbase_open_wal(dir, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_cache_configure(db, 8U), NBASE_OK);
+  uint64_t ids[3] = {1ULL, 2ULL, 3ULL};
+  float vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f};
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 3U, dim, 2U), NBASE_OK);
+
+  nbase_meta_field_t f_keep = {"tag", {.type = NBASE_META_STRING, .as = {.str = "keep"}}};
+  nbase_meta_batch_item_t mitems[3] = {
+      {1ULL, &f_keep, 1U}, {2ULL, &f_keep, 1U}, {3ULL, &f_keep, 1U}};
+  ASSERT_STATUS(nbase_set_meta_batch(db, mitems, 3U), NBASE_OK);
+
+  nbase_result_t hits[3];
+  uint32_t hcnt = 0U;
+  ASSERT_STATUS(nbase_search(db, vecs, dim, 3U, NULL, hits, &hcnt), NBASE_OK);
+  nbase_stats_t st;
+  ASSERT_STATUS(nbase_stats(db, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.cache_entries, 1ULL);
+
+  uint32_t del = 99U;
+  ASSERT_STATUS(nbase_delete_meta_batch(db, NULL, 0U, &del), NBASE_OK);
+  ASSERT_EQ_U64(del, 0ULL);
+  ASSERT_STATUS(nbase_delete_meta_batch(NULL, ids, 1U, &del), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_delete_meta_batch(db, NULL, 1U, &del), NBASE_ERR_INVALID_ARG);
+
+  uint64_t del_ids[3] = {1ULL, 999ULL, 3ULL};
+  ASSERT_STATUS(nbase_delete_meta_batch(db, del_ids, 3U, &del), NBASE_OK);
+  ASSERT_EQ_U64(del, 2ULL);
+
+  ASSERT_STATUS(nbase_stats(db, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.cache_entries, 0ULL);
+
+  uint64_t qids[3] = {0ULL};
+  uint32_t qcnt = 0U;
+  nbase_meta_cond_t cond = {"tag", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "keep"}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  ASSERT_STATUS(nbase_query_meta(db, &flt, 3U, qids, &qcnt), NBASE_OK);
+  ASSERT_EQ_U64(qcnt, 1ULL);
+  ASSERT_EQ_U64(qids[0], 2ULL);
+  nbase_close(db);
+
+  /* WAL replay preserves deleted metadata */
+  ASSERT_STATUS(nbase_open_wal(dir, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_query_meta(db, &flt, 3U, qids, &qcnt), NBASE_OK);
+  ASSERT_EQ_U64(qcnt, 1ULL);
+  ASSERT_EQ_U64(qids[0], 2ULL);
+  nbase_close(db);
+}
+
 void test_meta_run(void) {
   RUN_TEST(test_meta_crud_and_upsert_preservation);
   RUN_TEST(test_meta_filtering_operators_and_persistence);
   RUN_TEST(test_meta_foreach_query_and_find_similar);
   RUN_TEST(test_meta_and_text_batch_atomicity_and_edge_cases);
   RUN_TEST(test_db_text_and_hybrid_batch_search_and_delete);
+  RUN_TEST(test_db_delete_meta_batch_cache_and_wal);
 }

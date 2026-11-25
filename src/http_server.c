@@ -4278,7 +4278,17 @@ static void handle_delete_vectors(const http_conn_t *c, const char *body, size_t
   nbase_sbuf_free(&sb);
 }
 
-static void handle_delete_text_batch(const http_conn_t *c, const char *body, size_t body_len) {
+typedef nbase_status_t (*http_batch_delete_ids_fn)(
+    nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted);
+
+static void handle_delete_ids_attr_batch(
+    const http_conn_t *c,
+    const char *body,
+    size_t body_len,
+    http_batch_delete_ids_fn fn) {
   nbase_http_server_t *srv = c->srv;
   nbase_json_t *root = NULL;
   if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
@@ -4296,7 +4306,7 @@ static void handle_delete_text_batch(const http_conn_t *c, const char *body, siz
   }
 
   uint32_t deleted = 0U;
-  nbase_status_t st = nbase_delete_text_batch(srv->db, ids, cnt, &deleted);
+  nbase_status_t st = fn(srv->db, ids, cnt, &deleted);
   free(ids);
   nbase_json_free(root);
   if (st != NBASE_OK) {
@@ -4309,6 +4319,14 @@ static void handle_delete_text_batch(const http_conn_t *c, const char *body, siz
   nbase_sbuf_appendf(&sb, "{\"success\":true,\"deleted\":%u}", deleted);
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
+}
+
+static void handle_delete_text_batch(const http_conn_t *c, const char *body, size_t body_len) {
+  handle_delete_ids_attr_batch(c, body, body_len, nbase_delete_text_batch);
+}
+
+static void handle_delete_meta_batch(const http_conn_t *c, const char *body, size_t body_len) {
+  handle_delete_ids_attr_batch(c, body, body_len, nbase_delete_meta_batch);
 }
 
 static void handle_distance(const http_conn_t *c, const char *body, size_t body_len) {
@@ -4823,6 +4841,18 @@ static void dispatch_request(
     }
     if (strcmp(method, "PATCH") == 0) {
       handle_batch_metadata(c, body, body_len, true);
+      return;
+    }
+    if (strcmp(method, "DELETE") == 0) {
+      handle_delete_meta_batch(c, body, body_len);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
+  if (strcmp(path, "/api/vectors/metadata/delete") == 0) {
+    if (strcmp(method, "POST") == 0) {
+      handle_delete_meta_batch(c, body, body_len);
       return;
     }
     send_error_json(c, 405, "method not allowed");

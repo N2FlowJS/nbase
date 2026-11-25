@@ -317,6 +317,8 @@ static void test_concurrent_batch_meta_text_tsan(void) {
     if ((iter % 5U) == 4U) {
       uint32_t tdel = 0U;
       ASSERT_STATUS(nbase_delete_text_batch(db, &ids[2], 2U, &tdel), NBASE_OK);
+      uint32_t mdel = 0U;
+      ASSERT_STATUS(nbase_delete_meta_batch(db, &ids[2], 2U, &mdel), NBASE_OK);
     }
   }
 

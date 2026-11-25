@@ -1793,6 +1793,63 @@ nbase_status_t nbase_pdb_delete_meta(nbase_pdb_t *pdb, uint64_t id) {
   return st;
 }
 
+typedef nbase_status_t (*pdb_id_delete_fn)(nbase_db_t *db, uint64_t id);
+
+static nbase_status_t pdb_delete_attr_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted,
+    pdb_id_delete_fn del_fn) {
+  if (!pdb || (count > 0U && !ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (out_deleted != NULL) {
+    *out_deleted = 0U;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  nbase_status_t st = NBASE_OK;
+  uint32_t deleted = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    pdb_part_t *part = NULL;
+    nbase_status_t ps = pdb_find_and_load_part(pdb, ids[i], &part);
+    if (ps == NBASE_ERR_NOT_FOUND) {
+      continue;
+    }
+    if (ps != NBASE_OK) {
+      st = ps;
+      break;
+    }
+    ps = del_fn(part->db, ids[i]);
+    if (ps == NBASE_ERR_NOT_FOUND) {
+      continue;
+    }
+    if (ps != NBASE_OK) {
+      st = ps;
+      break;
+    }
+    part->dirty = true;
+    deleted++;
+  }
+  pthread_mutex_unlock(&pdb->mu);
+  if (out_deleted != NULL) {
+    *out_deleted = deleted;
+  }
+  return st;
+}
+
+nbase_status_t nbase_pdb_delete_meta_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  return pdb_delete_attr_batch(pdb, ids, count, out_deleted, nbase_delete_meta);
+}
+
 nbase_status_t nbase_pdb_foreach_meta(
     nbase_pdb_t *pdb,
     uint64_t id,
@@ -2013,6 +2070,14 @@ nbase_status_t nbase_pdb_delete_text(nbase_pdb_t *pdb, uint64_t id) {
   }
   pthread_mutex_unlock(&pdb->mu);
   return st;
+}
+
+nbase_status_t nbase_pdb_delete_text_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  return pdb_delete_attr_batch(pdb, ids, count, out_deleted, nbase_delete_text);
 }
 
 static nbase_status_t pdb_collect_targets(
@@ -2337,6 +2402,182 @@ nbase_status_t nbase_pdb_search_text(
   return NBASE_OK;
 }
 
+static nbase_status_t pdb_alloc_scored_batch_scratch(
+    uint32_t target_count,
+    uint32_t query_count,
+    uint32_t k,
+    nbase_scored_id_t **out_part_flat,
+    uint32_t **out_part_cnts,
+    nbase_scored_id_t **out_merged,
+    size_t **out_merged_lens,
+    size_t *out_stride) {
+  *out_part_flat = NULL;
+  *out_part_cnts = NULL;
+  *out_merged = NULL;
+  *out_merged_lens = NULL;
+  *out_stride = 0U;
+
+  if ((size_t)target_count > SIZE_MAX / (size_t)k) {
+    return NBASE_ERR_NOMEM;
+  }
+  size_t stride = (size_t)target_count * (size_t)k;
+  if (stride > SIZE_MAX / (size_t)query_count ||
+      ((size_t)query_count * stride) > SIZE_MAX / sizeof(nbase_scored_id_t) ||
+      ((size_t)query_count * (size_t)k) > SIZE_MAX / sizeof(nbase_scored_id_t)) {
+    return NBASE_ERR_NOMEM;
+  }
+
+  nbase_scored_id_t *part_flat = malloc((size_t)query_count * (size_t)k * sizeof(nbase_scored_id_t));
+  uint32_t *part_cnts = calloc((size_t)query_count, sizeof(uint32_t));
+  nbase_scored_id_t *merged = malloc((size_t)query_count * stride * sizeof(nbase_scored_id_t));
+  size_t *merged_lens = calloc((size_t)query_count, sizeof(size_t));
+  if (!part_flat || !part_cnts || !merged || !merged_lens) {
+    free(part_flat);
+    free(part_cnts);
+    free(merged);
+    free(merged_lens);
+    return NBASE_ERR_NOMEM;
+  }
+
+  *out_part_flat = part_flat;
+  *out_part_cnts = part_cnts;
+  *out_merged = merged;
+  *out_merged_lens = merged_lens;
+  *out_stride = stride;
+  return NBASE_OK;
+}
+
+static void pdb_append_scored_batch_slice(
+    const nbase_scored_id_t *part_flat,
+    const uint32_t *part_cnts,
+    uint32_t query_count,
+    uint32_t k,
+    nbase_scored_id_t *merged,
+    size_t *merged_lens,
+    size_t stride) {
+  for (uint32_t q = 0U; q < query_count; q++) {
+    uint32_t got = part_cnts[q];
+    if (got > 0U) {
+      memcpy(
+          merged + (size_t)q * stride + merged_lens[q],
+          part_flat + (size_t)q * (size_t)k,
+          (size_t)got * sizeof(nbase_scored_id_t));
+      merged_lens[q] += (size_t)got;
+    }
+  }
+}
+
+static void pdb_finalize_scored_batch(
+    nbase_scored_id_t *merged,
+    const size_t *merged_lens,
+    size_t stride,
+    uint32_t query_count,
+    uint32_t k,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts) {
+  for (uint32_t q = 0U; q < query_count; q++) {
+    size_t mlen = merged_lens[q];
+    nbase_scored_id_t *row = merged + (size_t)q * stride;
+    if (mlen > 1U) {
+      qsort(row, mlen, sizeof(nbase_scored_id_t), cmp_pdb_scored_desc);
+    }
+    uint32_t ret = (mlen < (size_t)k) ? (uint32_t)mlen : k;
+    if (ret > 0U) {
+      memcpy(
+          out_results + (size_t)q * (size_t)k,
+          row,
+          (size_t)ret * sizeof(nbase_scored_id_t));
+    }
+    out_counts[q] = ret;
+  }
+}
+
+nbase_status_t nbase_pdb_search_text_batch(
+    nbase_pdb_t *pdb,
+    const char *const *queries,
+    uint32_t query_count,
+    uint32_t k,
+    const nbase_pdb_search_opts_t *opts,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts) {
+  if (!pdb || (query_count > 0U && (!queries || !out_counts || (k > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (query_count == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t q = 0U; q < query_count; q++) {
+    if (!queries[q]) {
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+  memset(out_counts, 0, (size_t)query_count * sizeof(uint32_t));
+
+  nbase_pdb_search_opts_t eff;
+  if (opts != NULL) {
+    eff = *opts;
+  } else {
+    eff = nbase_pdb_search_opts_default();
+    eff.search_all_partitions = true;
+  }
+  if (eff.partition_id_count > 0U && !eff.partition_ids) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (k == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  pdb_part_t **targets = NULL;
+  uint32_t target_count = 0U;
+  nbase_status_t st = pdb_collect_targets(pdb, &eff, &targets, &target_count);
+  if (st != NBASE_OK || target_count == 0U) {
+    free(targets);
+    pthread_mutex_unlock(&pdb->mu);
+    return st;
+  }
+
+  nbase_scored_id_t *part_flat = NULL;
+  uint32_t *part_cnts = NULL;
+  nbase_scored_id_t *merged = NULL;
+  size_t *merged_lens = NULL;
+  size_t stride = 0U;
+  st = pdb_alloc_scored_batch_scratch(
+      target_count, query_count, k, &part_flat, &part_cnts, &merged, &merged_lens, &stride);
+
+  for (uint32_t i = 0U; st == NBASE_OK && i < target_count; i++) {
+    st = pdb_load_partition(pdb, targets[i]);
+    if (st != NBASE_OK) {
+      break;
+    }
+    st = nbase_search_text_batch(
+        targets[i]->db,
+        queries,
+        query_count,
+        k,
+        eff.search.num_threads,
+        eff.search.meta_filter,
+        part_flat,
+        part_cnts);
+    if (st != NBASE_OK) {
+      break;
+    }
+    pdb_append_scored_batch_slice(part_flat, part_cnts, query_count, k, merged, merged_lens, stride);
+  }
+
+  free(targets);
+  free(part_flat);
+  free(part_cnts);
+  pthread_mutex_unlock(&pdb->mu);
+
+  if (st == NBASE_OK) {
+    pdb_finalize_scored_batch(merged, merged_lens, stride, query_count, k, out_results, out_counts);
+  }
+  free(merged);
+  free(merged_lens);
+  return st;
+}
+
 nbase_status_t nbase_pdb_search_hybrid(
     nbase_pdb_t *pdb,
     const float *query_vec,
@@ -2442,6 +2683,118 @@ nbase_status_t nbase_pdb_search_hybrid(
   free(merged);
   *out_count = ret;
   return NBASE_OK;
+}
+
+nbase_status_t nbase_pdb_search_hybrid_batch(
+    nbase_pdb_t *pdb,
+    const float *query_vectors,
+    uint32_t dim,
+    const char *const *query_texts,
+    uint32_t query_count,
+    uint32_t k,
+    float alpha,
+    float rrf_k,
+    const nbase_pdb_search_opts_t *opts,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts) {
+  if (!pdb || isnan(alpha) || alpha < 0.0f || alpha > 1.0f ||
+      !isfinite(rrf_k) || rrf_k <= 0.0f ||
+      (query_count > 0U &&
+       (!out_counts || (!query_vectors && !query_texts) || (k > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (query_count == 0U) {
+    return NBASE_OK;
+  }
+  if (query_vectors == NULL) {
+    for (uint32_t q = 0U; q < query_count; q++) {
+      if (!query_texts[q] || query_texts[q][0] == '\0') {
+        return NBASE_ERR_INVALID_ARG;
+      }
+    }
+  }
+  memset(out_counts, 0, (size_t)query_count * sizeof(uint32_t));
+
+  nbase_pdb_search_opts_t eff;
+  if (opts != NULL) {
+    eff = *opts;
+  } else {
+    eff = nbase_pdb_search_opts_default();
+    eff.search_all_partitions = true;
+  }
+  if (eff.partition_id_count > 0U && !eff.partition_ids) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  if (query_vectors != NULL) {
+    if (dim != pdb->cfg.dim) {
+      pthread_mutex_unlock(&pdb->mu);
+      return NBASE_ERR_DIM_MISMATCH;
+    }
+    for (uint32_t q = 0U; q < query_count; q++) {
+      if (!nbase_vec_is_finite(query_vectors + (size_t)q * (size_t)dim, dim)) {
+        pthread_mutex_unlock(&pdb->mu);
+        return NBASE_ERR_INVALID_VECTOR;
+      }
+    }
+  }
+  if (k == 0U) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_OK;
+  }
+
+  pdb_part_t **targets = NULL;
+  uint32_t target_count = 0U;
+  nbase_status_t st = pdb_collect_targets(pdb, &eff, &targets, &target_count);
+  if (st != NBASE_OK || target_count == 0U) {
+    free(targets);
+    pthread_mutex_unlock(&pdb->mu);
+    return st;
+  }
+
+  nbase_scored_id_t *part_flat = NULL;
+  uint32_t *part_cnts = NULL;
+  nbase_scored_id_t *merged = NULL;
+  size_t *merged_lens = NULL;
+  size_t stride = 0U;
+  st = pdb_alloc_scored_batch_scratch(
+      target_count, query_count, k, &part_flat, &part_cnts, &merged, &merged_lens, &stride);
+
+  for (uint32_t i = 0U; st == NBASE_OK && i < target_count; i++) {
+    st = pdb_load_partition(pdb, targets[i]);
+    if (st != NBASE_OK) {
+      break;
+    }
+    st = nbase_search_hybrid_batch(
+        targets[i]->db,
+        query_vectors,
+        dim,
+        query_texts,
+        query_count,
+        k,
+        alpha,
+        rrf_k,
+        &eff.search,
+        part_flat,
+        part_cnts);
+    if (st != NBASE_OK) {
+      break;
+    }
+    pdb_append_scored_batch_slice(part_flat, part_cnts, query_count, k, merged, merged_lens, stride);
+  }
+
+  free(targets);
+  free(part_flat);
+  free(part_cnts);
+  pthread_mutex_unlock(&pdb->mu);
+
+  if (st == NBASE_OK) {
+    pdb_finalize_scored_batch(merged, merged_lens, stride, query_count, k, out_results, out_counts);
+  }
+  free(merged);
+  free(merged_lens);
+  return st;
 }
 
 nbase_status_t nbase_pdb_find_similar(

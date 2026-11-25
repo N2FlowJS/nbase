@@ -197,9 +197,38 @@ static void test_sq8_l2_sq_symmetric_batch(void) {
   }
 }
 
+static void test_sq8_avx2_decode_dims_and_accuracy(void) {
+  static const uint32_t dims[6] = {1U, 7U, 8U, 17U, 35U, 64U};
+  const uint32_t count = 64U;
+
+  for (size_t di = 0U; di < 6U; di++) {
+    uint32_t dim = dims[di];
+    float *vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+    uint8_t *codes = malloc((size_t)count * (size_t)dim);
+    float *decoded = malloc((size_t)count * (size_t)dim * sizeof(float));
+    ASSERT_TRUE(vecs != NULL && codes != NULL && decoded != NULL);
+    test_fill_vectors(vecs, count, dim, 5500ULL + (uint64_t)dim);
+
+    nbase_sq8_t *sq8 = NULL;
+    ASSERT_STATUS(nbase_sq8_train(vecs, count, dim, &sq8), NBASE_OK);
+    ASSERT_STATUS(nbase_sq8_encode(sq8, vecs, count, codes), NBASE_OK);
+    ASSERT_STATUS(nbase_sq8_decode(sq8, codes, count, decoded), NBASE_OK);
+
+    for (size_t idx = 0U; idx < (size_t)count * (size_t)dim; idx++) {
+      ASSERT_NEAR(decoded[idx], vecs[idx], 0.015, 0.015);
+    }
+
+    nbase_sq8_destroy(sq8);
+    free(decoded);
+    free(codes);
+    free(vecs);
+  }
+}
+
 void test_sq8_run(void) {
   RUN_TEST(test_sq8_train_encode_decode_and_distance);
   RUN_TEST(test_sq8_persistence_and_corruption);
   RUN_TEST(test_sq8_l2_sq_asymmetric_batch);
   RUN_TEST(test_sq8_l2_sq_symmetric_batch);
+  RUN_TEST(test_sq8_avx2_decode_dims_and_accuracy);
 }

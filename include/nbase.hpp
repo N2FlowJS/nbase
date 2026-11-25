@@ -346,6 +346,16 @@ class Database {
 
   void delete_meta(uint64_t id) { detail::check(nbase_delete_meta(db_, id)); }
 
+  uint32_t delete_meta_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_delete_meta_batch(
+        db_,
+        ids.empty() ? nullptr : ids.data(),
+        static_cast<uint32_t>(ids.size()),
+        &deleted));
+    return deleted;
+  }
+
   void set_text(uint64_t id, const std::string &text) {
     detail::check(nbase_set_text(db_, id, text.c_str()));
   }
@@ -1440,6 +1450,16 @@ class PartitionedDatabase {
 
   void delete_meta(uint64_t id) { detail::check(nbase_pdb_delete_meta(pdb_, id)); }
 
+  uint32_t delete_meta_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_pdb_delete_meta_batch(
+        pdb_,
+        ids.empty() ? nullptr : ids.data(),
+        static_cast<uint32_t>(ids.size()),
+        &deleted));
+    return deleted;
+  }
+
   std::vector<uint64_t> query_meta(
       const nbase_meta_filter_t *filter, uint32_t limit) const {
     std::vector<uint64_t> ids(limit);
@@ -1482,6 +1502,16 @@ class PartitionedDatabase {
 
   void delete_text(uint64_t id) { detail::check(nbase_pdb_delete_text(pdb_, id)); }
 
+  uint32_t delete_text_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_pdb_delete_text_batch(
+        pdb_,
+        ids.empty() ? nullptr : ids.data(),
+        static_cast<uint32_t>(ids.size()),
+        &deleted));
+    return deleted;
+  }
+
   std::vector<nbase_result_t> search(
       const std::vector<float> &query,
       uint32_t k,
@@ -1512,6 +1542,33 @@ class PartitionedDatabase {
     return out;
   }
 
+  std::vector<std::vector<nbase_scored_id_t>> search_text_batch(
+      const std::vector<std::string> &queries,
+      uint32_t k,
+      const nbase_pdb_search_opts_t *opts = nullptr) const {
+    if (queries.empty()) {
+      return {};
+    }
+    uint32_t qcnt = static_cast<uint32_t>(queries.size());
+    std::vector<const char *> ptrs;
+    ptrs.reserve(qcnt);
+    for (const auto &q : queries) {
+      ptrs.push_back(q.c_str());
+    }
+    std::vector<nbase_scored_id_t> flat(
+        static_cast<size_t>(qcnt) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(qcnt, 0U);
+    detail::check(nbase_pdb_search_text_batch(
+        pdb_,
+        ptrs.data(),
+        qcnt,
+        k,
+        opts,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, qcnt, k);
+  }
+
   std::vector<nbase_scored_id_t> search_hybrid(
       const std::vector<float> &query_vec,
       const std::string &query_text,
@@ -1534,6 +1591,55 @@ class PartitionedDatabase {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_scored_id_t>> search_hybrid_batch(
+      const std::vector<float> &query_vectors,
+      uint32_t dim,
+      const std::vector<std::string> &query_texts,
+      uint32_t query_count,
+      uint32_t k,
+      float alpha = 0.5f,
+      float rrf_k = 60.0f,
+      const nbase_pdb_search_opts_t *opts = nullptr) const {
+    if (query_count == 0U) {
+      return {};
+    }
+    if (query_vectors.empty() && query_texts.empty()) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    if (!query_vectors.empty() &&
+        (dim == 0U ||
+         query_vectors.size() !=
+             static_cast<size_t>(query_count) * static_cast<size_t>(dim))) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<const char *> text_ptrs;
+    if (!query_texts.empty()) {
+      if (query_texts.size() != static_cast<size_t>(query_count)) {
+        throw Error(NBASE_ERR_INVALID_ARG);
+      }
+      text_ptrs.reserve(query_count);
+      for (const auto &t : query_texts) {
+        text_ptrs.push_back(t.c_str());
+      }
+    }
+    std::vector<nbase_scored_id_t> flat(
+        static_cast<size_t>(query_count) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_pdb_search_hybrid_batch(
+        pdb_,
+        query_vectors.empty() ? nullptr : query_vectors.data(),
+        dim,
+        text_ptrs.empty() ? nullptr : text_ptrs.data(),
+        query_count,
+        k,
+        alpha,
+        rrf_k,
+        opts,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, query_count, k);
   }
 
   std::vector<nbase_result_t> find_similar(

@@ -121,7 +121,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.12.0";
+  return "1.13.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -1585,6 +1585,59 @@ nbase_status_t nbase_delete_meta(nbase_db_t *db, uint64_t id) {
     }
   }
   pthread_rwlock_unlock(&db->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_delete_meta_batch(
+    nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  if (!db || (count > 0U && !ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (out_deleted != NULL) {
+    *out_deleted = 0U;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&db->rwlock);
+  nbase_status_t st = NBASE_OK;
+  uint32_t deleted = 0U;
+  if (db->store->mmap_backed) {
+    st = NBASE_ERR_UNSUPPORTED;
+  } else {
+    for (uint32_t i = 0U; i < count; i++) {
+      if (!nbase_store_find_slot(db->store, ids[i], NULL)) {
+        continue;
+      }
+      nbase_status_t ds = nbase_meta_delete(db->meta, ids[i]);
+      if (ds == NBASE_ERR_NOT_FOUND) {
+        continue;
+      }
+      if (ds != NBASE_OK) {
+        st = ds;
+        break;
+      }
+      if (db->wal != NULL) {
+        ds = nbase_wal_append_id(db->wal, NBASE_WAL_OP_DELETE_META, ids[i]);
+        if (ds != NBASE_OK) {
+          st = ds;
+          break;
+        }
+      }
+      deleted++;
+    }
+    if (deleted > 0U) {
+      db_cache_invalidate(db);
+    }
+  }
+  pthread_rwlock_unlock(&db->rwlock);
+  if (out_deleted != NULL) {
+    *out_deleted = deleted;
+  }
   return st;
 }
 

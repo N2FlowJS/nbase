@@ -171,6 +171,60 @@ uint32_t nbase_pq_num_centroids(const nbase_pq_t *pq) {
   return pq ? pq->num_centroids : 0U;
 }
 
+typedef struct pq_encode_ctx {
+  const nbase_pq_t *pq;
+  const float *vectors;
+  uint32_t count;
+  uint32_t total_workers;
+  uint8_t *out_codes;
+  nbase_status_t statuses[4];
+} pq_encode_ctx_t;
+
+typedef struct pq_encode_arg {
+  pq_encode_ctx_t *ctx;
+  uint32_t tid;
+} pq_encode_arg_t;
+
+static void pq_encode_slice(pq_encode_ctx_t *ctx, uint32_t tid) {
+  const nbase_pq_t *pq = ctx->pq;
+  uint32_t start =
+      (uint32_t)(((uint64_t)tid * (uint64_t)ctx->count) / (uint64_t)ctx->total_workers);
+  uint32_t end =
+      (uint32_t)(((uint64_t)(tid + 1U) * (uint64_t)ctx->count) / (uint64_t)ctx->total_workers);
+
+  float dists[256] = {0.0f};
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = start; i < end && st == NBASE_OK; i++) {
+    const float *vec = ctx->vectors + (size_t)i * (size_t)pq->dim;
+    uint8_t *code = ctx->out_codes + (size_t)i * (size_t)pq->num_subvectors;
+    for (uint32_t m = 0U; m < pq->num_subvectors; m++) {
+      const float *sub = vec + (size_t)m * (size_t)pq->sub_dim;
+      const float *cb = pq->codebooks + (size_t)m * (size_t)pq->num_centroids * (size_t)pq->sub_dim;
+      st = nbase_distance_batch(
+          NBASE_METRIC_SQUARED_EUCLIDEAN, sub, cb, pq->num_centroids, pq->sub_dim, dists);
+      if (st != NBASE_OK) {
+        break;
+      }
+      uint32_t best_c = 0U;
+      float best_d = FLT_MAX;
+      for (uint32_t c = 0U; c < pq->num_centroids; c++) {
+        if (dists[c] < best_d) {
+          best_d = dists[c];
+          best_c = c;
+        }
+      }
+      code[m] = (uint8_t)best_c;
+    }
+  }
+  ctx->statuses[tid] = st;
+}
+
+static void *pq_encode_worker(void *raw) {
+  pq_encode_arg_t *arg = (pq_encode_arg_t *)raw;
+  pq_encode_slice(arg->ctx, arg->tid);
+  return NULL;
+}
+
 nbase_status_t nbase_pq_encode(const nbase_pq_t *pq, const float *vectors, uint32_t count, uint8_t *out_codes) {
   if (!pq || (count > 0U && (!vectors || !out_codes))) {
     return NBASE_ERR_INVALID_ARG;
@@ -184,27 +238,52 @@ nbase_status_t nbase_pq_encode(const nbase_pq_t *pq, const float *vectors, uint3
     }
   }
 
-  float dists[256] = {0.0f};
-  for (uint32_t i = 0U; i < count; i++) {
-    const float *vec = vectors + (size_t)i * (size_t)pq->dim;
-    uint8_t *code = out_codes + (size_t)i * (size_t)pq->num_subvectors;
-    for (uint32_t m = 0U; m < pq->num_subvectors; m++) {
-      const float *sub = vec + (size_t)m * (size_t)pq->sub_dim;
-      const float *cb = pq->codebooks + (size_t)m * (size_t)pq->num_centroids * (size_t)pq->sub_dim;
-      nbase_status_t st = nbase_distance_batch(
-          NBASE_METRIC_SQUARED_EUCLIDEAN, sub, cb, pq->num_centroids, pq->sub_dim, dists);
-      if (st != NBASE_OK) {
-        return st;
+  pq_encode_ctx_t ctx;
+  ctx.pq = pq;
+  ctx.vectors = vectors;
+  ctx.count = count;
+  ctx.total_workers = 1U;
+  ctx.out_codes = out_codes;
+  for (uint32_t w = 0U; w < 4U; w++) {
+    ctx.statuses[w] = NBASE_OK;
+  }
+
+  uint64_t work = (uint64_t)count * (uint64_t)pq->num_subvectors * (uint64_t)pq->num_centroids *
+                  (uint64_t)pq->sub_dim;
+  if (count >= 32U && work >= 262144ULL) {
+    uint32_t want = count / 16U;
+    if (want > 4U) {
+      want = 4U;
+    }
+    if (want < 1U) {
+      want = 1U;
+    }
+    ctx.total_workers = want;
+  }
+
+  pthread_t workers[3];
+  pq_encode_arg_t args[3];
+  uint32_t spawned = 0U;
+  if (ctx.total_workers > 1U) {
+    for (uint32_t w = 1U; w < ctx.total_workers; w++) {
+      args[w - 1U].ctx = &ctx;
+      args[w - 1U].tid = w;
+      if (pthread_create(&workers[spawned], NULL, pq_encode_worker, &args[w - 1U]) != 0) {
+        break;
       }
-      uint32_t best_c = 0U;
-      float best_d = FLT_MAX;
-      for (uint32_t c = 0U; c < pq->num_centroids; c++) {
-        if (dists[c] < best_d) {
-          best_d = dists[c];
-          best_c = c;
-        }
-      }
-      code[m] = (uint8_t)best_c;
+      spawned++;
+    }
+  }
+  pq_encode_slice(&ctx, 0U);
+  for (uint32_t w = spawned + 1U; w < ctx.total_workers; w++) {
+    pq_encode_slice(&ctx, w);
+  }
+  for (uint32_t w = 0U; w < spawned; w++) {
+    pthread_join(workers[w], NULL);
+  }
+  for (uint32_t w = 0U; w < ctx.total_workers; w++) {
+    if (ctx.statuses[w] != NBASE_OK) {
+      return ctx.statuses[w];
     }
   }
   return NBASE_OK;

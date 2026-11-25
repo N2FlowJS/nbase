@@ -321,10 +321,35 @@ static void test_kmeans_parallel_determinism_tsan(void) {
   free(vecs);
 }
 
+static void test_pq_encode_parallel_determinism_tsan(void) {
+  const uint32_t dim = 32U;
+  const uint32_t m = 8U;
+  const uint32_t ks = 64U;
+  const uint32_t count = 256U; /* 256 * 8 * 64 * 4 = 524288 >= 262144 exercises MT PQ encode */
+
+  float *vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+  uint8_t *codes_a = malloc((size_t)count * (size_t)m);
+  uint8_t *codes_b = malloc((size_t)count * (size_t)m);
+  ASSERT_TRUE(vecs != NULL && codes_a != NULL && codes_b != NULL);
+  test_fill_vectors(vecs, count, dim, 9091ULL);
+
+  nbase_pq_t *pq = NULL;
+  ASSERT_STATUS(nbase_pq_train(vecs, count, dim, m, ks, 8U, 42ULL, &pq), NBASE_OK);
+  ASSERT_STATUS(nbase_pq_encode(pq, vecs, count, codes_a), NBASE_OK);
+  ASSERT_STATUS(nbase_pq_encode(pq, vecs, count, codes_b), NBASE_OK);
+  ASSERT_TRUE(memcmp(codes_a, codes_b, (size_t)count * (size_t)m) == 0);
+
+  nbase_pq_destroy(pq);
+  free(codes_b);
+  free(codes_a);
+  free(vecs);
+}
+
 void test_pq_run(void) {
   RUN_TEST(test_kmeans_synthetic_clusters_and_edge_cases);
   RUN_TEST(test_kmeans_parallel_determinism_tsan);
   RUN_TEST(test_pq_encode_decode_adc_and_persistence);
   RUN_TEST(test_pq_adc_distance_batch);
   RUN_TEST(test_pq_train_parallel_determinism_tsan);
+  RUN_TEST(test_pq_encode_parallel_determinism_tsan);
 }

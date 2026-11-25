@@ -463,10 +463,49 @@ static void test_ivfpq_crud_upsert_delete_list_compact_and_tsan(void) {
   test_rm_rf(dir);
 }
 
+static void test_ivfpq_parallel_batch_add_mt_and_cosine(void) {
+  const uint32_t dim = 64U;
+  const uint32_t clusters = 16U;
+  const uint32_t per_cluster = 32U; /* 512 * 16 * 64 = 524288 >= 262144 exercises MT add prep + encode */
+  const uint32_t n = clusters * per_cluster;
+
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL);
+  make_clustered_vectors(vecs, clusters, per_cluster, dim, 7777ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 100ULL + (uint64_t)i;
+  }
+
+  nbase_ivfpq_config_t cfg = nbase_ivfpq_config_default(dim, clusters, 8U);
+  cfg.metric = NBASE_METRIC_COSINE;
+  cfg.num_centroids = 64U;
+  cfg.max_iters = 10U;
+  cfg.seed = 3333ULL;
+
+  nbase_ivfpq_t *idx = NULL;
+  ASSERT_STATUS(nbase_ivfpq_train(&cfg, vecs, n, &idx), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_add(idx, ids, vecs, n), NBASE_OK);
+
+  nbase_ivfpq_stats_t st;
+  ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+  ASSERT_EQ_U64(st.count, n);
+
+  nbase_result_t hits[5];
+  uint32_t got = 0U;
+  ASSERT_STATUS(nbase_ivfpq_search(idx, vecs, 5U, 4U, hits, &got), NBASE_OK);
+  ASSERT_TRUE(got > 0U && hits[0].id >= 100ULL && hits[0].id < 100ULL + per_cluster);
+
+  nbase_ivfpq_destroy(idx);
+  free(ids);
+  free(vecs);
+}
+
 void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_train_add_search_euclidean_and_save_load);
   RUN_TEST(test_ivfpq_cosine_and_inner_product);
   RUN_TEST(test_ivfpq_concurrent_readers_writer_tsan);
   RUN_TEST(test_ivfpq_search_batch_mt_and_tsan);
   RUN_TEST(test_ivfpq_crud_upsert_delete_list_compact_and_tsan);
+  RUN_TEST(test_ivfpq_parallel_batch_add_mt_and_cosine);
 }

@@ -131,6 +131,36 @@ nbase_status_t nbase_sq8_encode(
   return NBASE_OK;
 }
 
+#if NBASE_SQ8_HAS_AVX2
+static inline __attribute__((target("avx2"))) float sq8_hsum256_ps(__m256 v);
+static __attribute__((target("avx2"))) void sq8_decode_avx2(
+    const nbase_sq8_t *sq8,
+    const uint8_t *codes,
+    uint32_t count,
+    float *out_vectors) {
+  const float *mins = sq8->mins;
+  const float *scales = sq8->scales;
+  uint32_t dim = sq8->dim;
+
+  for (uint32_t i = 0U; i < count; i++) {
+    const uint8_t *src = codes + (size_t)i * (size_t)dim;
+    float *dst = out_vectors + (size_t)i * (size_t)dim;
+    uint32_t d = 0U;
+    for (; d + 8U <= dim; d += 8U) {
+      __m128i u8 = _mm_loadl_epi64((const __m128i *)(const void *)(src + d));
+      __m256 qf = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(u8));
+      __m256 mv = _mm256_loadu_ps(mins + d);
+      __m256 sv = _mm256_loadu_ps(scales + d);
+      __m256 res = _mm256_add_ps(mv, _mm256_mul_ps(qf, sv));
+      _mm256_storeu_ps(dst + d, res);
+    }
+    for (; d < dim; d++) {
+      dst[d] = mins[d] + (float)src[d] * scales[d];
+    }
+  }
+}
+#endif
+
 nbase_status_t nbase_sq8_decode(
     const nbase_sq8_t *sq8,
     const uint8_t *codes,
@@ -139,6 +169,12 @@ nbase_status_t nbase_sq8_decode(
   if (!sq8 || (count > 0U && (!codes || !out_vectors))) {
     return NBASE_ERR_INVALID_ARG;
   }
+#if NBASE_SQ8_HAS_AVX2
+  if (nbase_cpu_has_avx2_fma() && sq8->dim >= 8U) {
+    sq8_decode_avx2(sq8, codes, count, out_vectors);
+    return NBASE_OK;
+  }
+#endif
   for (uint32_t i = 0U; i < count; i++) {
     const uint8_t *src = codes + (size_t)i * (size_t)sq8->dim;
     float *dst = out_vectors + (size_t)i * (size_t)sq8->dim;

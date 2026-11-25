@@ -2058,6 +2058,32 @@ static void test_http_server_text_and_hybrid_batch_search(void) {
   ASSERT_TRUE(strstr(r.body, "\"id\":30") == NULL);
   free(r.body);
 
+  /* 4. DELETE /api/vectors/metadata & POST /api/vectors/metadata/delete */
+  ASSERT_TRUE(http_req(port, "PUT", "/api/vectors/metadata", NULL, "{\"ids\":[10]}", &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "DELETE", "/api/vectors/metadata", NULL, "{\"ids\":[10,999]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"deleted\":1") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/metadata/delete", NULL, "{\"ids\":[30]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"deleted\":1") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/count",
+      NULL,
+      "{\"filters\":{\"group\":\"alpha\"}}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":0") != NULL);
+  free(r.body);
+
   nbase_http_server_stop(srv);
   nbase_close(db);
 }

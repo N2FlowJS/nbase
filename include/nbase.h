@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 12
+#define NBASE_VERSION_MINOR 13
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -214,6 +214,7 @@ nbase_status_t nbase_update_meta(nbase_db_t *db, uint64_t id, const nbase_meta_f
 nbase_status_t nbase_update_meta_batch(nbase_db_t *db, const nbase_meta_batch_item_t *items, uint32_t count);
 nbase_status_t nbase_get_meta(const nbase_db_t *db, uint64_t id, const char *key, nbase_meta_value_t *out_val, char *str_buf, size_t str_buf_len);
 nbase_status_t nbase_delete_meta(nbase_db_t *db, uint64_t id);
+nbase_status_t nbase_delete_meta_batch(nbase_db_t *db, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_foreach_meta(const nbase_db_t *db, uint64_t id, nbase_meta_iter_fn cb, void *user_ctx);
 nbase_status_t nbase_query_meta(const nbase_db_t *db, const nbase_meta_filter_t *filter, uint32_t limit, uint64_t *out_ids, uint32_t *out_count);
 
@@ -324,6 +325,7 @@ nbase_status_t nbase_pdb_update_meta(nbase_pdb_t *pdb, uint64_t id, const nbase_
 nbase_status_t nbase_pdb_update_meta_batch(nbase_pdb_t *pdb, const nbase_meta_batch_item_t *items, uint32_t count);
 nbase_status_t nbase_pdb_get_meta(nbase_pdb_t *pdb, uint64_t id, const char *key, nbase_meta_value_t *out_val, char *str_buf, size_t str_buf_len);
 nbase_status_t nbase_pdb_delete_meta(nbase_pdb_t *pdb, uint64_t id);
+nbase_status_t nbase_pdb_delete_meta_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_pdb_foreach_meta(nbase_pdb_t *pdb, uint64_t id, nbase_meta_iter_fn cb, void *user_ctx);
 nbase_status_t nbase_pdb_query_meta(nbase_pdb_t *pdb, const nbase_meta_filter_t *filter, uint32_t limit, uint64_t *out_ids, uint32_t *out_count);
 
@@ -331,12 +333,15 @@ nbase_status_t nbase_pdb_set_text(nbase_pdb_t *pdb, uint64_t id, const char *tex
 nbase_status_t nbase_pdb_set_text_batch(nbase_pdb_t *pdb, const uint64_t *ids, const char *const *texts, uint32_t count);
 nbase_status_t nbase_pdb_get_text(nbase_pdb_t *pdb, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
 nbase_status_t nbase_pdb_delete_text(nbase_pdb_t *pdb, uint64_t id);
+nbase_status_t nbase_pdb_delete_text_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 
 nbase_status_t nbase_pdb_search(nbase_pdb_t *pdb, const float *query, uint32_t dim, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_search_radius(nbase_pdb_t *pdb, const float *query, uint32_t dim, float max_distance, uint32_t max_results, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_search_batch(nbase_pdb_t *pdb, const float *queries, uint32_t query_count, uint32_t dim, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_pdb_search_text(nbase_pdb_t *pdb, const char *query, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_pdb_search_text_batch(nbase_pdb_t *pdb, const char *const *queries, uint32_t query_count, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_pdb_search_hybrid(nbase_pdb_t *pdb, const float *query_vec, uint32_t dim, const char *query_text, uint32_t k, float alpha, float rrf_k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_pdb_search_hybrid_batch(nbase_pdb_t *pdb, const float *query_vectors, uint32_t dim, const char *const *query_texts, uint32_t query_count, uint32_t k, float alpha, float rrf_k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_pdb_find_similar(nbase_pdb_t *pdb, uint64_t id, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_rerank_mmr(nbase_pdb_t *pdb, const nbase_result_t *candidates, uint32_t candidate_count, uint32_t k, float lambda, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_rerank_weighted(nbase_pdb_t *pdb, const nbase_result_t *candidates, uint32_t candidate_count, const nbase_rerank_weight_t *weights, uint32_t weight_count, uint32_t k, nbase_result_t *out_results, uint32_t *out_count);
