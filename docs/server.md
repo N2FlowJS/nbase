@@ -23,7 +23,7 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 
 ### Endpoints
 
-- **`GET /health` & `HEAD /health`**: `GET` returns `{"status":"ok","version":"1.14.0","simd":"..."}`; `HEAD` returns status `200` with empty body.
+- **`GET /health` & `HEAD /health`**: `GET` returns `{"status":"ok","version":"1.15.0","simd":"..."}`; `HEAD` returns status `200` with empty body.
 - **`GET /stats`**: returns DB stats (`dim`, `metric`, `active_vectors`, `total_slots`, `tombstones`, `mmap_backed`, `hnsw_*`, `text_docs`, `memory_bytes`, `cache_capacity`, `cache_entries`, `cache_hits`, `cache_misses`, `search_p50_us`, `search_p95_us`, `search_p99_us`).
 - **`GET /metrics`**: Prometheus exposition format (`nbase_requests_total`, `nbase_errors_total`, `nbase_search_queries_total`, `nbase_search_latency_microseconds_sum`, `nbase_search_latency_p50_microseconds`, `nbase_search_latency_p95_microseconds`, `nbase_search_latency_p99_microseconds`, `nbase_keepalive_requests_total`, `nbase_vectors_active`, `nbase_vectors_tombstones`, `nbase_hnsw_nodes_active`, `nbase_text_docs_active`, `nbase_memory_bytes`, `nbase_cache_entries`, `nbase_cache_hits_total`, `nbase_cache_misses_total`).
 - **`GET /api/vectors`**: paginated sorted vector listing (`?offset=0&limit=50&includeVectors=false&includeMetadata=false&includeText=false`).
@@ -58,7 +58,7 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 - `nbase-cli init <dir> --dim <D> [--metric <M>] [--no-hnsw]`
 - `nbase-cli info <dir>` — Prints DB dimensions, active count, tombstones, HNSW levels, `text_docs`, `memory_bytes`, and `cache_*` JSON
 - `nbase-cli add <dir> <id> <v0,v1,...>` / `upsert <dir> <id> <v0,v1,...>` / `patch <dir> <id> [--vector <v0,v1,...>] [--meta <json>] [--text <str>|--clear-text]` / `get <dir> <id>` / `get-batch <dir> <id1,id2,...>` / `exists <dir> <id1,id2,...>` / `list <dir> [--offset <N>] [--limit <M>]` / `count <dir> [--filter <json>]` / `delete <dir> <id>` / `delete-batch <dir> <id1,id2,...>` / `delete-by-filter <dir> --filter <json>`
-- `nbase-cli set-meta <dir> <id> <json-object> [--update]` / `set-meta-batch <dir> <file.ndjson|-> [--update]` / `get-meta <dir> <id>` / `delete-meta <dir> <id>` / `delete-meta-batch <dir> <id1,id2,...>` / `set-text <dir> <id> <text>` / `set-text-batch <dir> <file.ndjson|->` / `get-text <dir> <id>` / `delete-text <dir> <id>` / `delete-text-batch <dir> <id1,id2,...>`
+- `nbase-cli set-meta <dir> <id> <json-object> [--update]` / `set-meta-batch <dir> <file.ndjson|-> [--update]` / `get-meta <dir> <id>` / `get-meta-batch <dir> <id1,id2,...>` / `delete-meta <dir> <id>` / `delete-meta-batch <dir> <id1,id2,...>` / `set-text <dir> <id> <text>` / `set-text-batch <dir> <file.ndjson|->` / `get-text <dir> <id>` / `get-text-batch <dir> <id1,id2,...>` / `delete-text <dir> <id>` / `delete-text-batch <dir> <id1,id2,...>`
 - `nbase-cli search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]` / `search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>]`
 - `nbase-cli search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]`
 - `nbase-cli rerank <dir> <diversity|weighted|standard> <id1:dist1,id2:dist2,...> [--k <K>] [--lambda <L>] [--weights <json>]`

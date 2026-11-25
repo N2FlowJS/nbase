@@ -2330,32 +2330,9 @@ static void handle_post_similar(
       k = (uint32_t)jk->i64;
     }
 
-    const nbase_json_t *jincm = nbase_json_obj_get(root, "includeMetadata");
-    if (jincm != NULL) {
-      if (jincm->type != NBASE_JSON_BOOL) {
-        nbase_json_free(root);
-        send_error_json(c, 400, "includeMetadata must be boolean");
-        return;
-      }
-      inc_meta = jincm->b;
-    }
-    const nbase_json_t *jincv = nbase_json_obj_get(root, "includeVectors");
-    if (jincv != NULL) {
-      if (jincv->type != NBASE_JSON_BOOL) {
-        nbase_json_free(root);
-        send_error_json(c, 400, "includeVectors must be boolean");
-        return;
-      }
-      inc_vec = jincv->b;
-    }
-    const nbase_json_t *jinct = nbase_json_obj_get(root, "includeText");
-    if (jinct != NULL) {
-      if (jinct->type != NBASE_JSON_BOOL) {
-        nbase_json_free(root);
-        send_error_json(c, 400, "includeText must be boolean");
-        return;
-      }
-      inc_text = jinct->b;
+    if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
+      nbase_json_free(root);
+      return;
     }
 
     if (!parse_search_common_opts(root, &opts, &conds, &meta_flt)) {

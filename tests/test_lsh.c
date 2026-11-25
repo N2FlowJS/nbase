@@ -556,6 +556,152 @@ static void test_lsh_upsert_delete_get_batch_and_tsan(void) {
   nbase_lsh_destroy(lsh);
 }
 
+typedef struct lsh_radius_tsan_ctx {
+  nbase_lsh_t *lsh;
+  const float *queries;
+  uint32_t dim;
+  atomic_bool stop;
+  atomic_int errors;
+} lsh_radius_tsan_ctx_t;
+
+static void *lsh_radius_batch_reader_fn(void *raw) {
+  lsh_radius_tsan_ctx_t *ctx = (lsh_radius_tsan_ctx_t *)raw;
+  nbase_result_t r_hits[16];
+  nbase_result_t b_hits[4U * 8U];
+  uint32_t b_cnts[4];
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    uint32_t got = 0U;
+    if (nbase_lsh_search_radius(
+            ctx->lsh, ctx->queries, ctx->dim, 50.0f, 16U, 2U, NULL, NULL, r_hits, &got) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    if (nbase_lsh_search_batch(ctx->lsh, ctx->queries, 4U, ctx->dim, 8U, 2U, 2U, b_hits, b_cnts) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+  }
+  return NULL;
+}
+
+static void test_lsh_search_radius_and_batch_scratch_tsan(void) {
+  const uint32_t dim = 16U;
+  const uint32_t n = 120U;
+  const uint32_t qcnt = 80U;
+  float *vecs = calloc((size_t)n * (size_t)dim, sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  float *queries = calloc((size_t)qcnt * (size_t)dim, sizeof(float));
+  nbase_result_t *batch_res = malloc((size_t)qcnt * 8U * sizeof(nbase_result_t));
+  uint32_t *batch_cnts = malloc((size_t)qcnt * sizeof(uint32_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL && queries != NULL && batch_res != NULL && batch_cnts != NULL);
+
+  make_clusters(vecs, 6U, 20U, dim, 5151ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 1000ULL + (uint64_t)i;
+  }
+  test_fill_vectors(queries, qcnt, dim, 6161ULL);
+
+  static const nbase_metric_t metrics[2] = {NBASE_METRIC_COSINE, NBASE_METRIC_EUCLIDEAN};
+  for (size_t mi = 0U; mi < 2U; mi++) {
+    nbase_lsh_config_t cfg = nbase_lsh_config_default(dim);
+    cfg.metric = metrics[mi];
+    cfg.num_tables = 8U;
+    cfg.num_bits = 8U;
+    cfg.bucket_width = 4.0f;
+    cfg.seed = 7070ULL + (uint64_t)mi;
+
+    nbase_lsh_t *lsh = NULL;
+    ASSERT_STATUS(nbase_lsh_create(&cfg, &lsh), NBASE_OK);
+    ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids, vecs, n, dim), NBASE_OK);
+
+    nbase_result_t hits[16];
+    uint32_t got = 77U;
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(NULL, queries, dim, 1.0f, 8U, 2U, NULL, NULL, hits, &got),
+        NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(lsh, queries, dim, NAN, 8U, 2U, NULL, NULL, hits, &got),
+        NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(lsh, queries, dim, INFINITY, 8U, 2U, NULL, NULL, hits, &got),
+        NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(lsh, queries, dim + 1U, 1.0f, 8U, 2U, NULL, NULL, hits, &got),
+        NBASE_ERR_DIM_MISMATCH);
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(lsh, queries, dim, 1.0f, 0U, 2U, NULL, NULL, NULL, &got),
+        NBASE_OK);
+    ASSERT_EQ_U64(got, 0ULL);
+
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(lsh, vecs, dim, -0.01f, 8U, 2U, NULL, NULL, hits, &got),
+        NBASE_OK);
+    ASSERT_EQ_U64(got, 0ULL);
+
+    float rad = (metrics[mi] == NBASE_METRIC_COSINE) ? 0.25f : 1.5f;
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(lsh, vecs, dim, rad, 16U, 4U, NULL, NULL, hits, &got),
+        NBASE_OK);
+    ASSERT_TRUE(got >= 1U);
+    ASSERT_EQ_U64(hits[0].id, 1000ULL);
+    for (uint32_t j = 0U; j < got; j++) {
+      ASSERT_TRUE(hits[j].distance <= rad);
+      if (j > 0U) {
+        ASSERT_TRUE(hits[j - 1U].distance <= hits[j].distance);
+      }
+    }
+
+    ASSERT_STATUS(
+        nbase_lsh_search_radius(
+            lsh, vecs, dim, rad, 16U, 4U, lsh_even_filter, NULL, hits, &got),
+        NBASE_OK);
+    for (uint32_t j = 0U; j < got; j++) {
+      ASSERT_TRUE((hits[j].id % 2ULL) == 0ULL);
+      ASSERT_TRUE(hits[j].distance <= rad);
+    }
+
+    /* 80-query multi-threaded batch parity exercising per-worker generation-stamped scratch */
+    ASSERT_STATUS(
+        nbase_lsh_search_batch(lsh, queries, qcnt, dim, 8U, 2U, 4U, batch_res, batch_cnts),
+        NBASE_OK);
+    for (uint32_t q = 0U; q < qcnt; q++) {
+      nbase_result_t serial_res[8];
+      uint32_t serial_cnt = 0U;
+      ASSERT_STATUS(
+          nbase_lsh_search(lsh, queries + (size_t)q * (size_t)dim, dim, 8U, 2U, serial_res, &serial_cnt),
+          NBASE_OK);
+      ASSERT_EQ_U64(batch_cnts[q], serial_cnt);
+      for (uint32_t j = 0U; j < serial_cnt; j++) {
+        ASSERT_EQ_U64(batch_res[(size_t)q * 8U + j].id, serial_res[j].id);
+        ASSERT_NEAR(batch_res[(size_t)q * 8U + j].distance, serial_res[j].distance, 1e-6, 0.0);
+      }
+    }
+
+    if (mi == 1U) {
+      lsh_radius_tsan_ctx_t ctx = {lsh, queries, dim, false, 0};
+      pthread_t r1, r2;
+      ASSERT_TRUE(pthread_create(&r1, NULL, lsh_radius_batch_reader_fn, &ctx) == 0);
+      ASSERT_TRUE(pthread_create(&r2, NULL, lsh_radius_batch_reader_fn, &ctx) == 0);
+      for (uint32_t step = 0U; step < 8U; step++) {
+        uint64_t up_id = 1000ULL + (step % 5ULL);
+        ASSERT_STATUS(nbase_lsh_upsert_batch(lsh, &up_id, vecs + (size_t)step * dim, 1U, dim), NBASE_OK);
+      }
+      atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+      pthread_join(r1, NULL);
+      pthread_join(r2, NULL);
+      ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+    }
+
+    nbase_lsh_destroy(lsh);
+  }
+
+  free(batch_cnts);
+  free(batch_res);
+  free(queries);
+  free(ids);
+  free(vecs);
+}
+
 void test_lsh_run(void) {
   RUN_TEST(test_lsh_cosine_and_multiprobe);
   RUN_TEST(test_lsh_euclidean_save_load_and_errors);
@@ -563,4 +709,5 @@ void test_lsh_run(void) {
   RUN_TEST(test_lsh_search_batch_mt_and_parity);
   RUN_TEST(test_lsh_upsert_get_list_compact_and_tsan);
   RUN_TEST(test_lsh_upsert_delete_get_batch_and_tsan);
+  RUN_TEST(test_lsh_search_radius_and_batch_scratch_tsan);
 }

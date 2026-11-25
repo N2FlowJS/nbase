@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 14
+#define NBASE_VERSION_MINOR 15
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -460,6 +460,7 @@ nbase_ivfpq_config_t nbase_ivfpq_config_default(uint32_t dim, uint32_t nlist, ui
 nbase_status_t nbase_ivfpq_train(const nbase_ivfpq_config_t *cfg, const float *train_vectors, uint32_t train_count, nbase_ivfpq_t **out_index);
 nbase_status_t nbase_ivfpq_add(nbase_ivfpq_t *index, const uint64_t *ids, const float *vectors, uint32_t count);
 nbase_status_t nbase_ivfpq_upsert(nbase_ivfpq_t *index, uint64_t id, const float *vec, uint32_t dim);
+nbase_status_t nbase_ivfpq_upsert_batch(nbase_ivfpq_t *index, const uint64_t *ids, const float *vectors, uint32_t count);
 nbase_status_t nbase_ivfpq_delete(nbase_ivfpq_t *index, uint64_t id);
 nbase_status_t nbase_ivfpq_delete_batch(nbase_ivfpq_t *index, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 bool nbase_ivfpq_contains(const nbase_ivfpq_t *index, uint64_t id);
@@ -473,6 +474,16 @@ nbase_status_t nbase_ivfpq_list_ids(
 nbase_status_t nbase_ivfpq_compact(nbase_ivfpq_t *index);
 nbase_status_t nbase_ivfpq_search(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_ivfpq_search_filtered(const nbase_ivfpq_t *index, const float *query, uint32_t k, uint32_t nprobe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_ivfpq_search_radius(
+    const nbase_ivfpq_t *index,
+    const float *query,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count);
 nbase_status_t nbase_ivfpq_search_batch(
     const nbase_ivfpq_t *index,
     const float *queries,
@@ -561,6 +572,17 @@ nbase_status_t nbase_lsh_list_ids(
 nbase_status_t nbase_lsh_compact(nbase_lsh_t *lsh);
 nbase_status_t nbase_lsh_search(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_lsh_search_filtered(const nbase_lsh_t *lsh, const float *query, uint32_t dim, uint32_t k, uint32_t multi_probe, nbase_filter_fn filter, void *filter_ctx, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_lsh_search_radius(
+    const nbase_lsh_t *lsh,
+    const float *query,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t multi_probe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count);
 nbase_status_t nbase_lsh_search_batch(
     const nbase_lsh_t *lsh,
     const float *queries,

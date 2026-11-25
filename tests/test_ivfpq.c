@@ -599,6 +599,159 @@ static void test_ivfpq_delete_batch_and_tsan(void) {
   free(vecs);
 }
 
+typedef struct ivfpq_radius_tsan_ctx {
+  nbase_ivfpq_t *idx;
+  const float *query;
+  atomic_bool stop;
+  atomic_int errors;
+} ivfpq_radius_tsan_ctx_t;
+
+static void *ivfpq_radius_reader_fn(void *raw) {
+  ivfpq_radius_tsan_ctx_t *ctx = (ivfpq_radius_tsan_ctx_t *)raw;
+  nbase_result_t hits[8];
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    uint32_t got = 0U;
+    if (nbase_ivfpq_search_radius(ctx->idx, ctx->query, 100.0f, 8U, 4U, NULL, NULL, hits, &got) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    (void)nbase_ivfpq_contains(ctx->idx, 100ULL);
+  }
+  return NULL;
+}
+
+static void test_ivfpq_upsert_batch_and_search_radius_tsan(void) {
+  const uint32_t dim = 32U;
+  const uint32_t n = 120U;
+  float *vecs = malloc((size_t)n * (size_t)dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL);
+  test_fill_vectors(vecs, n, dim, 19901ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 100ULL + (uint64_t)i;
+  }
+
+  static const nbase_metric_t metrics[3] = {
+      NBASE_METRIC_EUCLIDEAN,
+      NBASE_METRIC_COSINE,
+      NBASE_METRIC_INNER_PRODUCT,
+  };
+  for (size_t mi = 0U; mi < 3U; mi++) {
+    nbase_ivfpq_config_t cfg = nbase_ivfpq_config_default(dim, 8U, 4U);
+    cfg.metric = metrics[mi];
+    cfg.num_centroids = 32U;
+    cfg.max_iters = 8U;
+    cfg.seed = 4545ULL + (uint64_t)mi;
+
+    nbase_ivfpq_t *idx = NULL;
+    ASSERT_STATUS(nbase_ivfpq_train(&cfg, vecs, n, &idx), NBASE_OK);
+    ASSERT_STATUS(nbase_ivfpq_add(idx, ids, vecs, n), NBASE_OK);
+
+    /* search_radius validation & filtering */
+    nbase_result_t hits[16];
+    uint32_t got = 99U;
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(NULL, vecs, 1.0f, 8U, 4U, NULL, NULL, hits, &got),
+        NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(idx, vecs, NAN, 8U, 4U, NULL, NULL, hits, &got),
+        NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(idx, vecs, INFINITY, 8U, 4U, NULL, NULL, hits, &got),
+        NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(idx, vecs, 10.0f, 8U, 4U, NULL, NULL, NULL, &got),
+        NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(idx, vecs, 10.0f, 0U, 4U, NULL, NULL, NULL, &got),
+        NBASE_OK);
+    ASSERT_EQ_U64(got, 0ULL);
+
+    float tight_r = (metrics[mi] == NBASE_METRIC_INNER_PRODUCT) ? -1000.0f : -1.0f;
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(idx, vecs, tight_r, 8U, 8U, NULL, NULL, hits, &got),
+        NBASE_OK);
+    ASSERT_EQ_U64(got, 0ULL);
+
+    /* Use nearest hit distance from top-k search as radius threshold (negative works for IP too). */
+    nbase_result_t top5[5];
+    uint32_t tgot = 0U;
+    ASSERT_STATUS(nbase_ivfpq_search(idx, vecs, 5U, 8U, top5, &tgot), NBASE_OK);
+    ASSERT_TRUE(tgot >= 3U);
+    float rad = top5[2].distance + 1e-4f;
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(idx, vecs, rad, 16U, 8U, NULL, NULL, hits, &got),
+        NBASE_OK);
+    ASSERT_TRUE(got >= 3U);
+    for (uint32_t j = 0U; j < got; j++) {
+      ASSERT_TRUE(hits[j].distance <= rad);
+      if (j > 0U) {
+        ASSERT_TRUE(hits[j - 1U].distance <= hits[j].distance);
+      }
+    }
+
+    ASSERT_STATUS(
+        nbase_ivfpq_search_radius(
+            idx, vecs, rad + 5.0f, 16U, 8U, ivfpq_even_filter, NULL, hits, &got),
+        NBASE_OK);
+    for (uint32_t j = 0U; j < got; j++) {
+      ASSERT_TRUE((hits[j].id % 2ULL) == 0ULL);
+      ASSERT_TRUE(hits[j].distance <= rad + 5.0f);
+    }
+
+    /* upsert_batch validation, small (<32) and large (>=32 parallel) batches + TSan */
+    ASSERT_STATUS(nbase_ivfpq_upsert_batch(idx, NULL, NULL, 0U), NBASE_OK);
+    ASSERT_STATUS(nbase_ivfpq_upsert_batch(NULL, ids, vecs, 1U), NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(nbase_ivfpq_upsert_batch(idx, NULL, vecs, 1U), NBASE_ERR_INVALID_ARG);
+
+    uint64_t dup_ids[2] = {100ULL, 100ULL};
+    ASSERT_STATUS(nbase_ivfpq_upsert_batch(idx, dup_ids, vecs, 2U), NBASE_ERR_ALREADY_EXISTS);
+
+    float bad_vec[32] = {0.0f};
+    bad_vec[5] = NAN;
+    ASSERT_STATUS(nbase_ivfpq_upsert_batch(idx, ids, bad_vec, 1U), NBASE_ERR_INVALID_VECTOR);
+
+    nbase_ivfpq_stats_t st;
+    ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+    ASSERT_EQ_U64(st.count, n);
+
+    /* Small mixed overwrite + new IDs (< 32) */
+    uint64_t small_ids[4] = {101ULL, 102ULL, 9001ULL, 9002ULL};
+    ASSERT_STATUS(nbase_ivfpq_upsert_batch(idx, small_ids, vecs, 4U), NBASE_OK);
+    ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+    ASSERT_EQ_U64(st.count, n + 2ULL);
+    ASSERT_TRUE(nbase_ivfpq_contains(idx, 9001ULL) && nbase_ivfpq_contains(idx, 9002ULL));
+
+    if (mi == 0U) {
+      /* Large mixed overwrite + new IDs (>= 32 exercises parallel prep & PQ encode) + TSan */
+      ivfpq_radius_tsan_ctx_t ctx = {idx, vecs, false, 0};
+      pthread_t r1, r2;
+      ASSERT_TRUE(pthread_create(&r1, NULL, ivfpq_radius_reader_fn, &ctx) == 0);
+      ASSERT_TRUE(pthread_create(&r2, NULL, ivfpq_radius_reader_fn, &ctx) == 0);
+
+      uint64_t big_ids[40];
+      for (uint32_t b = 0U; b < 40U; b++) {
+        big_ids[b] = (b < 20U) ? (100ULL + b) : (9100ULL + b);
+      }
+      ASSERT_STATUS(nbase_ivfpq_upsert_batch(idx, big_ids, vecs, 40U), NBASE_OK);
+
+      atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+      pthread_join(r1, NULL);
+      pthread_join(r2, NULL);
+      ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+      ASSERT_STATUS(nbase_ivfpq_stats(idx, &st), NBASE_OK);
+      ASSERT_EQ_U64(st.count, n + 22ULL);
+      ASSERT_TRUE(nbase_ivfpq_contains(idx, 9139ULL));
+    }
+
+    nbase_ivfpq_destroy(idx);
+  }
+
+  free(ids);
+  free(vecs);
+}
+
 void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_train_add_search_euclidean_and_save_load);
   RUN_TEST(test_ivfpq_cosine_and_inner_product);
@@ -607,4 +760,5 @@ void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_crud_upsert_delete_list_compact_and_tsan);
   RUN_TEST(test_ivfpq_parallel_batch_add_mt_and_cosine);
   RUN_TEST(test_ivfpq_delete_batch_and_tsan);
+  RUN_TEST(test_ivfpq_upsert_batch_and_search_radius_tsan);
 }

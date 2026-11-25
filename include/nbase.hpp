@@ -1272,6 +1272,30 @@ class Lsh {
     return out;
   }
 
+  std::vector<nbase_result_t> search_radius(
+      const std::vector<float> &query,
+      float max_distance,
+      uint32_t max_results,
+      uint32_t multi_probe = 0U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr) const {
+    std::vector<nbase_result_t> out(max_results);
+    uint32_t count = 0U;
+    detail::check(nbase_lsh_search_radius(
+        ptr_,
+        query.empty() ? nullptr : query.data(),
+        static_cast<uint32_t>(query.size()),
+        max_distance,
+        max_results,
+        multi_probe,
+        filter,
+        filter_ctx,
+        max_results > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
   std::vector<std::vector<nbase_result_t>> search_batch(
       const std::vector<float> &queries,
       uint32_t query_count,
@@ -1862,6 +1886,19 @@ class IvfPq {
     upsert(id, vec.data(), static_cast<uint32_t>(vec.size()));
   }
 
+  void upsert_batch(const std::vector<uint64_t> &ids, const std::vector<float> &vectors) {
+    nbase_ivfpq_stats_t s{};
+    detail::check(nbase_ivfpq_stats(ptr_, &s));
+    if (vectors.size() != ids.size() * static_cast<size_t>(s.dim)) {
+      throw Error(ids.empty() ? NBASE_ERR_INVALID_ARG : NBASE_ERR_DIM_MISMATCH);
+    }
+    detail::check(nbase_ivfpq_upsert_batch(
+        ptr_,
+        ids.empty() ? nullptr : ids.data(),
+        vectors.empty() ? nullptr : vectors.data(),
+        static_cast<uint32_t>(ids.size())));
+  }
+
   void remove(uint64_t id) { detail::check(nbase_ivfpq_delete(ptr_, id)); }
 
   uint32_t delete_batch(const std::vector<uint64_t> &ids) {
@@ -1919,6 +1956,34 @@ class IvfPq {
         filter,
         filter_ctx,
         k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> search_radius(
+      const std::vector<float> &query,
+      float max_distance,
+      uint32_t max_results,
+      uint32_t nprobe = 1U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr) const {
+    nbase_ivfpq_stats_t s{};
+    detail::check(nbase_ivfpq_stats(ptr_, &s));
+    if (query.size() != static_cast<size_t>(s.dim)) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<nbase_result_t> out(max_results);
+    uint32_t count = 0U;
+    detail::check(nbase_ivfpq_search_radius(
+        ptr_,
+        query.data(),
+        max_distance,
+        max_results,
+        nprobe,
+        filter,
+        filter_ctx,
+        max_results > 0U ? out.data() : nullptr,
         &count));
     out.resize(count);
     return out;

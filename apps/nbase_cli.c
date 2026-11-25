@@ -33,11 +33,13 @@ static void print_usage(const char *prog) {
       "  set-meta <dir> <id> <json-object> [--update]\n"
       "  set-meta-batch <dir> <file.ndjson|-> [--update]\n"
       "  get-meta <dir> <id>\n"
+      "  get-meta-batch <dir> <id1,id2,...>\n"
       "  delete-meta <dir> <id>\n"
       "  delete-meta-batch <dir> <id1,id2,...>\n"
       "  set-text <dir> <id> <text>\n"
       "  set-text-batch <dir> <file.ndjson|->\n"
       "  get-text <dir> <id>\n"
+      "  get-text-batch <dir> <id1,id2,...>\n"
       "  delete-text <dir> <id>\n"
       "  delete-text-batch <dir> <id1,id2,...>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]\n"
@@ -1510,6 +1512,93 @@ int main(int argc, char **argv) {
       return 1;
     }
     printf("{\"deleted\":%u}\n", deleted);
+    return 0;
+  }
+
+  if (strcmp(cmd, "get-meta-batch") == 0 || strcmp(cmd, "get-text-batch") == 0) {
+    bool is_meta = (strcmp(cmd, "get-meta-batch") == 0);
+    if (argc != 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t *ids = NULL;
+    uint32_t cnt = 0U;
+    if (!parse_u64_list_csv(argv[3], &ids, &cnt)) {
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(ids);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    nbase_sbuf_t sb;
+    nbase_sbuf_init(&sb);
+    nbase_sbuf_append_n(&sb, "[", 1U);
+    char *tbuf = NULL;
+    size_t tcap = 0U;
+
+    for (uint32_t i = 0U; i < cnt && st == NBASE_OK && !sb.oom; i++) {
+      if (i > 0U) {
+        nbase_sbuf_append_n(&sb, ",", 1U);
+      }
+      nbase_sbuf_appendf(&sb, "{\"id\":%llu,", (unsigned long long)ids[i]);
+      if (is_meta) {
+        if (!nbase_contains(db, ids[i])) {
+          nbase_sbuf_append(&sb, "\"found\":false,\"metadata\":null}");
+        } else {
+          nbase_sbuf_append(&sb, "\"found\":true,\"metadata\":");
+          cli_meta_ctx_t mctx = {&sb, true, "{"};
+          st = nbase_foreach_meta(db, ids[i], cli_meta_cb, &mctx);
+          if (st == NBASE_OK) {
+            nbase_sbuf_append(&sb, mctx.first ? "{}}" : "}}");
+          }
+        }
+      } else {
+        size_t tlen = 0U;
+        nbase_status_t gst = nbase_get_text(db, ids[i], NULL, 0U, &tlen);
+        if (gst == NBASE_ERR_NOT_FOUND) {
+          nbase_sbuf_append(&sb, "\"found\":false,\"text\":null}");
+        } else if (gst != NBASE_OK) {
+          st = gst;
+        } else {
+          if (tlen + 1U > tcap) {
+            size_t new_cap = tlen + 64U;
+            char *grown = realloc(tbuf, new_cap);
+            if (!grown) {
+              st = NBASE_ERR_NOMEM;
+              break;
+            }
+            tbuf = grown;
+            tcap = new_cap;
+          }
+          gst = nbase_get_text(db, ids[i], tbuf, tcap, &tlen);
+          if (gst != NBASE_OK) {
+            st = gst;
+          } else {
+            nbase_sbuf_append(&sb, "\"found\":true,\"text\":");
+            nbase_sbuf_append_json_str(&sb, tbuf);
+            nbase_sbuf_append_n(&sb, "}", 1U);
+          }
+        }
+      }
+    }
+
+    if (st == NBASE_OK && !sb.oom) {
+      nbase_sbuf_append_n(&sb, "]", 1U);
+    }
+    free(tbuf);
+    free(ids);
+    nbase_close(db);
+    if (st != NBASE_OK || sb.oom || !sb.data) {
+      nbase_sbuf_free(&sb);
+      fprintf(stderr, "%s failed: %s\n", cmd, nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
+      return 1;
+    }
+    printf("%s\n", sb.data);
+    nbase_sbuf_free(&sb);
     return 0;
   }
 

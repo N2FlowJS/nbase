@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-25
+
+IVF-PQ atomic `nbase_ivfpq_upsert_batch` & `nbase_ivfpq_search_radius`, LSH `nbase_lsh_search_radius` & per-worker generation-stamped `search_batch` scratch, C++17 `IvfPq::{upsert_batch, search_radius}` & `Lsh::search_radius`, 2-row AVX2 Chebyshev batch optimization (`chebyshev_batch_avx2`), HTTP `handle_post_similar` `parse_include_flags` cleanup, and CLI `get-meta-batch` / `get-text-batch`.
+
+### Added & Changed
+- **IVF-PQ & LSH API Parity (`include/nbase.h`, `src/ivfpq.c`, `src/lsh.c`, `include/nbase.hpp`)**:
+  - Added `nbase_ivfpq_upsert_batch` sharing `ivfpq_write_batch_unlocked` and `ivfpq_delete_sorted_unlocked` with `nbase_ivfpq_add` / `nbase_ivfpq_delete_batch`: validates finiteness and duplicate input IDs before locking, encodes and reserves capacity upfront (zero partial mutation on OOM), then replaces pre-existing IDs and appends new codes atomically under one `wrlock`.
+  - Added `nbase_ivfpq_search_radius` and `nbase_lsh_search_radius` supporting `max_distance`, `max_results`, and optional `nbase_filter_fn` predicates, alongside C++17 `nbase::IvfPq::{upsert_batch, search_radius}` and `nbase::Lsh::search_radius`.
+  - Added per-worker generation-stamped `lsh_search_scratch_t` reuse in `lsh_search_batch_worker` eliminating per-query `seen` + heap allocations inside `nbase_lsh_search_batch`.
+- **SIMD Kernel, Server & CLI Parity (`src/distance.c`, `src/http_server.c`, `apps/nbase_cli.c`, `bench/bench_nbase.c`)**:
+  - Replaced the 4-stream `chebyshev_batch_avx2` loop with a 2-row 2-way (`i += 16`) `_mm256_andnot_ps` kernel reducing register/cache contention while keeping scalar parity, and updated `bench_nbase` `nbase_extract_relationships` threshold (`12.0f`) to emit non-empty graph edges on the 64-d benchmark dataset.
+  - Refactored `handle_post_similar` in `src/http_server.c` to reuse `parse_include_flags`.
+  - Added `nbase-cli get-meta-batch <dir> <id1,id2,...>` and `nbase-cli get-text-batch <dir> <id1,id2,...>` emitting per-ID JSON arrays.
+- **Tests (`tests/test_db.c`, `tests/test_ivfpq.c`, `tests/test_lsh.c`, `tests/test_distance.c`)**:
+  - Updated `nbase_version()` assertion to `"1.15.0"`, expanded `test_distance_batch_unrolled_edges` across dims `1..129` and counts `0..17`, and added `test_ivfpq_upsert_batch_and_search_radius_tsan` and `test_lsh_search_radius_and_batch_scratch_tsan`.
+
 ## [1.14.0] - 2026-11-25
 
 Standalone index batch CRUD parity (`nbase_ivfpq_delete_batch`, `nbase_lsh_upsert_batch`, `nbase_lsh_delete_batch`, `nbase_lsh_get_batch`, `nbase_bm25_delete_batch` + C++17 `nbase.hpp` methods), AVX2 8-lane bit-exact `sq8_encode_avx2`, 4-thread parallel `nbase_extract_relationships_filtered`, HTTP `POST /api/search/batch` `include*` flags, and CLI `set-meta-batch` / `set-text-batch`.

@@ -122,8 +122,8 @@ static void test_distance_batch_all_metrics_and_dims(void) {
 }
 
 static void test_distance_batch_unrolled_edges(void) {
-  static const uint32_t dims[] = {3U, 8U, 13U, 64U, 129U};
-  static const uint32_t counts[] = {1U, 3U, 4U, 5U, 17U};
+  static const uint32_t dims[] = {1U, 3U, 7U, 8U, 9U, 13U, 15U, 16U, 17U, 31U, 32U, 33U, 64U, 128U, 129U};
+  static const uint32_t counts[] = {0U, 1U, 2U, 3U, 4U, 5U, 17U};
   static const nbase_metric_t metrics[] = {
       NBASE_METRIC_EUCLIDEAN,
       NBASE_METRIC_SQUARED_EUCLIDEAN,

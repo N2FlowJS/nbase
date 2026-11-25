@@ -704,14 +704,24 @@ nbase_status_t nbase_lsh_compact(nbase_lsh_t *lsh) {
   return NBASE_OK;
 }
 
-static nbase_status_t lsh_search_filtered_unlocked(
+typedef struct lsh_search_scratch {
+  uint32_t *seen_gen;
+  uint32_t seen_cap;
+  uint32_t gen;
+  nbase_heap_t topk;
+} lsh_search_scratch_t;
+
+static nbase_status_t lsh_search_core_unlocked(
     const nbase_lsh_t *lsh,
     const float *query,
     uint32_t dim,
     uint32_t k,
+    bool use_radius,
+    float max_distance,
     uint32_t multi_probe,
     nbase_filter_fn filter,
     void *filter_ctx,
+    lsh_search_scratch_t *scratch,
     nbase_result_t *out_results,
     uint32_t *out_count) {
   if (dim != lsh->dim) {
@@ -730,12 +740,33 @@ static nbase_status_t lsh_search_filtered_unlocked(
     return ip_st;
   }
 
-  uint8_t *seen = calloc((size_t)lsh->store->slot_count, sizeof(uint8_t));
-  if (!seen) {
-    return NBASE_ERR_NOMEM;
+  uint32_t slot_count = lsh->store->slot_count;
+  uint32_t *local_seen = NULL;
+  uint32_t *seen_gen = NULL;
+  uint32_t gen = 1U;
+  nbase_heap_t local_topk;
+  nbase_heap_t *topk = NULL;
+  bool use_scratch = (scratch != NULL && scratch->seen_gen != NULL && scratch->seen_cap >= slot_count);
+
+  if (use_scratch) {
+    scratch->gen++;
+    if (scratch->gen == 0U) {
+      memset(scratch->seen_gen, 0, (size_t)scratch->seen_cap * sizeof(uint32_t));
+      scratch->gen = 1U;
+    }
+    scratch->topk.len = 0U;
+    seen_gen = scratch->seen_gen;
+    gen = scratch->gen;
+    topk = &scratch->topk;
+  } else {
+    local_seen = calloc((size_t)slot_count, sizeof(uint32_t));
+    if (!local_seen) {
+      return NBASE_ERR_NOMEM;
+    }
+    nbase_heap_init(&local_topk, true);
+    seen_gen = local_seen;
+    topk = &local_topk;
   }
-  nbase_heap_t topk;
-  nbase_heap_init(&topk, true);
 
   lsh_bit_margin_t margins[NBASE_LSH_MAX_BITS];
   nbase_dist_fn dist_fn = nbase_get_distance_fn(lsh->metric);
@@ -756,10 +787,10 @@ static nbase_status_t lsh_search_filtered_unlocked(
       const lsh_bucket_t *b = &lsh->buckets[(size_t)t * (size_t)lsh->num_buckets + h];
       for (uint32_t i = 0U; i < b->len; i++) {
         uint32_t slot = b->slots[i];
-        if (slot >= lsh->store->slot_count || seen[slot] != 0U) {
+        if (slot >= slot_count || seen_gen[slot] == gen) {
           continue;
         }
-        seen[slot] = 1U;
+        seen_gen[slot] = gen;
         if (lsh->store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
           continue;
         }
@@ -768,32 +799,39 @@ static nbase_status_t lsh_search_filtered_unlocked(
         }
 
         float d = dist_fn(query, nbase_store_get_vector(lsh->store, slot), dim);
+        if (use_radius && d > max_distance) {
+          continue;
+        }
         nbase_heap_item_t item = {slot, d};
-        if (topk.len < k) {
-          if (!nbase_heap_push(&topk, item)) {
-            nbase_heap_free(&topk);
-            free(seen);
+        if (topk->len < k) {
+          if (!nbase_heap_push(topk, item)) {
+            if (!use_scratch) {
+              nbase_heap_free(&local_topk);
+              free(local_seen);
+            }
             return NBASE_ERR_NOMEM;
           }
-        } else if (topk.len > 0U && nbase_heap_higher(true, topk.data[0], item)) {
-          (void)nbase_heap_pop(&topk);
-          (void)nbase_heap_push(&topk, item);
+        } else if (topk->len > 0U && nbase_heap_higher(true, topk->data[0], item)) {
+          (void)nbase_heap_pop(topk);
+          (void)nbase_heap_push(topk, item);
         }
       }
     }
   }
 
-  uint32_t nres = (uint32_t)topk.len;
+  uint32_t nres = (uint32_t)topk->len;
   for (uint32_t i = 0U; i < nres; i++) {
-    nbase_heap_item_t item = nbase_heap_pop(&topk);
+    nbase_heap_item_t item = nbase_heap_pop(topk);
     out_results[nres - 1U - i].id = lsh->store->ids[item.slot];
     out_results[nres - 1U - i].distance = item.dist;
   }
   qsort(out_results, nres, sizeof(nbase_result_t), nbase_cmp_result_asc);
   *out_count = nres;
 
-  nbase_heap_free(&topk);
-  free(seen);
+  if (!use_scratch) {
+    nbase_heap_free(&local_topk);
+    free(local_seen);
+  }
   return NBASE_OK;
 }
 
@@ -813,8 +851,43 @@ nbase_status_t nbase_lsh_search_filtered(
   *out_count = 0U;
   nbase_lsh_t *mutable_lsh = (nbase_lsh_t *)(uintptr_t)lsh;
   pthread_rwlock_rdlock(&mutable_lsh->rwlock);
-  nbase_status_t st = lsh_search_filtered_unlocked(
-      lsh, query, dim, k, multi_probe, filter, filter_ctx, out_results, out_count);
+  nbase_status_t st = lsh_search_core_unlocked(
+      lsh, query, dim, k, false, 0.0f, multi_probe, filter, filter_ctx, NULL, out_results, out_count);
+  pthread_rwlock_unlock(&mutable_lsh->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_lsh_search_radius(
+    const nbase_lsh_t *lsh,
+    const float *query,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t multi_probe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!lsh || !query || !out_count || !isfinite(max_distance) ||
+      (max_results > 0U && !out_results)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+  nbase_lsh_t *mutable_lsh = (nbase_lsh_t *)(uintptr_t)lsh;
+  pthread_rwlock_rdlock(&mutable_lsh->rwlock);
+  nbase_status_t st = lsh_search_core_unlocked(
+      lsh,
+      query,
+      dim,
+      max_results,
+      true,
+      max_distance,
+      multi_probe,
+      filter,
+      filter_ctx,
+      NULL,
+      out_results,
+      out_count);
   pthread_rwlock_unlock(&mutable_lsh->rwlock);
   return st;
 }
@@ -844,6 +917,12 @@ typedef struct lsh_batch_ctx {
 
 static void *lsh_search_batch_worker(void *raw) {
   lsh_batch_ctx_t *ctx = (lsh_batch_ctx_t *)raw;
+  lsh_search_scratch_t scratch;
+  scratch.seen_cap = ctx->lsh->store->slot_count;
+  scratch.seen_gen = (scratch.seen_cap > 0U) ? calloc((size_t)scratch.seen_cap, sizeof(uint32_t)) : NULL;
+  scratch.gen = 0U;
+  nbase_heap_init(&scratch.topk, true);
+
   while (true) {
     if (atomic_load_explicit(&ctx->first_err, memory_order_acquire) != (int)NBASE_OK) {
       break;
@@ -853,14 +932,17 @@ static void *lsh_search_batch_worker(void *raw) {
       break;
     }
     uint32_t got = 0U;
-    nbase_status_t st = lsh_search_filtered_unlocked(
+    nbase_status_t st = lsh_search_core_unlocked(
         ctx->lsh,
         ctx->queries + (size_t)q * (size_t)ctx->lsh->dim,
         ctx->lsh->dim,
         ctx->k,
+        false,
+        0.0f,
         ctx->multi_probe,
         NULL,
         NULL,
+        &scratch,
         ctx->out_results + (size_t)q * (size_t)ctx->k,
         &got);
     ctx->out_counts[q] = got;
@@ -870,6 +952,9 @@ static void *lsh_search_batch_worker(void *raw) {
       break;
     }
   }
+
+  nbase_heap_free(&scratch.topk);
+  free(scratch.seen_gen);
   return NULL;
 }
 

@@ -798,7 +798,7 @@ static void bench_batch_threads_and_pq(void) {
     nbase_edge_t *g_edges = NULL;
     uint64_t g_ecnt = 0ULL;
     uint64_t g0 = now_ns();
-    (void)nbase_extract_relationships(cdb, 5U, 2.0f, &g_edges, &g_ecnt);
+    (void)nbase_extract_relationships(cdb, 5U, 12.0f, &g_edges, &g_ecnt);
     uint64_t g1 = now_ns();
     nbase_free_edges(g_edges);
     printf("  graph_extract(N=2000, k=5)  time=%.2f ms  edges=%llu\n",
