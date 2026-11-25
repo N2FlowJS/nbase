@@ -64,6 +64,34 @@ typedef struct batch_worker_ctx {
   atomic_int first_err;
 } batch_worker_ctx_t;
 
+typedef struct text_batch_worker_ctx {
+  const nbase_db_t *db;
+  const char *const *queries;
+  uint32_t query_count;
+  uint32_t k;
+  const nbase_meta_filter_t *meta_filter;
+  nbase_scored_id_t *out_results;
+  uint32_t *out_counts;
+  atomic_uint next_idx;
+  atomic_int first_err;
+} text_batch_worker_ctx_t;
+
+typedef struct hybrid_batch_worker_ctx {
+  const nbase_db_t *db;
+  const float *query_vectors;
+  uint32_t dim;
+  const char *const *query_texts;
+  uint32_t query_count;
+  uint32_t k;
+  float alpha;
+  float rrf_k;
+  nbase_search_opts_t opts;
+  nbase_scored_id_t *out_results;
+  uint32_t *out_counts;
+  atomic_uint next_idx;
+  atomic_int first_err;
+} hybrid_batch_worker_ctx_t;
+
 static bool combined_filter_cb(uint64_t id, void *raw_ctx) {
   const combined_filter_ctx_t *ctx = (const combined_filter_ctx_t *)raw_ctx;
   if (!nbase_meta_matches(ctx->meta, id, ctx->meta_filter)) {
@@ -93,7 +121,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.11.0";
+  return "1.12.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -1666,6 +1694,56 @@ nbase_status_t nbase_delete_text(nbase_db_t *db, uint64_t id) {
   return st;
 }
 
+nbase_status_t nbase_delete_text_batch(
+    nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t *out_deleted) {
+  if (!db || (count > 0U && !ids)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (out_deleted != NULL) {
+    *out_deleted = 0U;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pthread_rwlock_wrlock(&db->rwlock);
+  nbase_status_t st = NBASE_OK;
+  uint32_t deleted = 0U;
+  if (db->store->mmap_backed) {
+    st = NBASE_ERR_UNSUPPORTED;
+  } else if (db->bm25 != NULL) {
+    for (uint32_t i = 0U; i < count; i++) {
+      if (!nbase_store_find_slot(db->store, ids[i], NULL)) {
+        continue;
+      }
+      nbase_status_t ds = nbase_bm25_delete(db->bm25, ids[i]);
+      if (ds == NBASE_ERR_NOT_FOUND) {
+        continue;
+      }
+      if (ds != NBASE_OK) {
+        st = ds;
+        break;
+      }
+      if (db->wal != NULL) {
+        ds = nbase_wal_append_id(db->wal, NBASE_WAL_OP_DELETE_TEXT, ids[i]);
+        if (ds != NBASE_OK) {
+          st = ds;
+          break;
+        }
+      }
+      deleted++;
+    }
+  }
+  pthread_rwlock_unlock(&db->rwlock);
+  if (out_deleted != NULL) {
+    *out_deleted = deleted;
+  }
+  return st;
+}
+
 static nbase_status_t db_search_unlocked(
     const nbase_db_t *db,
     const float *query,
@@ -2051,23 +2129,15 @@ nbase_status_t nbase_query_meta(
   return NBASE_OK;
 }
 
-nbase_status_t nbase_search_text(
+static nbase_status_t db_search_text_unlocked(
     const nbase_db_t *db,
     const char *query,
     uint32_t k,
     const nbase_meta_filter_t *meta_filter,
     nbase_scored_id_t *out_results,
     uint32_t *out_count) {
-  if (!db || !query || !out_count || (k > 0U && !out_results)) {
-    return NBASE_ERR_INVALID_ARG;
-  }
   *out_count = 0U;
-
-  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
-  pthread_rwlock_rdlock(&mutable_db->rwlock);
-
   if (k == 0U || db->bm25 == NULL) {
-    pthread_rwlock_unlock(&mutable_db->rwlock);
     return NBASE_OK;
   }
 
@@ -2083,10 +2153,260 @@ nbase_status_t nbase_search_text(
     filter_ctx = &combined;
   }
 
-  nbase_status_t st = nbase_bm25_search_filtered(
+  return nbase_bm25_search_filtered(
       db->bm25, query, k, filter, filter_ctx, out_results, out_count);
+}
+
+static void *text_batch_worker(void *raw) {
+  text_batch_worker_ctx_t *ctx = (text_batch_worker_ctx_t *)raw;
+  while (true) {
+    if (atomic_load_explicit(&ctx->first_err, memory_order_relaxed) != (int)NBASE_OK) {
+      break;
+    }
+    uint32_t idx = atomic_fetch_add_explicit(&ctx->next_idx, 1U, memory_order_relaxed);
+    if (idx >= ctx->query_count) {
+      break;
+    }
+    nbase_scored_id_t *dst =
+        (ctx->k > 0U) ? (ctx->out_results + (size_t)idx * (size_t)ctx->k) : NULL;
+    nbase_status_t st = db_search_text_unlocked(
+        ctx->db, ctx->queries[idx], ctx->k, ctx->meta_filter, dst, &ctx->out_counts[idx]);
+    if (st != NBASE_OK) {
+      int expected = (int)NBASE_OK;
+      (void)atomic_compare_exchange_strong_explicit(
+          &ctx->first_err, &expected, (int)st, memory_order_relaxed, memory_order_relaxed);
+      break;
+    }
+  }
+  return NULL;
+}
+
+nbase_status_t nbase_search_text(
+    const nbase_db_t *db,
+    const char *query,
+    uint32_t k,
+    const nbase_meta_filter_t *meta_filter,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_count) {
+  if (!db || !query || !out_count || (k > 0U && !out_results)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+  nbase_status_t st = db_search_text_unlocked(db, query, k, meta_filter, out_results, out_count);
   pthread_rwlock_unlock(&mutable_db->rwlock);
   return st;
+}
+
+nbase_status_t nbase_search_text_batch(
+    const nbase_db_t *db,
+    const char *const *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t num_threads,
+    const nbase_meta_filter_t *meta_filter,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts) {
+  if (!db || (query_count > 0U && (!queries || !out_counts || (k > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (query_count == 0U) {
+    return NBASE_OK;
+  }
+  for (uint32_t i = 0U; i < query_count; i++) {
+    if (!queries[i]) {
+      return NBASE_ERR_INVALID_ARG;
+    }
+  }
+  memset(out_counts, 0, (size_t)query_count * sizeof(uint32_t));
+
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+  if (k == 0U || db->bm25 == NULL) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_OK;
+  }
+
+  uint32_t eff_threads = (num_threads == 0U) ? 4U : num_threads;
+  if (eff_threads > query_count) {
+    eff_threads = query_count;
+  }
+  if (eff_threads > 64U) {
+    eff_threads = 64U;
+  }
+
+  if (eff_threads <= 1U) {
+    nbase_status_t st = NBASE_OK;
+    for (uint32_t i = 0U; i < query_count; i++) {
+      st = db_search_text_unlocked(
+          db,
+          queries[i],
+          k,
+          meta_filter,
+          out_results + (size_t)i * (size_t)k,
+          &out_counts[i]);
+      if (st != NBASE_OK) {
+        break;
+      }
+    }
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return st;
+  }
+
+  text_batch_worker_ctx_t ctx;
+  ctx.db = db;
+  ctx.queries = queries;
+  ctx.query_count = query_count;
+  ctx.k = k;
+  ctx.meta_filter = meta_filter;
+  ctx.out_results = out_results;
+  ctx.out_counts = out_counts;
+  atomic_init(&ctx.next_idx, 0U);
+  atomic_init(&ctx.first_err, (int)NBASE_OK);
+
+  pthread_t tids[64];
+  uint32_t spawned = 0U;
+  for (uint32_t t = 0U; t < eff_threads; t++) {
+    if (pthread_create(&tids[t], NULL, text_batch_worker, &ctx) != 0) {
+      break;
+    }
+    spawned++;
+  }
+  if (spawned < eff_threads) {
+    (void)text_batch_worker(&ctx);
+  }
+  for (uint32_t t = 0U; t < spawned; t++) {
+    pthread_join(tids[t], NULL);
+  }
+
+  nbase_status_t st = (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_relaxed);
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  return st;
+}
+
+static nbase_status_t db_search_hybrid_unlocked(
+    const nbase_db_t *db,
+    const float *query_vec,
+    uint32_t dim,
+    const char *query_text,
+    uint32_t k,
+    float alpha,
+    float rrf_k,
+    const nbase_search_opts_t *eff,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_count) {
+  bool has_vec = (query_vec != NULL);
+  bool has_text = (query_text != NULL && query_text[0] != '\0');
+  *out_count = 0U;
+  if (!has_vec && !has_text) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+
+  if (has_vec) {
+    if (dim != db->store->dim) {
+      return NBASE_ERR_DIM_MISMATCH;
+    }
+    if (!nbase_vec_is_finite(query_vec, dim)) {
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+  if (k == 0U) {
+    return NBASE_OK;
+  }
+
+  uint32_t fetch_k = (k <= 2500U) ? (k * 4U) : 10000U;
+  if (fetch_k < 64U) {
+    fetch_k = 64U;
+  }
+
+  nbase_result_t *vec_res = has_vec ? malloc((size_t)fetch_k * sizeof(nbase_result_t)) : NULL;
+  bool run_text = (has_text && db->bm25 != NULL);
+  nbase_scored_id_t *text_res =
+      run_text ? malloc((size_t)fetch_k * sizeof(nbase_scored_id_t)) : NULL;
+  if ((has_vec && !vec_res) || (run_text && !text_res)) {
+    free(vec_res);
+    free(text_res);
+    return NBASE_ERR_NOMEM;
+  }
+
+  nbase_status_t st = NBASE_OK;
+  uint32_t vec_got = 0U;
+  uint32_t text_got = 0U;
+
+  if (has_vec) {
+    st = db_search_unlocked(db, query_vec, dim, fetch_k, eff, vec_res, &vec_got);
+  }
+  if (st == NBASE_OK && run_text) {
+    combined_filter_ctx_t combined;
+    nbase_filter_fn filter = NULL;
+    void *filter_ctx = NULL;
+    if ((eff->meta_filter != NULL && eff->meta_filter->count > 0U) || eff->filter != NULL) {
+      combined.meta = db->meta;
+      combined.meta_filter = eff->meta_filter;
+      combined.user_filter = eff->filter;
+      combined.user_ctx = eff->filter_ctx;
+      filter = combined_filter_cb;
+      filter_ctx = &combined;
+    }
+    st = nbase_bm25_search_filtered(
+        db->bm25, query_text, fetch_k, filter, filter_ctx, text_res, &text_got);
+  }
+
+  if (st == NBASE_OK) {
+    st = nbase_hybrid_rrf(
+        vec_got > 0U ? vec_res : NULL,
+        vec_got,
+        text_got > 0U ? text_res : NULL,
+        text_got,
+        alpha,
+        rrf_k,
+        k,
+        out_results,
+        out_count);
+  }
+
+  free(vec_res);
+  free(text_res);
+  return st;
+}
+
+static void *hybrid_batch_worker(void *raw) {
+  hybrid_batch_worker_ctx_t *ctx = (hybrid_batch_worker_ctx_t *)raw;
+  while (true) {
+    if (atomic_load_explicit(&ctx->first_err, memory_order_relaxed) != (int)NBASE_OK) {
+      break;
+    }
+    uint32_t idx = atomic_fetch_add_explicit(&ctx->next_idx, 1U, memory_order_relaxed);
+    if (idx >= ctx->query_count) {
+      break;
+    }
+    const float *qv = ctx->query_vectors
+                          ? (ctx->query_vectors + (size_t)idx * (size_t)ctx->dim)
+                          : NULL;
+    const char *qt = ctx->query_texts ? ctx->query_texts[idx] : NULL;
+    nbase_scored_id_t *dst =
+        (ctx->k > 0U) ? (ctx->out_results + (size_t)idx * (size_t)ctx->k) : NULL;
+    nbase_status_t st = db_search_hybrid_unlocked(
+        ctx->db,
+        qv,
+        ctx->dim,
+        qt,
+        ctx->k,
+        ctx->alpha,
+        ctx->rrf_k,
+        &ctx->opts,
+        dst,
+        &ctx->out_counts[idx]);
+    if (st != NBASE_OK) {
+      int expected = (int)NBASE_OK;
+      (void)atomic_compare_exchange_strong_explicit(
+          &ctx->first_err, &expected, (int)st, memory_order_relaxed, memory_order_relaxed);
+      break;
+    }
+  }
+  return NULL;
 }
 
 nbase_status_t nbase_search_hybrid(
@@ -2111,77 +2431,104 @@ nbase_status_t nbase_search_hybrid(
   nbase_search_opts_t eff = opts ? *opts : nbase_search_opts_default();
   nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
   pthread_rwlock_rdlock(&mutable_db->rwlock);
+  nbase_status_t st = db_search_hybrid_unlocked(
+      db, query_vec, dim, query_text, k, alpha, rrf_k, &eff, out_results, out_count);
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  return st;
+}
 
-  if (has_vec) {
-    if (dim != db->store->dim) {
-      pthread_rwlock_unlock(&mutable_db->rwlock);
-      return NBASE_ERR_DIM_MISMATCH;
-    }
-    if (!nbase_vec_is_finite(query_vec, dim)) {
-      pthread_rwlock_unlock(&mutable_db->rwlock);
-      return NBASE_ERR_INVALID_VECTOR;
-    }
+nbase_status_t nbase_search_hybrid_batch(
+    const nbase_db_t *db,
+    const float *query_vectors,
+    uint32_t dim,
+    const char *const *query_texts,
+    uint32_t query_count,
+    uint32_t k,
+    float alpha,
+    float rrf_k,
+    const nbase_search_opts_t *opts,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts) {
+  if (!db || isnan(alpha) || alpha < 0.0f || alpha > 1.0f ||
+      !isfinite(rrf_k) || rrf_k <= 0.0f ||
+      (query_count > 0U &&
+       (!out_counts || (!query_vectors && !query_texts) || (k > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
   }
-  if (k == 0U) {
-    pthread_rwlock_unlock(&mutable_db->rwlock);
+  if (query_count == 0U) {
     return NBASE_OK;
   }
-
-  uint32_t fetch_k = (k <= 2500U) ? (k * 4U) : 10000U;
-  if (fetch_k < 64U) {
-    fetch_k = 64U;
-  }
-
-  nbase_result_t *vec_res = has_vec ? malloc((size_t)fetch_k * sizeof(nbase_result_t)) : NULL;
-  bool run_text = (has_text && db->bm25 != NULL);
-  nbase_scored_id_t *text_res = run_text ? malloc((size_t)fetch_k * sizeof(nbase_scored_id_t)) : NULL;
-  if ((has_vec && !vec_res) || (run_text && !text_res)) {
-    free(vec_res);
-    free(text_res);
-    pthread_rwlock_unlock(&mutable_db->rwlock);
-    return NBASE_ERR_NOMEM;
-  }
-
-  nbase_status_t st = NBASE_OK;
-  uint32_t vec_got = 0U;
-  uint32_t text_got = 0U;
-
-  if (has_vec) {
-    st = db_search_unlocked(db, query_vec, dim, fetch_k, &eff, vec_res, &vec_got);
-  }
-  if (st == NBASE_OK && run_text) {
-    combined_filter_ctx_t combined;
-    nbase_filter_fn filter = NULL;
-    void *filter_ctx = NULL;
-    if ((eff.meta_filter != NULL && eff.meta_filter->count > 0U) || eff.filter != NULL) {
-      combined.meta = db->meta;
-      combined.meta_filter = eff.meta_filter;
-      combined.user_filter = eff.filter;
-      combined.user_ctx = eff.filter_ctx;
-      filter = combined_filter_cb;
-      filter_ctx = &combined;
+  if (query_vectors == NULL) {
+    for (uint32_t i = 0U; i < query_count; i++) {
+      if (!query_texts[i] || query_texts[i][0] == '\0') {
+        return NBASE_ERR_INVALID_ARG;
+      }
     }
-    st = nbase_bm25_search_filtered(
-        db->bm25, query_text, fetch_k, filter, filter_ctx, text_res, &text_got);
+  }
+  memset(out_counts, 0, (size_t)query_count * sizeof(uint32_t));
+
+  nbase_search_opts_t eff = opts ? *opts : nbase_search_opts_default();
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+
+  if (query_vectors != NULL && dim != db->store->dim) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return NBASE_ERR_DIM_MISMATCH;
   }
 
+  if (eff.num_threads <= 1U || query_count <= 1U) {
+    nbase_status_t st = NBASE_OK;
+    for (uint32_t i = 0U; i < query_count; i++) {
+      const float *qv = query_vectors ? (query_vectors + (size_t)i * (size_t)dim) : NULL;
+      const char *qt = query_texts ? query_texts[i] : NULL;
+      nbase_scored_id_t *dst = (k > 0U) ? (out_results + (size_t)i * (size_t)k) : NULL;
+      st = db_search_hybrid_unlocked(
+          db, qv, dim, qt, k, alpha, rrf_k, &eff, dst, &out_counts[i]);
+      if (st != NBASE_OK) {
+        break;
+      }
+    }
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    return st;
+  }
+
+  uint32_t workers = (eff.num_threads < query_count) ? eff.num_threads : query_count;
+  if (workers > 64U) {
+    workers = 64U;
+  }
+
+  hybrid_batch_worker_ctx_t ctx;
+  ctx.db = db;
+  ctx.query_vectors = query_vectors;
+  ctx.dim = dim;
+  ctx.query_texts = query_texts;
+  ctx.query_count = query_count;
+  ctx.k = k;
+  ctx.alpha = alpha;
+  ctx.rrf_k = rrf_k;
+  ctx.opts = eff;
+  ctx.out_results = out_results;
+  ctx.out_counts = out_counts;
+  atomic_init(&ctx.next_idx, 0U);
+  atomic_init(&ctx.first_err, (int)NBASE_OK);
+
+  pthread_t tids[64];
+  uint32_t spawned = 0U;
+  for (uint32_t t = 0U; t < workers; t++) {
+    if (pthread_create(&tids[t], NULL, hybrid_batch_worker, &ctx) != 0) {
+      break;
+    }
+    spawned++;
+  }
+  if (spawned < workers) {
+    (void)hybrid_batch_worker(&ctx);
+  }
+  for (uint32_t t = 0U; t < spawned; t++) {
+    pthread_join(tids[t], NULL);
+  }
+
+  nbase_status_t st = (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_relaxed);
   pthread_rwlock_unlock(&mutable_db->rwlock);
-
-  if (st == NBASE_OK) {
-    st = nbase_hybrid_rrf(
-        vec_got > 0U ? vec_res : NULL,
-        vec_got,
-        text_got > 0U ? text_res : NULL,
-        text_got,
-        alpha,
-        rrf_k,
-        k,
-        out_results,
-        out_count);
-  }
-
-  free(vec_res);
-  free(text_res);
   return st;
 }
 

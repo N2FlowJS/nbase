@@ -1953,14 +1953,14 @@ static void test_http_server_text_and_hybrid_batch_search(void) {
   uint16_t port = nbase_http_server_port(srv);
 
   http_resp_t r;
-  /* 1. POST /api/search/text/batch */
+  /* 1. POST /api/search/text/batch (with threads parameter) */
   ASSERT_TRUE(http_req(
       port,
       "POST",
       "/api/search/text/batch",
       NULL,
       "{\"queries\":[\"simd hnsw\",\"wal compact\",\"hybrid bm25\"],"
-      "\"k\":2,\"filters\":{\"group\":\"alpha\"},\"includeMetadata\":true,\"includeText\":true}",
+      "\"k\":2,\"threads\":4,\"filters\":{\"group\":\"alpha\"},\"includeMetadata\":true,\"includeText\":true}",
       &r));
   ASSERT_EQ_I64(r.status, 200);
   ASSERT_TRUE(strstr(r.body, "\"queryCount\":3") != NULL);
@@ -1968,6 +1968,16 @@ static void test_http_server_text_and_hybrid_batch_search(void) {
   ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
   ASSERT_TRUE(strstr(r.body, "\"id\":20") == NULL);
   ASSERT_TRUE(strstr(r.body, "\"text\":\"simd vector hnsw kernel\"") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/text/batch",
+      NULL,
+      "{\"queries\":[\"simd hnsw\"],\"threads\":999}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
   free(r.body);
 
   ASSERT_TRUE(http_req(port, "GET", "/api/search/text/batch", NULL, NULL, &r));
@@ -1978,7 +1988,7 @@ static void test_http_server_text_and_hybrid_batch_search(void) {
   ASSERT_EQ_I64(r.status, 400);
   free(r.body);
 
-  /* 2. POST /api/search/hybrid/batch */
+  /* 2. POST /api/search/hybrid/batch (mixed + uniform parallel fast path) */
   ASSERT_TRUE(http_req(
       port,
       "POST",
@@ -1998,12 +2008,54 @@ static void test_http_server_text_and_hybrid_batch_search(void) {
   ASSERT_TRUE(strstr(r.body, "\"vector\":[") != NULL);
   free(r.body);
 
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/hybrid/batch",
+      NULL,
+      "{\"queries\":["
+      "{\"query\":[1,0,0],\"text\":\"simd\"},"
+      "{\"query\":[0,0,1],\"text\":\"hybrid\"}"
+      "],\"k\":2,\"threads\":2,\"alpha\":0.5,\"rrfK\":60}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"queryCount\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") != NULL);
+  free(r.body);
+
   ASSERT_TRUE(http_req(port, "DELETE", "/api/search/hybrid/batch", NULL, NULL, &r));
   ASSERT_EQ_I64(r.status, 405);
   free(r.body);
 
   ASSERT_TRUE(http_req(port, "POST", "/api/search/hybrid/batch", NULL, "{\"queries\":[{}]}", &r));
   ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  /* 3. DELETE /api/vectors/text & POST /api/vectors/text/delete */
+  ASSERT_TRUE(http_req(port, "PUT", "/api/vectors/text", NULL, "{\"ids\":[10]}", &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "DELETE", "/api/vectors/text", NULL, "{\"ids\":[20,999]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"deleted\":1") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/text/delete", NULL, "{\"ids\":[30]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"deleted\":1") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/text/batch",
+      NULL,
+      "{\"queries\":[\"hybrid bm25\"],\"k\":2}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") == NULL);
   free(r.body);
 
   nbase_http_server_stop(srv);

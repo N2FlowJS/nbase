@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-25
+
+Single-partition parallel batch text/hybrid search & text deletion (`nbase_search_text_batch`, `nbase_search_hybrid_batch`, `nbase_delete_text_batch`), persistent pthread generation-barrier K-Means++ training (`nbase_kmeans_train_mt`), C++17 `nbase::Database` batch parity, HTTP `DELETE /api/vectors/text` + multi-threaded batch search, and CLI `delete-text-batch` / `search-text-batch` / `search-hybrid-batch`.
+
+### Added
+- **Core C11 Engine & C++17 Parity (`include/nbase.h`, `src/nbase.c`, `include/nbase.hpp`)**:
+  - Added `nbase_delete_text_batch`, single-`rdlock` parallel `nbase_search_text_batch`, and single-`rdlock` parallel `nbase_search_hybrid_batch`, refactoring `nbase_search_text` and `nbase_search_hybrid` onto shared internal helpers (`db_search_text_unlocked`, `db_search_hybrid_unlocked`).
+  - Added `nbase::Database::{search_batch, delete_text_batch, search_text_batch, search_hybrid_batch}` in `include/nbase.hpp` sharing a `detail::unpack_batch_results` helper.
+- **Deterministic Parallel K-Means++ (`src/kmeans.c`, `src/pq.c`, `src/nbase_internal.h`, `bench/bench_nbase.c`)**:
+  - Added `nbase_kmeans_train_mt` with a persistent generation-barrier `pthreads` worker pool for parallel Lloyd assignment and strictly deterministic sequential `0..count-1` centroid accumulation, while keeping multi-subvector `nbase_pq_train` free of nested thread oversubscription.
+  - Added `search_text_batch(4t)` and `search_hybrid_batch(4t)` measurements to `bench/bench_nbase.c`.
+- **HTTP/1.1 Server & CLI Enhancements (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `DELETE /api/vectors/text` and `POST /api/vectors/text/delete` using `nbase_delete_text_batch` (sharing `parse_json_u64_id_array` with `handle_delete_vectors`).
+  - Upgraded `POST /api/search/text/batch` and `POST /api/search/hybrid/batch` to accept `"threads": 0..64` and dispatch via parallel `nbase_search_text_batch` / `nbase_search_hybrid_batch`.
+  - Added `nbase-cli` commands `delete-text-batch`, `search-text-batch`, and `search-hybrid-batch`.
+- **Tests (`tests/test_db.c`, `tests/test_meta.c`, `tests/test_pq.c`, `tests/test_concurrency.c`, `tests/test_server.c`)**:
+  - Added `test_db_text_and_hybrid_batch_search_and_delete`, `test_kmeans_parallel_determinism_tsan`, concurrent TSan stress coverage for batch text/hybrid search & deletion, and HTTP route tests for `DELETE /api/vectors/text` + threaded batch search.
+
 ## [1.11.0] - 2026-11-25
 
 Thread-safe BM25 concurrency, O(N log k) top-k heap & multi-threaded batch search/lifecycle parity (`index_batch`, `contains`, `list_ids`, `compact`, `search_batch`), AVX2 `bq_encode` + hardware 4-row `popcnt` Hamming kernels, HTTP `/api/search/{text,hybrid}/batch`, and CLI `patch` & `search-batch`.

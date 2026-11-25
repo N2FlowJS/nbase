@@ -288,8 +288,42 @@ static void test_pq_train_parallel_determinism_tsan(void) {
   free(vecs);
 }
 
+static void test_kmeans_parallel_determinism_tsan(void) {
+  const uint32_t count = 512U;
+  const uint32_t dim = 32U;
+  const uint32_t k = 32U; /* 512 * 32 * 32 = 524288 >= 262144 exercises MT K-Means pool */
+
+  float *vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+  float *c1 = malloc((size_t)k * (size_t)dim * sizeof(float));
+  float *c2 = malloc((size_t)k * (size_t)dim * sizeof(float));
+  uint32_t *a1 = malloc((size_t)count * sizeof(uint32_t));
+  uint32_t *a2 = malloc((size_t)count * sizeof(uint32_t));
+  ASSERT_TRUE(vecs != NULL && c1 != NULL && c2 != NULL && a1 != NULL && a2 != NULL);
+
+  test_fill_vectors(vecs, count, dim, 2026ULL);
+  for (uint32_t i = 0U; i < count; i++) {
+    uint32_t grp = i % k;
+    vecs[(size_t)i * dim] += (float)grp * 4.0f;
+  }
+
+  ASSERT_STATUS(nbase_kmeans_train(vecs, count, dim, k, 15U, 12345ULL, c1, a1), NBASE_OK);
+  ASSERT_STATUS(nbase_kmeans_train(vecs, count, dim, k, 15U, 12345ULL, c2, a2), NBASE_OK);
+
+  for (uint32_t i = 0U; i < (uint32_t)(k * dim); i++) {
+    ASSERT_NEAR(c1[i], c2[i], 0.0, 0.0);
+  }
+  ASSERT_TRUE(memcmp(a1, a2, (size_t)count * sizeof(uint32_t)) == 0);
+
+  free(a2);
+  free(a1);
+  free(c2);
+  free(c1);
+  free(vecs);
+}
+
 void test_pq_run(void) {
   RUN_TEST(test_kmeans_synthetic_clusters_and_edge_cases);
+  RUN_TEST(test_kmeans_parallel_determinism_tsan);
   RUN_TEST(test_pq_encode_decode_adc_and_persistence);
   RUN_TEST(test_pq_adc_distance_batch);
   RUN_TEST(test_pq_train_parallel_determinism_tsan);

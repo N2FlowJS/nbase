@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 11
+#define NBASE_VERSION_MINOR 12
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -226,8 +226,11 @@ nbase_status_t nbase_set_text(nbase_db_t *db, uint64_t id, const char *text);
 nbase_status_t nbase_set_text_batch(nbase_db_t *db, const uint64_t *ids, const char *const *texts, uint32_t count);
 nbase_status_t nbase_get_text(const nbase_db_t *db, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
 nbase_status_t nbase_delete_text(nbase_db_t *db, uint64_t id);
+nbase_status_t nbase_delete_text_batch(nbase_db_t *db, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_search_text(const nbase_db_t *db, const char *query, uint32_t k, const nbase_meta_filter_t *meta_filter, nbase_scored_id_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_search_text_batch(const nbase_db_t *db, const char *const *queries, uint32_t query_count, uint32_t k, uint32_t num_threads, const nbase_meta_filter_t *meta_filter, nbase_scored_id_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_search_hybrid(const nbase_db_t *db, const float *query_vec, uint32_t dim, const char *query_text, uint32_t k, float alpha, float rrf_k, const nbase_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_search_hybrid_batch(const nbase_db_t *db, const float *query_vectors, uint32_t dim, const char *const *query_texts, uint32_t query_count, uint32_t k, float alpha, float rrf_k, const nbase_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_counts);
 
 nbase_status_t nbase_rebuild_hnsw(nbase_db_t *db);
 nbase_status_t nbase_rebuild_hnsw_mt(nbase_db_t *db, uint32_t num_threads);

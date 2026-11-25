@@ -29,6 +29,22 @@ inline void check(nbase_status_t st) {
     throw Error(st);
   }
 }
+
+template <typename T>
+inline std::vector<std::vector<T>> unpack_batch_results(
+    const std::vector<T> &flat,
+    const std::vector<uint32_t> &counts,
+    uint32_t qcnt,
+    uint32_t k) {
+  std::vector<std::vector<T>> out(qcnt);
+  for (uint32_t q = 0U; q < qcnt; ++q) {
+    if (k > 0U && counts[q] > 0U) {
+      const T *row = flat.data() + static_cast<size_t>(q) * static_cast<size_t>(k);
+      out[q].assign(row, row + counts[q]);
+    }
+  }
+  return out;
+}
 }  // namespace detail
 
 inline std::vector<float> distance_batch(
@@ -272,6 +288,34 @@ class Database {
     return out;
   }
 
+  std::vector<std::vector<nbase_result_t>> search_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      uint32_t k,
+      const nbase_search_opts_t *opts = nullptr) const {
+    if (query_count == 0U) {
+      return {};
+    }
+    if (dim == 0U ||
+        queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<nbase_result_t> flat(
+        static_cast<size_t>(query_count) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_search_batch(
+        db_,
+        queries.data(),
+        query_count,
+        dim,
+        k,
+        opts,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, query_count, k);
+  }
+
   std::vector<uint64_t> query_meta(
       const nbase_meta_filter_t *filter, uint32_t limit) const {
     std::vector<uint64_t> ids(limit);
@@ -336,6 +380,16 @@ class Database {
     detail::check(nbase_delete_text(db_, id));
   }
 
+  uint32_t delete_text_batch(const std::vector<uint64_t> &ids) {
+    uint32_t deleted = 0U;
+    detail::check(nbase_delete_text_batch(
+        db_,
+        ids.empty() ? nullptr : ids.data(),
+        static_cast<uint32_t>(ids.size()),
+        &deleted));
+    return deleted;
+  }
+
   std::vector<nbase_scored_id_t> search_text(
       const std::string &query,
       uint32_t k,
@@ -351,6 +405,35 @@ class Database {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_scored_id_t>> search_text_batch(
+      const std::vector<std::string> &queries,
+      uint32_t k,
+      uint32_t num_threads = 0U,
+      const nbase_meta_filter_t *meta_filter = nullptr) const {
+    if (queries.empty()) {
+      return {};
+    }
+    uint32_t qcnt = static_cast<uint32_t>(queries.size());
+    std::vector<const char *> ptrs;
+    ptrs.reserve(qcnt);
+    for (const auto &q : queries) {
+      ptrs.push_back(q.c_str());
+    }
+    std::vector<nbase_scored_id_t> flat(
+        static_cast<size_t>(qcnt) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(qcnt, 0U);
+    detail::check(nbase_search_text_batch(
+        db_,
+        ptrs.data(),
+        qcnt,
+        k,
+        num_threads,
+        meta_filter,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, qcnt, k);
   }
 
   std::vector<nbase_scored_id_t> search_hybrid(
@@ -375,6 +458,55 @@ class Database {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_scored_id_t>> search_hybrid_batch(
+      const std::vector<float> &query_vectors,
+      uint32_t dim,
+      const std::vector<std::string> &query_texts,
+      uint32_t query_count,
+      uint32_t k,
+      float alpha = 0.5f,
+      float rrf_k = 60.0f,
+      const nbase_search_opts_t *opts = nullptr) const {
+    if (query_count == 0U) {
+      return {};
+    }
+    if (query_vectors.empty() && query_texts.empty()) {
+      throw Error(NBASE_ERR_INVALID_ARG);
+    }
+    if (!query_vectors.empty() &&
+        (dim == 0U ||
+         query_vectors.size() !=
+             static_cast<size_t>(query_count) * static_cast<size_t>(dim))) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<const char *> text_ptrs;
+    if (!query_texts.empty()) {
+      if (query_texts.size() != static_cast<size_t>(query_count)) {
+        throw Error(NBASE_ERR_INVALID_ARG);
+      }
+      text_ptrs.reserve(query_count);
+      for (const auto &t : query_texts) {
+        text_ptrs.push_back(t.c_str());
+      }
+    }
+    std::vector<nbase_scored_id_t> flat(
+        static_cast<size_t>(query_count) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_search_hybrid_batch(
+        db_,
+        query_vectors.empty() ? nullptr : query_vectors.data(),
+        dim,
+        text_ptrs.empty() ? nullptr : text_ptrs.data(),
+        query_count,
+        k,
+        alpha,
+        rrf_k,
+        opts,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, query_count, k);
   }
 
   void compact() { detail::check(nbase_compact(db_)); }

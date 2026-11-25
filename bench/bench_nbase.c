@@ -765,6 +765,35 @@ static void bench_batch_threads_and_pq(void) {
            (double)(rad1 - rad0) / (double)nqueries / 1e3,
            meta_batch_ms,
            text_batch_ms);
+
+    const uint32_t tb_n = 20U;
+    const char *tb_qs[20];
+    for (uint32_t q = 0U; q < tb_n; q++) {
+      tb_qs[q] = (q % 2U == 0U) ? "vector benchmark batch" : "text indexing doc";
+    }
+    nbase_scored_id_t *tb_res = malloc((size_t)tb_n * (size_t)k * sizeof(nbase_scored_id_t));
+    uint32_t *tb_cnts = calloc(tb_n, sizeof(uint32_t));
+    if (tb_res && tb_cnts) {
+      uint64_t stb0 = now_ns();
+      (void)nbase_search_text_batch(cdb, tb_qs, tb_n, k, 4U, NULL, tb_res, tb_cnts);
+      uint64_t stb1 = now_ns();
+      nbase_search_opts_t h_opts = nbase_search_opts_default();
+      h_opts.num_threads = 4U;
+      h_opts.skip_cache = true;
+      uint64_t shb0 = now_ns();
+      (void)nbase_search_hybrid_batch(
+          cdb, queries, dim, tb_qs, tb_n, k, 0.5f, 60.0f, &h_opts, tb_res, tb_cnts);
+      uint64_t shb1 = now_ns();
+      double tb_ms = (double)(stb1 - stb0) / 1e6;
+      double hb_ms = (double)(shb1 - shb0) / 1e6;
+      printf("  db_batch_search(20q, 4t)  text_batch=%.2f ms (%.0f QPS)  hybrid_batch=%.2f ms (%.0f QPS)\n",
+             tb_ms,
+             (tb_ms > 0.0) ? ((double)tb_n * 1000.0 / tb_ms) : 0.0,
+             hb_ms,
+             (hb_ms > 0.0) ? ((double)tb_n * 1000.0 / hb_ms) : 0.0);
+    }
+    free(tb_res);
+    free(tb_cnts);
     nbase_close(cdb);
   }
 

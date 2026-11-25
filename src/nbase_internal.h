@@ -529,9 +529,19 @@ uint64_t nbase_hnsw_memory_bytes(const nbase_hnsw_t *hnsw);
 /* bm25.c */
 uint64_t nbase_bm25_memory_bytes(const nbase_bm25_t *bm25);
 
-/* pq.c internal helpers */
+/* pq.c & kmeans.c internal helpers */
 const float *nbase_pq_codebooks(const nbase_pq_t *pq);
 nbase_status_t nbase_pq_create_from_codebooks(uint32_t dim, uint32_t num_subvectors, uint32_t num_centroids, const float *codebooks, nbase_pq_t **out_pq);
+nbase_status_t nbase_kmeans_train_mt(
+    const float *vectors,
+    uint32_t count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t max_iters,
+    uint64_t seed,
+    uint32_t num_threads,
+    float *out_centroids,
+    uint32_t *out_assignments);
 
 /* wal.c */
 nbase_status_t nbase_wal_open(const char *wal_path, nbase_wal_t **out_wal);

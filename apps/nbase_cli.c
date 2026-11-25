@@ -36,6 +36,7 @@ static void print_usage(const char *prog) {
       "  set-text <dir> <id> <text>\n"
       "  get-text <dir> <id>\n"
       "  delete-text <dir> <id>\n"
+      "  delete-text-batch <dir> <id1,id2,...>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]\n"
       "  search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>]\n"
       "  search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]\n"
@@ -45,13 +46,43 @@ static void print_usage(const char *prog) {
       "  communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]\n"
       "  search-text <dir> <query> [--k <K>] [--filter <json>]\n"
+      "  search-text-batch <dir> <file.ndjson|-> [--k <K>] [--threads <T>] [--filter <json>]\n"
       "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>]\n"
+      "  search-hybrid-batch <dir> <file.ndjson|-> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--threads <T>] [--filter <json>]\n"
       "  rebuild <dir> [--threads <T>]\n"
       "  compact <dir>\n"
       "  checkpoint <dir>\n"
       "  import <dir> <file.ndjson|-> [--upsert] [--threads <T>]\n"
       "  export <dir> [file.ndjson|-] [--ids <id1,id2,...>] [--filter <json>]\n",
       prog);
+}
+
+static char *cli_strdup(const char *s) {
+  size_t n = strlen(s) + 1U;
+  char *out = malloc(n);
+  if (out) {
+    memcpy(out, s, n);
+  }
+  return out;
+}
+
+static void cli_print_scored_batch_json(
+    uint32_t qcnt,
+    uint32_t k,
+    const nbase_scored_id_t *res,
+    const uint32_t *counts) {
+  printf("{\"queryCount\":%u,\"results\":[", qcnt);
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    printf(q == 0U ? "[" : ",[");
+    const nbase_scored_id_t *row = res + (size_t)q * (size_t)k;
+    for (uint32_t j = 0U; j < counts[q]; j++) {
+      printf(j == 0U ? "{\"id\":%llu,\"score\":%.7g}" : ",{\"id\":%llu,\"score\":%.7g}",
+             (unsigned long long)row[j].id,
+             (double)row[j].score);
+    }
+    printf("]");
+  }
+  printf("]}\n");
 }
 
 static int cmp_cli_u64_asc(const void *pa, const void *pb) {
@@ -1197,6 +1228,35 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  if (strcmp(cmd, "delete-text-batch") == 0) {
+    if (argc != 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t *ids = NULL;
+    uint32_t cnt = 0U;
+    if (!parse_u64_list_csv(argv[3], &ids, &cnt)) {
+      return 1;
+    }
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    uint32_t deleted = 0U;
+    if (st == NBASE_OK) {
+      st = nbase_delete_text_batch(db, ids, cnt, &deleted);
+    }
+    if (st == NBASE_OK) {
+      st = nbase_save(db, argv[2]);
+    }
+    free(ids);
+    nbase_close(db);
+    if (st != NBASE_OK) {
+      fprintf(stderr, "delete-text-batch failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    printf("{\"deleted\":%u}\n", deleted);
+    return 0;
+  }
+
   if (strcmp(cmd, "search-text") == 0) {
     if (argc < 4) {
       print_usage(argv[0]);
@@ -1258,6 +1318,179 @@ int main(int argc, char **argv) {
       printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].score);
     }
     free(res);
+    return 0;
+  }
+
+  if (strcmp(cmd, "search-text-batch") == 0) {
+    if (argc < 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint32_t k = 10U;
+    uint32_t num_threads = 0U;
+    const char *flt_json = NULL;
+    for (int i = 4; i < argc; i++) {
+      if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &num_threads) || num_threads > 64U) {
+          fprintf(stderr, "Invalid --threads\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+    }
+
+    FILE *fp = (strcmp(argv[3], "-") == 0) ? stdin : fopen(argv[3], "r");
+    if (!fp) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "Failed to open query file %s\n", argv[3]);
+      return 1;
+    }
+
+    uint32_t cap = 32U;
+    uint32_t qcnt = 0U;
+    char **queries = malloc((size_t)cap * sizeof(char *));
+    char *line = NULL;
+    size_t line_cap = 0U;
+    ssize_t nread;
+    bool ok = (queries != NULL);
+
+    while (ok && (nread = getline(&line, &line_cap, fp)) >= 0) {
+      size_t len = (size_t)nread;
+      while (len > 0U && (line[len - 1U] == '\n' || line[len - 1U] == '\r')) {
+        len--;
+      }
+      line[len] = '\0';
+      const char *trim = line;
+      while (*trim != '\0' && isspace((unsigned char)*trim)) {
+        trim++;
+      }
+      if (*trim == '\0') {
+        continue;
+      }
+      nbase_json_t *qroot = NULL;
+      if (nbase_json_parse(line, len, &qroot) != NBASE_OK) {
+        nbase_json_free(qroot);
+        fprintf(stderr, "Invalid JSON query line\n");
+        ok = false;
+        break;
+      }
+      const nbase_json_t *jstr = NULL;
+      if (qroot->type == NBASE_JSON_STRING) {
+        jstr = qroot;
+      } else if (qroot->type == NBASE_JSON_OBJECT) {
+        jstr = nbase_json_obj_get(qroot, "query");
+        if (!jstr) {
+          jstr = nbase_json_obj_get(qroot, "text");
+        }
+      }
+      if (!jstr || jstr->type != NBASE_JSON_STRING || qcnt >= 10000U) {
+        nbase_json_free(qroot);
+        fprintf(stderr, "Each line must be a JSON string or {\"query\"|\"text\":\"...\"}\n");
+        ok = false;
+        break;
+      }
+      if (qcnt == cap) {
+        uint32_t new_cap = cap * 2U;
+        char **grown = realloc(queries, (size_t)new_cap * sizeof(char *));
+        if (!grown) {
+          nbase_json_free(qroot);
+          ok = false;
+          break;
+        }
+        queries = grown;
+        cap = new_cap;
+      }
+      queries[qcnt] = cli_strdup(jstr->str);
+      nbase_json_free(qroot);
+      if (!queries[qcnt]) {
+        ok = false;
+        break;
+      }
+      qcnt++;
+    }
+    free(line);
+    if (fp != stdin) {
+      fclose(fp);
+    }
+
+    if (!ok) {
+      for (uint32_t i = 0U; i < qcnt; i++) {
+        free(queries[i]);
+      }
+      free(queries);
+      free(conds);
+      nbase_json_free(flt_root);
+      return 1;
+    }
+
+    if (qcnt == 0U) {
+      free(queries);
+      free(conds);
+      nbase_json_free(flt_root);
+      printf("{\"queryCount\":0,\"results\":[]}\n");
+      return 0;
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    nbase_scored_id_t *res =
+        (st == NBASE_OK) ? malloc((size_t)qcnt * (size_t)k * sizeof(nbase_scored_id_t)) : NULL;
+    uint32_t *counts = (st == NBASE_OK) ? calloc((size_t)qcnt, sizeof(uint32_t)) : NULL;
+    if (st == NBASE_OK && (!res || !counts)) {
+      st = NBASE_ERR_NOMEM;
+    }
+    if (st == NBASE_OK) {
+      st = nbase_search_text_batch(
+          db,
+          (const char *const *)queries,
+          qcnt,
+          k,
+          num_threads,
+          flt.count > 0U ? &flt : NULL,
+          res,
+          counts);
+    }
+
+    for (uint32_t i = 0U; i < qcnt; i++) {
+      free(queries[i]);
+    }
+    free(queries);
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+
+    if (st != NBASE_OK) {
+      free(res);
+      free(counts);
+      fprintf(stderr, "search-text-batch failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    cli_print_scored_batch_json(qcnt, k, res, counts);
+    free(res);
+    free(counts);
     return 0;
   }
 
@@ -1364,6 +1597,310 @@ int main(int argc, char **argv) {
       printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].score);
     }
     free(res);
+    return 0;
+  }
+
+  if (strcmp(cmd, "search-hybrid-batch") == 0) {
+    if (argc < 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint32_t k = 10U;
+    float alpha = 0.5f;
+    float rrf_k = 60.0f;
+    nbase_search_opts_t opts = nbase_search_opts_default();
+    const char *flt_json = NULL;
+    for (int i = 4; i < argc; i++) {
+      if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--alpha") == 0 && i + 1 < argc) {
+        if (!parse_float_arg(argv[++i], &alpha) || alpha < 0.0f || alpha > 1.0f) {
+          fprintf(stderr, "Invalid --alpha\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--rrf-k") == 0 && i + 1 < argc) {
+        if (!parse_float_arg(argv[++i], &rrf_k) || rrf_k <= 0.0f) {
+          fprintf(stderr, "Invalid --rrf-k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc) {
+        if (!parse_metric(argv[++i], &opts.metric)) {
+          fprintf(stderr, "Invalid --metric\n");
+          return 1;
+        }
+        opts.use_metric_override = true;
+      } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &opts.num_threads) || opts.num_threads > 64U) {
+          fprintf(stderr, "Invalid --threads\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+      if (flt.count > 0U) {
+        opts.meta_filter = &flt;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    nbase_stats_t s;
+    (void)nbase_stats(db, &s);
+
+    FILE *fp = (strcmp(argv[3], "-") == 0) ? stdin : fopen(argv[3], "r");
+    if (!fp) {
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "Failed to open query file %s\n", argv[3]);
+      return 1;
+    }
+
+    uint32_t cap = 32U;
+    uint32_t qcnt = 0U;
+    float **qvecs = calloc(cap, sizeof(float *));
+    uint32_t *qdims = calloc(cap, sizeof(uint32_t));
+    char **qtexts = calloc(cap, sizeof(char *));
+    char *line = NULL;
+    size_t line_cap = 0U;
+    ssize_t nread;
+    bool ok = (qvecs != NULL && qdims != NULL && qtexts != NULL);
+
+    while (ok && (nread = getline(&line, &line_cap, fp)) >= 0) {
+      size_t len = (size_t)nread;
+      while (len > 0U && (line[len - 1U] == '\n' || line[len - 1U] == '\r')) {
+        len--;
+      }
+      line[len] = '\0';
+      const char *trim = line;
+      while (*trim != '\0' && isspace((unsigned char)*trim)) {
+        trim++;
+      }
+      if (*trim == '\0') {
+        continue;
+      }
+      nbase_json_t *qroot = NULL;
+      if (nbase_json_parse(line, len, &qroot) != NBASE_OK || qroot->type != NBASE_JSON_OBJECT ||
+          qcnt >= 10000U) {
+        nbase_json_free(qroot);
+        fprintf(stderr, "Invalid hybrid JSON query line\n");
+        ok = false;
+        break;
+      }
+      if (qcnt == cap) {
+        uint32_t new_cap = cap * 2U;
+        float **gv = realloc(qvecs, (size_t)new_cap * sizeof(float *));
+        uint32_t *gd = realloc(qdims, (size_t)new_cap * sizeof(uint32_t));
+        char **gt = realloc(qtexts, (size_t)new_cap * sizeof(char *));
+        if (!gv || !gd || !gt) {
+          free(gv ? gv : qvecs);
+          free(gd ? gd : qdims);
+          free(gt ? gt : qtexts);
+          qvecs = NULL;
+          qdims = NULL;
+          qtexts = NULL;
+          nbase_json_free(qroot);
+          ok = false;
+          break;
+        }
+        qvecs = gv;
+        qdims = gd;
+        qtexts = gt;
+        cap = new_cap;
+      }
+      qvecs[qcnt] = NULL;
+      qdims[qcnt] = 0U;
+      qtexts[qcnt] = NULL;
+
+      const nbase_json_t *jqv = nbase_json_obj_get(qroot, "query");
+      if (jqv != NULL && jqv->type != NBASE_JSON_NULL) {
+        if (jqv->type != NBASE_JSON_ARRAY || jqv->len != (size_t)s.dim) {
+          fprintf(stderr, "Invalid query vector or dimension mismatch\n");
+          nbase_json_free(qroot);
+          ok = false;
+          break;
+        }
+        qvecs[qcnt] = malloc((size_t)s.dim * sizeof(float));
+        if (!qvecs[qcnt]) {
+          nbase_json_free(qroot);
+          ok = false;
+          break;
+        }
+        for (uint32_t d = 0U; d < s.dim; d++) {
+          const nbase_json_t *it = jqv->items[d];
+          if (!it || it->type != NBASE_JSON_NUMBER || !isfinite(it->num) ||
+              !isfinite((float)it->num)) {
+            fprintf(stderr, "Non-finite value in query vector\n");
+            ok = false;
+            break;
+          }
+          qvecs[qcnt][d] = (float)it->num;
+        }
+        if (!ok) {
+          free(qvecs[qcnt]);
+          qvecs[qcnt] = NULL;
+          nbase_json_free(qroot);
+          break;
+        }
+        qdims[qcnt] = s.dim;
+      }
+      const nbase_json_t *jtxt = nbase_json_obj_get(qroot, "text");
+      if (jtxt != NULL && jtxt->type != NBASE_JSON_NULL) {
+        if (jtxt->type != NBASE_JSON_STRING) {
+          fprintf(stderr, "text must be a string\n");
+          free(qvecs[qcnt]);
+          qvecs[qcnt] = NULL;
+          nbase_json_free(qroot);
+          ok = false;
+          break;
+        }
+        qtexts[qcnt] = cli_strdup(jtxt->str);
+        if (!qtexts[qcnt]) {
+          free(qvecs[qcnt]);
+          qvecs[qcnt] = NULL;
+          nbase_json_free(qroot);
+          ok = false;
+          break;
+        }
+      }
+      nbase_json_free(qroot);
+      if (qvecs[qcnt] == NULL && (qtexts[qcnt] == NULL || qtexts[qcnt][0] == '\0')) {
+        free(qtexts[qcnt]);
+        qtexts[qcnt] = NULL;
+        fprintf(stderr, "Each hybrid query requires query vector or non-empty text\n");
+        ok = false;
+        break;
+      }
+      qcnt++;
+    }
+    free(line);
+    if (fp != stdin) {
+      fclose(fp);
+    }
+
+    if (ok && qcnt == 0U) {
+      free(qvecs);
+      free(qdims);
+      free(qtexts);
+      nbase_close(db);
+      free(conds);
+      nbase_json_free(flt_root);
+      printf("{\"queryCount\":0,\"results\":[]}\n");
+      return 0;
+    }
+
+    nbase_scored_id_t *res =
+        ok ? malloc((size_t)qcnt * (size_t)k * sizeof(nbase_scored_id_t)) : NULL;
+    uint32_t *counts = ok ? calloc((size_t)qcnt, sizeof(uint32_t)) : NULL;
+    if (ok && (!res || !counts)) {
+      st = NBASE_ERR_NOMEM;
+    } else if (ok) {
+      bool all_have_vec = true;
+      bool none_have_vec = true;
+      for (uint32_t q = 0U; q < qcnt; q++) {
+        if (qvecs[q] == NULL) {
+          all_have_vec = false;
+        } else {
+          none_have_vec = false;
+        }
+      }
+      if (none_have_vec || all_have_vec) {
+        float *packed = NULL;
+        if (all_have_vec) {
+          packed = malloc((size_t)qcnt * (size_t)s.dim * sizeof(float));
+          if (!packed) {
+            st = NBASE_ERR_NOMEM;
+          } else {
+            for (uint32_t q = 0U; q < qcnt; q++) {
+              memcpy(packed + (size_t)q * (size_t)s.dim, qvecs[q], (size_t)s.dim * sizeof(float));
+            }
+          }
+        }
+        if (st == NBASE_OK) {
+          st = nbase_search_hybrid_batch(
+              db,
+              packed,
+              s.dim,
+              (const char *const *)qtexts,
+              qcnt,
+              k,
+              alpha,
+              rrf_k,
+              &opts,
+              res,
+              counts);
+        }
+        free(packed);
+      } else {
+        for (uint32_t q = 0U; q < qcnt && st == NBASE_OK; q++) {
+          st = nbase_search_hybrid(
+              db,
+              qvecs[q],
+              qdims[q],
+              qtexts[q],
+              k,
+              alpha,
+              rrf_k,
+              &opts,
+              res + (size_t)q * (size_t)k,
+              &counts[q]);
+        }
+      }
+    }
+
+    if (qvecs != NULL) {
+      for (uint32_t q = 0U; q < qcnt; q++) {
+        free(qvecs[q]);
+      }
+      free(qvecs);
+    }
+    free(qdims);
+    if (qtexts != NULL) {
+      for (uint32_t q = 0U; q < qcnt; q++) {
+        free(qtexts[q]);
+      }
+      free(qtexts);
+    }
+    nbase_close(db);
+    free(conds);
+    nbase_json_free(flt_root);
+
+    if (!ok || st != NBASE_OK) {
+      free(res);
+      free(counts);
+      if (ok) {
+        fprintf(stderr, "search-hybrid-batch failed: %s\n", nbase_strerror(st));
+      }
+      return 1;
+    }
+    cli_print_scored_batch_json(qcnt, k, res, counts);
+    free(res);
+    free(counts);
     return 0;
   }
 

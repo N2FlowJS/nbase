@@ -230,6 +230,29 @@ static void *batch_meta_reader_thread(void *raw) {
       break;
     }
 
+    const char *tb_qs[2] = {"batch vector", "updated alpha"};
+    nbase_scored_id_t tb_res[20];
+    uint32_t tb_cnts[2] = {0U, 0U};
+    st = nbase_search_text_batch(ctx->db, tb_qs, 2U, 10U, 2U, &flt, tb_res, tb_cnts);
+    if (st != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->error_count, 1, memory_order_relaxed);
+      break;
+    }
+
+    float hq[16];
+    for (uint32_t i = 0U; i < 16U; i++) {
+      hq[i] = 0.25f;
+    }
+    nbase_search_opts_t hopts = nbase_search_opts_default();
+    hopts.meta_filter = &flt;
+    hopts.num_threads = 2U;
+    st = nbase_search_hybrid_batch(
+        ctx->db, hq, ctx->dim, tb_qs, 2U, 10U, 0.5f, 60.0f, &hopts, tb_res, tb_cnts);
+    if (st != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->error_count, 1, memory_order_relaxed);
+      break;
+    }
+
     nbase_edge_t *edges = NULL;
     uint64_t ecnt = 0ULL;
     st = nbase_extract_relationships_filtered(ctx->db, 3U, 5.0f, &flt, &edges, &ecnt);
@@ -291,6 +314,10 @@ static void test_concurrent_batch_meta_text_tsan(void) {
     ASSERT_STATUS(nbase_update_meta_batch(db, u, 4U), NBASE_OK);
     const char *t_upd[2] = {"updated batch vector alpha", "updated batch vector beta"};
     ASSERT_STATUS(nbase_set_text_batch(db, ids, t_upd, 2U), NBASE_OK);
+    if ((iter % 5U) == 4U) {
+      uint32_t tdel = 0U;
+      ASSERT_STATUS(nbase_delete_text_batch(db, &ids[2], 2U, &tdel), NBASE_OK);
+    }
   }
 
   atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);

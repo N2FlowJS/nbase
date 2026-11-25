@@ -333,9 +333,136 @@ static void test_meta_and_text_batch_atomicity_and_edge_cases(void) {
   nbase_close(db);
 }
 
+static void test_db_text_and_hybrid_batch_search_and_delete(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  const uint32_t dim = 3U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_save(db, dir), NBASE_OK);
+  nbase_close(db);
+
+  ASSERT_STATUS(nbase_open_wal(dir, &db), NBASE_OK);
+  uint64_t ids[4] = {1ULL, 2ULL, 3ULL, 4ULL};
+  float vecs[12] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f,
+      0.8f, 0.2f, 0.0f};
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, 4U, dim, 2U), NBASE_OK);
+
+  nbase_meta_field_t fa = {"tier", {.type = NBASE_META_STRING, .as = {.str = "pro"}}};
+  nbase_meta_field_t fb = {"tier", {.type = NBASE_META_STRING, .as = {.str = "free"}}};
+  nbase_meta_batch_item_t mitems[4] = {
+      {1ULL, &fa, 1U}, {2ULL, &fb, 1U}, {3ULL, &fa, 1U}, {4ULL, &fb, 1U}};
+  ASSERT_STATUS(nbase_set_meta_batch(db, mitems, 4U), NBASE_OK);
+
+  const char *texts[4] = {
+      "simd hnsw engine kernel",
+      "distributed raft storage node",
+      "bm25 hybrid ranking durability",
+      "simd quantization pq ivfpq"};
+  ASSERT_STATUS(nbase_set_text_batch(db, ids, texts, 4U), NBASE_OK);
+
+  const char *tqs[3] = {"simd kernel", "durability ranking", "quantization pq"};
+  nbase_scored_id_t res_mt[6];
+  nbase_scored_id_t res_st[6];
+  uint32_t cnt_mt[3] = {0U, 0U, 0U};
+  uint32_t cnt_st[3] = {0U, 0U, 0U};
+  ASSERT_STATUS(nbase_search_text_batch(db, NULL, 0U, 2U, 4U, NULL, NULL, NULL), NBASE_OK);
+  ASSERT_STATUS(nbase_search_text_batch(db, tqs, 3U, 2U, 4U, NULL, res_mt, cnt_mt), NBASE_OK);
+  ASSERT_STATUS(nbase_search_text_batch(db, tqs, 3U, 2U, 1U, NULL, res_st, cnt_st), NBASE_OK);
+  for (uint32_t q = 0U; q < 3U; q++) {
+    ASSERT_EQ_U64(cnt_mt[q], cnt_st[q]);
+    for (uint32_t j = 0U; j < cnt_mt[q]; j++) {
+      ASSERT_EQ_U64(res_mt[(size_t)q * 2U + j].id, res_st[(size_t)q * 2U + j].id);
+      ASSERT_NEAR(res_mt[(size_t)q * 2U + j].score, res_st[(size_t)q * 2U + j].score, 1e-6, 1e-6);
+    }
+  }
+  ASSERT_EQ_U64(res_mt[0].id, 1ULL);
+  ASSERT_EQ_U64(res_mt[2].id, 3ULL);
+  ASSERT_EQ_U64(res_mt[4].id, 4ULL);
+
+  nbase_meta_cond_t pro_cond = {"tier", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "pro"}}};
+  nbase_meta_filter_t pro_flt = {&pro_cond, 1U};
+  ASSERT_STATUS(nbase_search_text_batch(db, tqs, 3U, 2U, 2U, &pro_flt, res_mt, cnt_mt), NBASE_OK);
+  ASSERT_EQ_U64(cnt_mt[0], 1ULL);
+  ASSERT_EQ_U64(res_mt[0].id, 1ULL);
+  ASSERT_EQ_U64(cnt_mt[2], 0ULL);
+
+  const char *bad_qs[2] = {"ok", NULL};
+  ASSERT_STATUS(nbase_search_text_batch(db, bad_qs, 2U, 2U, 2U, NULL, res_mt, cnt_mt), NBASE_ERR_INVALID_ARG);
+
+  /* Hybrid batch: dense+text parity against single nbase_search_hybrid */
+  float hq_vecs[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 1.0f,
+      0.8f, 0.2f, 0.0f};
+  const char *hq_texts[3] = {"simd kernel", "bm25 durability", "pq ivfpq"};
+  nbase_search_opts_t sopts = nbase_search_opts_default();
+  sopts.num_threads = 3U;
+  nbase_scored_id_t hres[6];
+  uint32_t hcnt[3] = {0U, 0U, 0U};
+  ASSERT_STATUS(
+      nbase_search_hybrid_batch(db, NULL, 0U, NULL, 0U, 2U, 0.5f, 60.0f, NULL, NULL, NULL),
+      NBASE_OK);
+  ASSERT_STATUS(
+      nbase_search_hybrid_batch(db, hq_vecs, dim, hq_texts, 3U, 2U, 0.5f, 60.0f, &sopts, hres, hcnt),
+      NBASE_OK);
+  for (uint32_t q = 0U; q < 3U; q++) {
+    nbase_scored_id_t single[2];
+    uint32_t scnt = 0U;
+    ASSERT_STATUS(
+        nbase_search_hybrid(db, hq_vecs + (size_t)q * dim, dim, hq_texts[q], 2U, 0.5f, 60.0f, NULL, single, &scnt),
+        NBASE_OK);
+    ASSERT_EQ_U64(hcnt[q], scnt);
+    for (uint32_t j = 0U; j < scnt; j++) {
+      ASSERT_EQ_U64(hres[(size_t)q * 2U + j].id, single[j].id);
+      ASSERT_NEAR(hres[(size_t)q * 2U + j].score, single[j].score, 1e-6, 1e-6);
+    }
+  }
+  /* Text-only hybrid batch and vector-only hybrid batch */
+  ASSERT_STATUS(
+      nbase_search_hybrid_batch(db, NULL, 0U, hq_texts, 3U, 2U, 0.0f, 60.0f, &sopts, hres, hcnt),
+      NBASE_OK);
+  ASSERT_EQ_U64(hcnt[0], 2ULL);
+  ASSERT_EQ_U64(hres[0].id, 1ULL);
+  ASSERT_STATUS(
+      nbase_search_hybrid_batch(db, hq_vecs, dim, NULL, 3U, 2U, 1.0f, 60.0f, &sopts, hres, hcnt),
+      NBASE_OK);
+  ASSERT_EQ_U64(hres[0].id, 1ULL);
+
+  /* Error cases */
+  ASSERT_STATUS(
+      nbase_search_hybrid_batch(db, hq_vecs, dim + 1U, hq_texts, 3U, 2U, 0.5f, 60.0f, &sopts, hres, hcnt),
+      NBASE_ERR_DIM_MISMATCH);
+  ASSERT_STATUS(
+      nbase_search_hybrid_batch(db, hq_vecs, dim, hq_texts, 3U, 2U, 1.5f, 60.0f, &sopts, hres, hcnt),
+      NBASE_ERR_INVALID_ARG);
+
+  /* Batch delete text + WAL replay */
+  uint64_t del_tids[3] = {2ULL, 999ULL, 4ULL};
+  uint32_t del_cnt = 0U;
+  ASSERT_STATUS(nbase_delete_text_batch(db, del_tids, 3U, &del_cnt), NBASE_OK);
+  ASSERT_EQ_U64(del_cnt, 2ULL);
+  ASSERT_STATUS(nbase_search_text_batch(db, tqs, 3U, 2U, 2U, NULL, res_mt, cnt_mt), NBASE_OK);
+  ASSERT_EQ_U64(cnt_mt[2], 0ULL);
+  nbase_close(db);
+
+  ASSERT_STATUS(nbase_open_wal(dir, &db), NBASE_OK);
+  size_t len4 = 0U;
+  ASSERT_STATUS(nbase_get_text(db, 4ULL, NULL, 0U, &len4), NBASE_ERR_NOT_FOUND);
+  ASSERT_STATUS(nbase_get_text(db, 1ULL, NULL, 0U, &len4), NBASE_OK);
+  nbase_close(db);
+}
+
 void test_meta_run(void) {
   RUN_TEST(test_meta_crud_and_upsert_preservation);
   RUN_TEST(test_meta_filtering_operators_and_persistence);
   RUN_TEST(test_meta_foreach_query_and_find_similar);
   RUN_TEST(test_meta_and_text_batch_atomicity_and_edge_cases);
+  RUN_TEST(test_db_text_and_hybrid_batch_search_and_delete);
 }

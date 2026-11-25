@@ -26,6 +26,7 @@ typedef struct pq_train_ctx {
   uint32_t num_centroids;
   uint32_t max_iters;
   uint64_t seed;
+  uint32_t num_threads;
   float *codebooks;
   atomic_uint next_m;
   atomic_int first_err;
@@ -56,13 +57,14 @@ static void *pq_train_worker(void *raw) {
           (size_t)ctx->sub_dim * sizeof(float));
     }
     float *dst_cb = ctx->codebooks + (size_t)m * (size_t)ctx->num_centroids * (size_t)ctx->sub_dim;
-    nbase_status_t st = nbase_kmeans_train(
+    nbase_status_t st = nbase_kmeans_train_mt(
         slice,
         ctx->count,
         ctx->sub_dim,
         ctx->num_centroids,
         ctx->max_iters,
         ctx->seed + (uint64_t)m,
+        (ctx->num_threads > 1U) ? 1U : 0U,
         dst_cb,
         NULL);
     if (st != NBASE_OK) {
@@ -125,6 +127,7 @@ nbase_status_t nbase_pq_train(
   if (num_subvectors > 1U && (uint64_t)count * (uint64_t)num_centroids >= 16384ULL) {
     nthreads = (num_subvectors < 4U) ? num_subvectors : 4U;
   }
+  ctx.num_threads = nthreads;
 
   pthread_t workers[3];
   uint32_t spawned = 0U;
