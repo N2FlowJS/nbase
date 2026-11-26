@@ -702,6 +702,106 @@ static void test_lsh_search_radius_and_batch_scratch_tsan(void) {
   free(vecs);
 }
 
+typedef struct lsh_sim_tsan_ctx {
+  const nbase_lsh_t *lsh;
+  atomic_bool stop;
+  atomic_int errors;
+} lsh_sim_tsan_ctx_t;
+
+static void *lsh_sim_reader_fn(void *raw) {
+  lsh_sim_tsan_ctx_t *ctx = (lsh_sim_tsan_ctx_t *)raw;
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    nbase_result_t out[4];
+    uint32_t got = 0U;
+    if (nbase_lsh_find_similar(ctx->lsh, 500ULL, 4U, 2U, NULL, NULL, out, &got) != NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t i = 0U; i < got; i++) {
+      if (out[i].id == 500ULL) {
+        atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_lsh_find_similar_and_tsan(void) {
+  const uint32_t dim = 16U;
+  const uint32_t n = 40U;
+  uint64_t *ids = malloc(n * sizeof(uint64_t));
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  ASSERT_TRUE(ids != NULL && vecs != NULL);
+  test_fill_vectors(vecs, n, dim, 6218ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 500ULL + i;
+  }
+  /* Guarantee 501 (odd) and 502 (even) are nearest neighbors of 500 in both cosine & L2. */
+  for (uint32_t d = 0U; d < dim; d++) {
+    vecs[1U * dim + d] = vecs[d] * 1.01f;
+    vecs[2U * dim + d] = vecs[d] * 1.03f;
+  }
+
+  for (uint32_t m = 0U; m < 2U; m++) {
+    nbase_lsh_config_t cfg = nbase_lsh_config_default(dim);
+    cfg.metric = (m == 0U) ? NBASE_METRIC_COSINE : NBASE_METRIC_EUCLIDEAN;
+    cfg.num_tables = 8U;
+    cfg.num_bits = 8U;
+    cfg.seed = 6318ULL + (unsigned long long)m;
+
+    nbase_lsh_t *lsh = NULL;
+    ASSERT_STATUS(nbase_lsh_create(&cfg, &lsh), NBASE_OK);
+    ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids, vecs, n, dim), NBASE_OK);
+
+    nbase_result_t res[5];
+    uint32_t got = 0U;
+    ASSERT_STATUS(nbase_lsh_find_similar(NULL, 500ULL, 5U, 2U, NULL, NULL, res, &got), NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(nbase_lsh_find_similar(lsh, 500ULL, 5U, 2U, NULL, NULL, NULL, &got), NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(nbase_lsh_find_similar(lsh, 500ULL, 5U, 2U, NULL, NULL, res, NULL), NBASE_ERR_INVALID_ARG);
+    ASSERT_STATUS(nbase_lsh_find_similar(lsh, 9999ULL, 5U, 2U, NULL, NULL, res, &got), NBASE_ERR_NOT_FOUND);
+    ASSERT_STATUS(nbase_lsh_find_similar(lsh, 500ULL, 0U, 2U, NULL, NULL, NULL, &got), NBASE_OK);
+    ASSERT_EQ_U64(got, 0ULL);
+
+    ASSERT_STATUS(nbase_lsh_find_similar(lsh, 500ULL, 5U, 2U, NULL, NULL, res, &got), NBASE_OK);
+    ASSERT_TRUE(got >= 2U);
+    ASSERT_EQ_U64(res[0].id, 501ULL);
+    for (uint32_t i = 0U; i < got; i++) {
+      ASSERT_TRUE(res[i].id != 500ULL);
+    }
+
+    ASSERT_STATUS(nbase_lsh_find_similar(lsh, 500ULL, 4U, 2U, lsh_even_filter, NULL, res, &got), NBASE_OK);
+    ASSERT_TRUE(got >= 1U);
+    ASSERT_EQ_U64(res[0].id, 502ULL);
+    for (uint32_t i = 0U; i < got; i++) {
+      ASSERT_TRUE((res[i].id % 2ULL) == 0ULL && res[i].id != 500ULL);
+    }
+
+    if (m == 0U) {
+      lsh_sim_tsan_ctx_t ctx;
+      ctx.lsh = lsh;
+      atomic_init(&ctx.stop, false);
+      atomic_init(&ctx.errors, 0);
+      pthread_t r1, r2;
+      ASSERT_TRUE(pthread_create(&r1, NULL, lsh_sim_reader_fn, &ctx) == 0);
+      ASSERT_TRUE(pthread_create(&r2, NULL, lsh_sim_reader_fn, &ctx) == 0);
+      for (uint32_t step = 0U; step < 8U; step++) {
+        ASSERT_STATUS(
+            nbase_lsh_upsert(lsh, 510ULL + (step % 4U), vecs + (size_t)(10U + step) * dim, dim),
+            NBASE_OK);
+      }
+      atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+      pthread_join(r1, NULL);
+      pthread_join(r2, NULL);
+      ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+    }
+
+    nbase_lsh_destroy(lsh);
+  }
+
+  free(vecs);
+  free(ids);
+}
+
 void test_lsh_run(void) {
   RUN_TEST(test_lsh_cosine_and_multiprobe);
   RUN_TEST(test_lsh_euclidean_save_load_and_errors);
@@ -710,4 +810,5 @@ void test_lsh_run(void) {
   RUN_TEST(test_lsh_upsert_get_list_compact_and_tsan);
   RUN_TEST(test_lsh_upsert_delete_get_batch_and_tsan);
   RUN_TEST(test_lsh_search_radius_and_batch_scratch_tsan);
+  RUN_TEST(test_lsh_find_similar_and_tsan);
 }

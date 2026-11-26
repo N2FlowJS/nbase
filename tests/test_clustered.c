@@ -1,6 +1,7 @@
 #include "test_common.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -524,10 +525,109 @@ static void test_clustered_compact_and_search_batch_mt(void) {
   nbase_clustered_destroy(cl);
 }
 
+typedef struct cl_sim_tsan_ctx {
+  const nbase_clustered_t *cl;
+  atomic_bool stop;
+  atomic_int errors;
+} cl_sim_tsan_ctx_t;
+
+static void *cl_sim_reader_fn(void *raw) {
+  cl_sim_tsan_ctx_t *ctx = (cl_sim_tsan_ctx_t *)raw;
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    nbase_result_t out[5];
+    uint32_t got = 0U;
+    if (nbase_clustered_find_similar(ctx->cl, 100ULL, 5U, 8U, NULL, NULL, out, &got) != NBASE_OK ||
+        got == 0U) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t i = 0U; i < got; i++) {
+      if (out[i].id == 100ULL) {
+        atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_clustered_find_similar_and_tsan(void) {
+  const uint32_t dim = 8U;
+  nbase_clustered_config_t cfg = nbase_clustered_config_default(dim);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.target_cluster_size = 8U;
+  cfg.max_clusters = 8U;
+  cfg.seed = 4418ULL;
+
+  nbase_clustered_t *cl = NULL;
+  ASSERT_STATUS(nbase_clustered_create(&cfg, &cl), NBASE_OK);
+
+  const uint32_t n = 32U;
+  uint64_t *ids = malloc(n * sizeof(uint64_t));
+  float *vecs = malloc((size_t)n * dim * sizeof(float));
+  ASSERT_TRUE(ids != NULL && vecs != NULL);
+  test_fill_vectors(vecs, n, dim, 5118ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 100ULL + i;
+  }
+  /* Make id 101 closest to id 100, and id 102 second closest (even). */
+  for (uint32_t d = 0U; d < dim; d++) {
+    vecs[1U * dim + d] = vecs[d] + 0.01f;
+    vecs[2U * dim + d] = vecs[d] + 0.05f;
+  }
+
+  ASSERT_STATUS(nbase_clustered_add_batch(cl, ids, vecs, n, dim), NBASE_OK);
+  ASSERT_STATUS(nbase_clustered_recluster(cl, 4U), NBASE_OK);
+
+  nbase_result_t res[5];
+  uint32_t got = 0U;
+  ASSERT_STATUS(nbase_clustered_find_similar(NULL, 100ULL, 5U, 4U, NULL, NULL, res, &got), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_clustered_find_similar(cl, 100ULL, 5U, 4U, NULL, NULL, NULL, &got), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_clustered_find_similar(cl, 100ULL, 5U, 4U, NULL, NULL, res, NULL), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_clustered_find_similar(cl, 9999ULL, 5U, 4U, NULL, NULL, res, &got), NBASE_ERR_NOT_FOUND);
+  ASSERT_STATUS(nbase_clustered_find_similar(cl, 100ULL, 0U, 4U, NULL, NULL, NULL, &got), NBASE_OK);
+  ASSERT_EQ_U64(got, 0ULL);
+
+  ASSERT_STATUS(nbase_clustered_find_similar(cl, 100ULL, 5U, 0U, NULL, NULL, res, &got), NBASE_OK);
+  ASSERT_EQ_U64(got, 5ULL);
+  ASSERT_EQ_U64(res[0].id, 101ULL);
+  for (uint32_t i = 0U; i < got; i++) {
+    ASSERT_TRUE(res[i].id != 100ULL);
+  }
+
+  ASSERT_STATUS(nbase_clustered_find_similar(cl, 100ULL, 4U, 0U, cl_even_filter, NULL, res, &got), NBASE_OK);
+  ASSERT_EQ_U64(got, 4ULL);
+  ASSERT_EQ_U64(res[0].id, 102ULL);
+  for (uint32_t i = 0U; i < got; i++) {
+    ASSERT_TRUE((res[i].id % 2ULL) == 0ULL && res[i].id != 100ULL);
+  }
+
+  cl_sim_tsan_ctx_t ctx;
+  ctx.cl = cl;
+  atomic_init(&ctx.stop, false);
+  atomic_init(&ctx.errors, 0);
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, cl_sim_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, cl_sim_reader_fn, &ctx) == 0);
+  for (uint32_t step = 0U; step < 8U; step++) {
+    ASSERT_STATUS(
+        nbase_clustered_upsert(cl, 110ULL + (step % 4U), vecs + (size_t)(10U + step) * dim, dim),
+        NBASE_OK);
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  free(vecs);
+  free(ids);
+  nbase_clustered_destroy(cl);
+}
+
 void test_clustered_run(void) {
   RUN_TEST(test_clustered_online_assign_search_and_recluster);
   RUN_TEST(test_clustered_batch_filtered_and_concurrent);
   RUN_TEST(test_clustered_upsert_batch_and_list_ids);
   RUN_TEST(test_clustered_get_batch_and_search_radius);
   RUN_TEST(test_clustered_compact_and_search_batch_mt);
+  RUN_TEST(test_clustered_find_similar_and_tsan);
 }

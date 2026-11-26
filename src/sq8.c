@@ -17,6 +17,7 @@
 
 struct nbase_sq8 {
   uint32_t dim;
+  bool use_avx2;
   float *mins;
   float *scales;
   float *inv_scales;
@@ -74,6 +75,9 @@ nbase_status_t nbase_sq8_train(
   }
 
   sq8->dim = dim;
+#if NBASE_SQ8_HAS_AVX2
+  sq8->use_avx2 = nbase_cpu_has_avx2_fma();
+#endif
   sq8->mins = mins;
   sq8->scales = scales;
   sq8->inv_scales = inv_scales;
@@ -166,7 +170,7 @@ nbase_status_t nbase_sq8_encode(
   }
 
 #if NBASE_SQ8_HAS_AVX2
-  if (nbase_cpu_has_avx2_fma() && sq8->dim >= 8U) {
+  if (sq8->use_avx2 && sq8->dim >= 8U) {
     sq8_encode_avx2(sq8, vectors, count, out_codes);
     return NBASE_OK;
   }
@@ -232,7 +236,7 @@ nbase_status_t nbase_sq8_decode(
     return NBASE_ERR_INVALID_ARG;
   }
 #if NBASE_SQ8_HAS_AVX2
-  if (nbase_cpu_has_avx2_fma() && sq8->dim >= 8U) {
+  if (sq8->use_avx2 && sq8->dim >= 8U) {
     sq8_decode_avx2(sq8, codes, count, out_vectors);
     return NBASE_OK;
   }
@@ -263,24 +267,36 @@ static __attribute__((target("avx2,fma"))) float sq8_l2_sq_asymmetric_avx2(
     const nbase_sq8_t *sq8,
     const float *query,
     const uint8_t *code) {
-  __m256 acc = _mm256_setzero_ps();
+  const float *mins = sq8->mins;
+  const float *scales = sq8->scales;
+  const uint32_t dim = sq8->dim;
+  __m256 acc0 = _mm256_setzero_ps();
+  __m256 acc1 = _mm256_setzero_ps();
   uint32_t d = 0U;
-  for (; d + 8U <= sq8->dim; d += 8U) {
-    uint64_t raw8 = 0ULL;
-    memcpy(&raw8, code + d, 8U);
-    __m128i v8 = _mm_cvtsi64_si128((long long)raw8);
-    __m256i v32 = _mm256_cvtepu8_epi32(v8);
-    __m256 vf = _mm256_cvtepi32_ps(v32);
-    __m256 vmin = _mm256_loadu_ps(sq8->mins + d);
-    __m256 vscale = _mm256_loadu_ps(sq8->scales + d);
-    __m256 approx = _mm256_fmadd_ps(vf, vscale, vmin);
-    __m256 vq = _mm256_loadu_ps(query + d);
-    __m256 diff = _mm256_sub_ps(vq, approx);
+  for (; d + 16U <= dim; d += 16U) {
+    __m128i lo8 = _mm_loadl_epi64((const __m128i *)(const void *)(code + d));
+    __m128i hi8 = _mm_loadl_epi64((const __m128i *)(const void *)(code + d + 8U));
+    __m256 vf0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(lo8));
+    __m256 vf1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(hi8));
+    __m256 a0 = _mm256_fmadd_ps(vf0, _mm256_loadu_ps(scales + d), _mm256_loadu_ps(mins + d));
+    __m256 a1 = _mm256_fmadd_ps(vf1, _mm256_loadu_ps(scales + d + 8U), _mm256_loadu_ps(mins + d + 8U));
+    __m256 df0 = _mm256_sub_ps(_mm256_loadu_ps(query + d), a0);
+    __m256 df1 = _mm256_sub_ps(_mm256_loadu_ps(query + d + 8U), a1);
+    acc0 = _mm256_fmadd_ps(df0, df0, acc0);
+    acc1 = _mm256_fmadd_ps(df1, df1, acc1);
+  }
+  __m256 acc = _mm256_add_ps(acc0, acc1);
+  if (d + 8U <= dim) {
+    __m128i v8 = _mm_loadl_epi64((const __m128i *)(const void *)(code + d));
+    __m256 vf = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v8));
+    __m256 approx = _mm256_fmadd_ps(vf, _mm256_loadu_ps(scales + d), _mm256_loadu_ps(mins + d));
+    __m256 diff = _mm256_sub_ps(_mm256_loadu_ps(query + d), approx);
     acc = _mm256_fmadd_ps(diff, diff, acc);
+    d += 8U;
   }
   float sum = sq8_hsum256_ps(acc);
-  for (; d < sq8->dim; d++) {
-    float approx = sq8->mins[d] + (float)code[d] * sq8->scales[d];
+  for (; d < dim; d++) {
+    float approx = mins[d] + (float)code[d] * scales[d];
     float diff = query[d] - approx;
     sum += diff * diff;
   }
@@ -291,23 +307,41 @@ static __attribute__((target("avx2,fma"))) float sq8_l2_sq_symmetric_avx2(
     const nbase_sq8_t *sq8,
     const uint8_t *code_a,
     const uint8_t *code_b) {
-  __m256 acc = _mm256_setzero_ps();
+  const float *scales = sq8->scales;
+  const uint32_t dim = sq8->dim;
+  __m256 acc0 = _mm256_setzero_ps();
+  __m256 acc1 = _mm256_setzero_ps();
   uint32_t d = 0U;
-  for (; d + 8U <= sq8->dim; d += 8U) {
-    uint64_t ra = 0ULL;
-    uint64_t rb = 0ULL;
-    memcpy(&ra, code_a + d, 8U);
-    memcpy(&rb, code_b + d, 8U);
-    __m256i va32 = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)ra));
-    __m256i vb32 = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)rb));
-    __m256 vdiff_i = _mm256_cvtepi32_ps(_mm256_sub_epi32(va32, vb32));
-    __m256 vscale = _mm256_loadu_ps(sq8->scales + d);
-    __m256 diff = _mm256_mul_ps(vdiff_i, vscale);
+  for (; d + 16U <= dim; d += 16U) {
+    __m128i va0 = _mm_loadl_epi64((const __m128i *)(const void *)(code_a + d));
+    __m128i vb0 = _mm_loadl_epi64((const __m128i *)(const void *)(code_b + d));
+    __m128i va1 = _mm_loadl_epi64((const __m128i *)(const void *)(code_a + d + 8U));
+    __m128i vb1 = _mm_loadl_epi64((const __m128i *)(const void *)(code_b + d + 8U));
+    __m256 df0 = _mm256_mul_ps(
+        _mm256_cvtepi32_ps(_mm256_sub_epi32(
+            _mm256_cvtepu8_epi32(va0), _mm256_cvtepu8_epi32(vb0))),
+        _mm256_loadu_ps(scales + d));
+    __m256 df1 = _mm256_mul_ps(
+        _mm256_cvtepi32_ps(_mm256_sub_epi32(
+            _mm256_cvtepu8_epi32(va1), _mm256_cvtepu8_epi32(vb1))),
+        _mm256_loadu_ps(scales + d + 8U));
+    acc0 = _mm256_fmadd_ps(df0, df0, acc0);
+    acc1 = _mm256_fmadd_ps(df1, df1, acc1);
+  }
+  __m256 acc = _mm256_add_ps(acc0, acc1);
+  if (d + 8U <= dim) {
+    __m128i va8 = _mm_loadl_epi64((const __m128i *)(const void *)(code_a + d));
+    __m128i vb8 = _mm_loadl_epi64((const __m128i *)(const void *)(code_b + d));
+    __m256 diff = _mm256_mul_ps(
+        _mm256_cvtepi32_ps(_mm256_sub_epi32(
+            _mm256_cvtepu8_epi32(va8), _mm256_cvtepu8_epi32(vb8))),
+        _mm256_loadu_ps(scales + d));
     acc = _mm256_fmadd_ps(diff, diff, acc);
+    d += 8U;
   }
   float sum = sq8_hsum256_ps(acc);
-  for (; d < sq8->dim; d++) {
-    float diff = ((float)code_a[d] - (float)code_b[d]) * sq8->scales[d];
+  for (; d < dim; d++) {
+    float diff = ((float)code_a[d] - (float)code_b[d]) * scales[d];
     sum += diff * diff;
   }
   return sum;
@@ -334,18 +368,14 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_asymmetric_batch_avx2(
     for (; d + 8U <= dim; d += 8U) {
       __m256 vs = _mm256_loadu_ps(scales + d);
       __m256 vq = _mm256_loadu_ps(q_shifted + d);
-      uint64_t r0 = 0ULL;
-      uint64_t r1 = 0ULL;
-      uint64_t r2 = 0ULL;
-      uint64_t r3 = 0ULL;
-      memcpy(&r0, c0 + d, 8U);
-      memcpy(&r1, c1 + d, 8U);
-      memcpy(&r2, c2 + d, 8U);
-      memcpy(&r3, c3 + d, 8U);
-      __m256 vf0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r0)));
-      __m256 vf1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r1)));
-      __m256 vf2 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r2)));
-      __m256 vf3 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r3)));
+      __m256 vf0 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c0 + d))));
+      __m256 vf1 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c1 + d))));
+      __m256 vf2 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c2 + d))));
+      __m256 vf3 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c3 + d))));
       __m256 df0 = _mm256_fnmadd_ps(vf0, vs, vq);
       __m256 df1 = _mm256_fnmadd_ps(vf1, vs, vq);
       __m256 df2 = _mm256_fnmadd_ps(vf2, vs, vq);
@@ -382,10 +412,10 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_asymmetric_batch_avx2(
     __m256 acc1 = _mm256_setzero_ps();
     uint32_t d = 0U;
     for (; d + 16U <= dim; d += 16U) {
-      __m128i v16;
-      memcpy(&v16, code + d, 16U);
-      __m256 vf0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v16));
-      __m256 vf1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128(v16, 8)));
+      __m128i lo8 = _mm_loadl_epi64((const __m128i *)(const void *)(code + d));
+      __m128i hi8 = _mm_loadl_epi64((const __m128i *)(const void *)(code + d + 8U));
+      __m256 vf0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(lo8));
+      __m256 vf1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(hi8));
       __m256 diff0 = _mm256_fnmadd_ps(
           vf0, _mm256_loadu_ps(scales + d), _mm256_loadu_ps(q_shifted + d));
       __m256 diff1 = _mm256_fnmadd_ps(
@@ -394,9 +424,7 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_asymmetric_batch_avx2(
       acc1 = _mm256_fmadd_ps(diff1, diff1, acc1);
     }
     if (d + 8U <= dim) {
-      uint64_t raw8 = 0ULL;
-      memcpy(&raw8, code + d, 8U);
-      __m128i v8 = _mm_cvtsi64_si128((long long)raw8);
+      __m128i v8 = _mm_loadl_epi64((const __m128i *)(const void *)(code + d));
       __m256 vf = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v8));
       __m256 diff = _mm256_fnmadd_ps(
           vf, _mm256_loadu_ps(scales + d), _mm256_loadu_ps(q_shifted + d));
@@ -414,6 +442,7 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_asymmetric_batch_avx2(
 
 static __attribute__((target("avx2,fma"))) void sq8_l2_sq_symmetric_batch_avx2(
     const nbase_sq8_t *sq8,
+    const float *q_f,
     const uint8_t *query_code,
     const uint8_t *codes,
     uint32_t count,
@@ -432,34 +461,20 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_symmetric_batch_avx2(
     __m256 acc3 = _mm256_setzero_ps();
     uint32_t d = 0U;
     for (; d + 8U <= dim; d += 8U) {
-      uint64_t rqa = 0ULL;
-      uint64_t r0 = 0ULL;
-      uint64_t r1 = 0ULL;
-      uint64_t r2 = 0ULL;
-      uint64_t r3 = 0ULL;
-      memcpy(&rqa, query_code + d, 8U);
-      memcpy(&r0, c0 + d, 8U);
-      memcpy(&r1, c1 + d, 8U);
-      memcpy(&r2, c2 + d, 8U);
-      memcpy(&r3, c3 + d, 8U);
-      __m256i vqa = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)rqa));
       __m256 vs = _mm256_loadu_ps(scales + d);
-      __m256 df0 = _mm256_mul_ps(
-          _mm256_cvtepi32_ps(_mm256_sub_epi32(
-              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r0)))),
-          vs);
-      __m256 df1 = _mm256_mul_ps(
-          _mm256_cvtepi32_ps(_mm256_sub_epi32(
-              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r1)))),
-          vs);
-      __m256 df2 = _mm256_mul_ps(
-          _mm256_cvtepi32_ps(_mm256_sub_epi32(
-              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r2)))),
-          vs);
-      __m256 df3 = _mm256_mul_ps(
-          _mm256_cvtepi32_ps(_mm256_sub_epi32(
-              vqa, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)r3)))),
-          vs);
+      __m256 vq = _mm256_loadu_ps(q_f + d);
+      __m256 vf0 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c0 + d))));
+      __m256 vf1 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c1 + d))));
+      __m256 vf2 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c2 + d))));
+      __m256 vf3 = _mm256_cvtepi32_ps(
+          _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(c3 + d))));
+      __m256 df0 = _mm256_mul_ps(_mm256_sub_ps(vq, vf0), vs);
+      __m256 df1 = _mm256_mul_ps(_mm256_sub_ps(vq, vf1), vs);
+      __m256 df2 = _mm256_mul_ps(_mm256_sub_ps(vq, vf2), vs);
+      __m256 df3 = _mm256_mul_ps(_mm256_sub_ps(vq, vf3), vs);
       acc0 = _mm256_fmadd_ps(df0, df0, acc0);
       acc1 = _mm256_fmadd_ps(df1, df1, acc1);
       acc2 = _mm256_fmadd_ps(df2, df2, acc2);
@@ -470,7 +485,7 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_symmetric_batch_avx2(
     float s2 = sq8_hsum256_ps(acc2);
     float s3 = sq8_hsum256_ps(acc3);
     for (; d < dim; d++) {
-      float qd = (float)query_code[d];
+      float qd = q_f[d];
       float sd = scales[d];
       float diff0 = (qd - (float)c0[d]) * sd;
       float diff1 = (qd - (float)c1[d]) * sd;
@@ -487,45 +502,7 @@ static __attribute__((target("avx2,fma"))) void sq8_l2_sq_symmetric_batch_avx2(
     out_distances[i + 3U] = s3;
   }
   for (; i < count; i++) {
-    const uint8_t *code = codes + (size_t)i * (size_t)dim;
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-    uint32_t d = 0U;
-    for (; d + 16U <= dim; d += 16U) {
-      __m128i qa16, cb16;
-      memcpy(&qa16, query_code + d, 16U);
-      memcpy(&cb16, code + d, 16U);
-      __m256 d0 = _mm256_mul_ps(
-          _mm256_cvtepi32_ps(_mm256_sub_epi32(
-              _mm256_cvtepu8_epi32(qa16), _mm256_cvtepu8_epi32(cb16))),
-          _mm256_loadu_ps(scales + d));
-      __m256 d1 = _mm256_mul_ps(
-          _mm256_cvtepi32_ps(_mm256_sub_epi32(
-              _mm256_cvtepu8_epi32(_mm_srli_si128(qa16, 8)),
-              _mm256_cvtepu8_epi32(_mm_srli_si128(cb16, 8)))),
-          _mm256_loadu_ps(scales + d + 8U));
-      acc0 = _mm256_fmadd_ps(d0, d0, acc0);
-      acc1 = _mm256_fmadd_ps(d1, d1, acc1);
-    }
-    if (d + 8U <= dim) {
-      uint64_t ra = 0ULL;
-      uint64_t rb = 0ULL;
-      memcpy(&ra, query_code + d, 8U);
-      memcpy(&rb, code + d, 8U);
-      __m256 diff = _mm256_mul_ps(
-          _mm256_cvtepi32_ps(_mm256_sub_epi32(
-              _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)ra)),
-              _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)rb)))),
-          _mm256_loadu_ps(scales + d));
-      acc0 = _mm256_fmadd_ps(diff, diff, acc0);
-      d += 8U;
-    }
-    float sum = sq8_hsum256_ps(_mm256_add_ps(acc0, acc1));
-    for (; d < dim; d++) {
-      float diff = ((float)query_code[d] - (float)code[d]) * scales[d];
-      sum += diff * diff;
-    }
-    out_distances[i] = sum;
+    out_distances[i] = sq8_l2_sq_symmetric_avx2(sq8, query_code, codes + (size_t)i * (size_t)dim);
   }
 }
 #endif
@@ -535,7 +512,7 @@ float nbase_sq8_l2_sq_asymmetric(const nbase_sq8_t *sq8, const float *query, con
     return 0.0f;
   }
 #if NBASE_SQ8_HAS_AVX2
-  if (nbase_cpu_has_avx2_fma()) {
+  if (sq8->use_avx2) {
     return sq8_l2_sq_asymmetric_avx2(sq8, query, code);
   }
 #endif
@@ -553,7 +530,7 @@ float nbase_sq8_l2_sq_symmetric(const nbase_sq8_t *sq8, const uint8_t *code_a, c
     return 0.0f;
   }
 #if NBASE_SQ8_HAS_AVX2
-  if (nbase_cpu_has_avx2_fma()) {
+  if (sq8->use_avx2) {
     return sq8_l2_sq_symmetric_avx2(sq8, code_a, code_b);
   }
 #endif
@@ -591,7 +568,7 @@ nbase_status_t nbase_sq8_l2_sq_asymmetric_batch(
   }
 
 #if NBASE_SQ8_HAS_AVX2
-  if (nbase_cpu_has_avx2_fma()) {
+  if (sq8->use_avx2) {
     sq8_l2_sq_asymmetric_batch_avx2(q_shifted, sq8->scales, sq8->dim, codes, count, out_distances);
     if (q_shifted != stack_buf) {
       free(q_shifted);
@@ -632,8 +609,19 @@ nbase_status_t nbase_sq8_l2_sq_symmetric_batch(
   }
 
 #if NBASE_SQ8_HAS_AVX2
-  if (nbase_cpu_has_avx2_fma()) {
-    sq8_l2_sq_symmetric_batch_avx2(sq8, query_code, codes, count, out_distances);
+  if (sq8->use_avx2) {
+    float stack_qf[512] = {0.0f};
+    float *q_f = (sq8->dim <= 512U) ? stack_qf : malloc((size_t)sq8->dim * sizeof(float));
+    if (!q_f) {
+      return NBASE_ERR_NOMEM;
+    }
+    for (uint32_t d = 0U; d < sq8->dim; d++) {
+      q_f[d] = (float)query_code[d];
+    }
+    sq8_l2_sq_symmetric_batch_avx2(sq8, q_f, query_code, codes, count, out_distances);
+    if (q_f != stack_qf) {
+      free(q_f);
+    }
     return NBASE_OK;
   }
 #endif
@@ -772,6 +760,9 @@ nbase_status_t nbase_sq8_load(const char *file_path, nbase_sq8_t **out_sq8) {
   }
 
   sq8->dim = hdr.dim;
+#if NBASE_SQ8_HAS_AVX2
+  sq8->use_avx2 = nbase_cpu_has_avx2_fma();
+#endif
   sq8->mins = mins;
   sq8->scales = scales;
   sq8->inv_scales = inv_scales;

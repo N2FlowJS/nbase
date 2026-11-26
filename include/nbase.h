@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 17
+#define NBASE_VERSION_MINOR 18
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -432,6 +432,15 @@ nbase_status_t nbase_clustered_search_radius(
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count);
+nbase_status_t nbase_clustered_find_similar(
+    const nbase_clustered_t *cl,
+    uint64_t id,
+    uint32_t k,
+    uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count);
 nbase_status_t nbase_clustered_search_batch(
     const nbase_clustered_t *cl,
     const float *queries,
@@ -591,6 +600,15 @@ nbase_status_t nbase_lsh_search_radius(
     uint32_t dim,
     float max_distance,
     uint32_t max_results,
+    uint32_t multi_probe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count);
+nbase_status_t nbase_lsh_find_similar(
+    const nbase_lsh_t *lsh,
+    uint64_t id,
+    uint32_t k,
     uint32_t multi_probe,
     nbase_filter_fn filter,
     void *filter_ctx,

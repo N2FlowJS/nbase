@@ -1360,6 +1360,27 @@ class Lsh {
     return out;
   }
 
+  std::vector<nbase_result_t> find_similar(
+      uint64_t id,
+      uint32_t k,
+      uint32_t multi_probe = 0U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr) const {
+    std::vector<nbase_result_t> out(k);
+    uint32_t count = 0U;
+    detail::check(nbase_lsh_find_similar(
+        ptr_,
+        id,
+        k,
+        multi_probe,
+        filter,
+        filter_ctx,
+        k > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
   std::vector<std::vector<nbase_result_t>> search_batch(
       const std::vector<float> &queries,
       uint32_t query_count,
@@ -2366,6 +2387,27 @@ class ClusteredDatabase {
         filter,
         filter_ctx,
         max_results > 0U ? out.data() : nullptr,
+        &count));
+    out.resize(count);
+    return out;
+  }
+
+  std::vector<nbase_result_t> find_similar(
+      uint64_t id,
+      uint32_t k,
+      uint32_t nprobe = 4U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr) const {
+    std::vector<nbase_result_t> out(k);
+    uint32_t count = 0U;
+    detail::check(nbase_clustered_find_similar(
+        ptr_,
+        id,
+        k,
+        nprobe,
+        filter,
+        filter_ctx,
+        k > 0U ? out.data() : nullptr,
         &count));
     out.resize(count);
     return out;

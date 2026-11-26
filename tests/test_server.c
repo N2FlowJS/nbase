@@ -2307,6 +2307,112 @@ static void test_http_server_patch_batch_and_text_get_edges(void) {
   nbase_close(db);
 }
 
+static void test_http_server_search_similar_batch_and_enrich(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.seed = 4518ULL;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v1[3] = {1.0f, 0.0f, 0.0f};
+  float v2[3] = {0.9f, 0.1f, 0.0f};
+  float v3[3] = {0.0f, 1.0f, 0.0f};
+  float v4[3] = {0.1f, 0.9f, 0.0f};
+  ASSERT_STATUS(nbase_add(db, 10ULL, v1, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 20ULL, v2, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 30ULL, v3, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 40ULL, v4, 3U), NBASE_OK);
+
+  nbase_meta_field_t ma = {"grp", {.type = NBASE_META_STRING, .as = {.str = "x"}}};
+  nbase_meta_field_t mb = {"grp", {.type = NBASE_META_STRING, .as = {.str = "y"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, &ma, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 20ULL, &ma, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 30ULL, &mb, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 20ULL, "doc twenty text"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 40ULL, "doc forty text"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  ASSERT_TRUE(http_req(port, "GET", "/api/search/similar", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/search/similar", NULL, "{\"ids\":[]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/search/similar", NULL, "{\"ids\":[\"bad\"]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/search/similar", NULL, "{\"ids\":[10,999]}", &r));
+  ASSERT_EQ_I64(r.status, 404);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/similar",
+      NULL,
+      "{\"ids\":[10,30],\"k\":2,\"includeVectors\":true,\"includeMetadata\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"doc twenty text\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"doc forty text\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"grp\":\"x\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/similar",
+      NULL,
+      "{\"ids\":[10],\"k\":3,\"filters\":[{\"key\":\"grp\",\"op\":\"eq\",\"value\":\"x\"}],\"includeMetadata\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30") == NULL);
+  free(r.body);
+
+  /* Batch-enriched GET /api/vectors & POST /api/search/metadata */
+  ASSERT_TRUE(http_req(
+      port,
+      "GET",
+      "/api/vectors?offset=0&limit=5&includeVectors=true&includeMetadata=true&includeText=true",
+      NULL,
+      NULL,
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"doc twenty text\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"doc forty text\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":null") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/metadata",
+      NULL,
+      "{\"filters\":[{\"key\":\"grp\",\"op\":\"eq\",\"value\":\"x\"}],\"limit\":10,\"includeVectors\":true,\"includeMetadata\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"doc twenty text\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":null") != NULL);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -2327,4 +2433,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_text_and_hybrid_batch_search);
   RUN_TEST(test_http_server_attr_batch_get_and_include_defaults);
   RUN_TEST(test_http_server_patch_batch_and_text_get_edges);
+  RUN_TEST(test_http_server_search_similar_batch_and_enrich);
 }

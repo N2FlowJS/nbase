@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-11-27
+
+By-ID `find_similar` parity for `nbase_clustered_t` & `nbase_lsh_t` (C11 & C++17), 2-way 16-dim AVX2 SQ8 single-vector & 2-row 2-way symmetric batch kernels, HTTP/1.1 batch enrichment (`http_batch_enrich_load`) & `POST /api/search/similar`, and CLI `list --include-*` + shared `cli_append_enriched_id_array` formatting.
+
+### Added & Changed
+- **Clustered & LSH `find_similar` Parity (`include/nbase.h`, `src/clustered.c`, `src/lsh.c`, `include/nbase.hpp`)**:
+  - Added `nbase_clustered_find_similar` and `nbase_lsh_find_similar` supporting optional `nbase_filter_fn` predicates and automatic self-ID exclusion under a single `rdlock`, alongside C++17 `nbase::ClusteredDatabase::find_similar` and `nbase::Lsh::find_similar`.
+- **SIMD SQ8 Kernels (`src/sq8.c`)**:
+  - Cached AVX2+FMA capability once on opaque `nbase_sq8_t` (`use_avx2`) eliminating per-call dispatch overhead in single-vector distance APIs, and upgraded `sq8_l2_sq_asymmetric_avx2` and `sq8_l2_sq_symmetric_avx2` to fused `_mm_loadl_epi64` 16-dim 2-accumulator FMA loops.
+  - Replaced GPR `memcpy` loads in `sq8_l2_sq_asymmetric_batch_avx2` with direct `_mm_loadl_epi64` loads, and upgraded `sq8_l2_sq_symmetric_batch_avx2` to a 4-row (`i += 4`) precomputed-float query kernel reusing `q_f` and `scales` across 4 rows.
+- **HTTP/1.1 Server & CLI Parity (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `http_batch_enrich_load` / `append_enriched_fields_json` using `nbase_get_batch` + `nbase_get_text_batch` across `/api/vectors`, `/api/search*`, `/api/vectors/:id/similar`, `/api/search/metadata`, and `/api/rerank`, and delegated `send_similar_results` onto `append_result_entries_json`.
+  - Added `POST /api/search/similar` (`handle_search_similar_batch`) with upfront ID validation, filters, latency metrics, and batch enrichment.
+  - Added `--include-vectors`, `--include-meta`, `--include-text` to `nbase-cli list` and refactored `list`, `search`, `find-similar`, and `search-meta` onto `cli_append_enriched_id_array`.
+- **Tests (`tests/test_db.c`, `tests/test_clustered.c`, `tests/test_lsh.c`, `tests/test_sq8.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.18.0"`, added `test_clustered_find_similar_and_tsan`, `test_lsh_find_similar_and_tsan`, `test_sq8_avx2_single_and_sym_batch_accuracy`, and `test_http_server_search_similar_batch_and_enrich`.
+
 ## [1.17.0] - 2026-11-26
 
 Embedded & partitioned batch text retrieval (`nbase_get_text_batch`, `nbase_pdb_get_text_batch`), C++17 `Database::get_text_batch` & `PartitionedDatabase::get_text_batch` sharing `detail::unpack_texts_batch`, AVX2 integer-accumulated Hamming single/batch kernels (`hamming_avx2`, `hamming_batch_avx2`), 4-row BQ `popcnt` unrolling for `num_words == 4` (`dim=256`), HTTP `PATCH`/`POST /api/vectors/patch` atomic batch patching & batch text lookup upgrade, and CLI `--json`/`--include-*` flags on `search` and `find-similar`.

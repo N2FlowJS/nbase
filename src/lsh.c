@@ -903,6 +903,57 @@ nbase_status_t nbase_lsh_search(
   return nbase_lsh_search_filtered(lsh, query, dim, k, multi_probe, NULL, NULL, out_results, out_count);
 }
 
+typedef struct lsh_exclude_id_ctx {
+  uint64_t exclude_id;
+  nbase_filter_fn inner;
+  void *inner_ctx;
+} lsh_exclude_id_ctx_t;
+
+static bool lsh_exclude_id_filter(uint64_t cand_id, void *raw) {
+  const lsh_exclude_id_ctx_t *ctx = (const lsh_exclude_id_ctx_t *)raw;
+  if (cand_id == ctx->exclude_id) {
+    return false;
+  }
+  return ctx->inner ? ctx->inner(cand_id, ctx->inner_ctx) : true;
+}
+
+nbase_status_t nbase_lsh_find_similar(
+    const nbase_lsh_t *lsh,
+    uint64_t id,
+    uint32_t k,
+    uint32_t multi_probe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!lsh || !out_count || (k > 0U && !out_results)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+
+  nbase_lsh_t *mutable_lsh = (nbase_lsh_t *)(uintptr_t)lsh;
+  pthread_rwlock_rdlock(&mutable_lsh->rwlock);
+  uint32_t slot = NBASE_INVALID_SLOT;
+  const float *qvec = NULL;
+  if (nbase_store_find_slot(lsh->store, id, &slot)) {
+    qvec = nbase_store_get_vector(lsh->store, slot);
+  }
+  if (!qvec) {
+    pthread_rwlock_unlock(&mutable_lsh->rwlock);
+    return NBASE_ERR_NOT_FOUND;
+  }
+  if (k == 0U) {
+    pthread_rwlock_unlock(&mutable_lsh->rwlock);
+    return NBASE_OK;
+  }
+
+  lsh_exclude_id_ctx_t ex = {id, filter, filter_ctx};
+  nbase_status_t st = lsh_search_core_unlocked(
+      lsh, qvec, lsh->dim, k, false, 0.0f, multi_probe, lsh_exclude_id_filter, &ex, NULL, out_results, out_count);
+  pthread_rwlock_unlock(&mutable_lsh->rwlock);
+  return st;
+}
+
 typedef struct lsh_batch_ctx {
   const nbase_lsh_t *lsh;
   const float *queries;

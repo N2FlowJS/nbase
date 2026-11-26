@@ -292,6 +292,74 @@ static void test_sq8_avx2_encode_exact_edge_cases(void) {
   }
 }
 
+static void test_sq8_avx2_single_and_sym_batch_accuracy(void) {
+  static const uint32_t dims[12] = {1U, 7U, 8U, 15U, 16U, 17U, 31U, 32U, 33U, 64U, 128U, 131U};
+  static const uint32_t counts[6] = {1U, 2U, 3U, 4U, 5U, 17U};
+  const uint32_t max_cnt = 17U;
+
+  for (size_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++) {
+    uint32_t dim = dims[di];
+    float *vecs = malloc((size_t)max_cnt * (size_t)dim * sizeof(float));
+    float *query = malloc((size_t)dim * sizeof(float));
+    float *decoded = malloc((size_t)max_cnt * (size_t)dim * sizeof(float));
+    uint8_t *codes = malloc((size_t)max_cnt * (size_t)dim);
+    uint8_t *qcode = malloc((size_t)dim);
+    float *asym_out = malloc((size_t)max_cnt * sizeof(float));
+    float *sym_out = malloc((size_t)max_cnt * sizeof(float));
+    ASSERT_TRUE(
+        vecs != NULL && query != NULL && decoded != NULL && codes != NULL && qcode != NULL &&
+        asym_out != NULL && sym_out != NULL);
+
+    test_fill_vectors(vecs, max_cnt, dim, 7701ULL + (uint64_t)di);
+    test_fill_vectors(query, 1U, dim, 7901ULL + (uint64_t)di);
+    for (size_t i = 0; i < (size_t)max_cnt * (size_t)dim; i++) {
+      vecs[i] *= 50.0f;
+    }
+    for (uint32_t d = 0U; d < dim; d++) {
+      query[d] *= 50.0f;
+    }
+
+    nbase_sq8_t *sq8 = NULL;
+    ASSERT_STATUS(nbase_sq8_train(vecs, max_cnt, dim, &sq8), NBASE_OK);
+    ASSERT_STATUS(nbase_sq8_encode(sq8, vecs, max_cnt, codes), NBASE_OK);
+    ASSERT_STATUS(nbase_sq8_encode(sq8, query, 1U, qcode), NBASE_OK);
+    ASSERT_STATUS(nbase_sq8_decode(sq8, codes, max_cnt, decoded), NBASE_OK);
+
+    for (size_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++) {
+      uint32_t cnt = counts[ci];
+      ASSERT_STATUS(nbase_sq8_l2_sq_asymmetric_batch(sq8, query, codes, cnt, asym_out), NBASE_OK);
+      ASSERT_STATUS(nbase_sq8_l2_sq_symmetric_batch(sq8, codes, codes, cnt, sym_out), NBASE_OK);
+      ASSERT_NEAR(sym_out[0], 0.0, 1e-6, 0.0);
+
+      for (uint32_t i = 0U; i < cnt; i++) {
+        float asym_single = nbase_sq8_l2_sq_asymmetric(sq8, query, codes + (size_t)i * dim);
+        float sym_single = nbase_sq8_l2_sq_symmetric(sq8, codes, codes + (size_t)i * dim);
+        double ref_asym = 0.0;
+        double ref_sym = 0.0;
+        for (uint32_t d = 0U; d < dim; d++) {
+          double da = (double)query[d] - (double)decoded[(size_t)i * dim + d];
+          double ds = (double)decoded[d] - (double)decoded[(size_t)i * dim + d];
+          ref_asym += da * da;
+          ref_sym += ds * ds;
+        }
+        ASSERT_NEAR(asym_single, asym_out[i], 1e-3, 1e-4);
+        ASSERT_NEAR(asym_single, ref_asym, 1e-3, 1e-4);
+        ASSERT_NEAR(sym_single, sym_out[i], 1e-3, 1e-4);
+        ASSERT_NEAR(sym_single, ref_sym, 1e-3, 1e-4);
+      }
+    }
+
+    nbase_sq8_destroy(sq8);
+    free(sym_out);
+    free(asym_out);
+    free(qcode);
+    free(codes);
+    free(decoded);
+    free(query);
+    free(vecs);
+  }
+}
+
 void test_sq8_run(void) {
   RUN_TEST(test_sq8_train_encode_decode_and_distance);
   RUN_TEST(test_sq8_persistence_and_corruption);
@@ -299,4 +367,5 @@ void test_sq8_run(void) {
   RUN_TEST(test_sq8_l2_sq_symmetric_batch);
   RUN_TEST(test_sq8_avx2_decode_dims_and_accuracy);
   RUN_TEST(test_sq8_avx2_encode_exact_edge_cases);
+  RUN_TEST(test_sq8_avx2_single_and_sym_batch_accuracy);
 }

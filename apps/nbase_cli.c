@@ -26,7 +26,7 @@ static void print_usage(const char *prog) {
       "  get <dir> <id>\n"
       "  get-batch <dir> <id1,id2,...>\n"
       "  exists <dir> <id1,id2,...>\n"
-      "  list <dir> [--offset <N>] [--limit <M>]\n"
+      "  list <dir> [--offset <N>] [--limit <M>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  count <dir> [--filter <json>]\n"
       "  delete <dir> <id>\n"
       "  delete-batch <dir> <id1,id2,...>\n"
@@ -731,6 +731,113 @@ static bool cli_meta_cb(const char *key, const nbase_meta_value_t *val, void *ra
   return !ctx->sb->oom;
 }
 
+static bool cli_append_enriched_id_array(
+    nbase_sbuf_t *sb,
+    const nbase_db_t *db,
+    uint32_t dim,
+    const uint64_t *ids,
+    const nbase_result_t *opt_res,
+    uint32_t got,
+    bool inc_vecs,
+    bool inc_meta,
+    bool inc_text) {
+  uint64_t *id_buf = NULL;
+  const uint64_t *lookup_ids = ids;
+  float *vecs = NULL;
+  bool *vfound = NULL;
+  char **texts = NULL;
+  bool *tfound = NULL;
+  nbase_status_t st = NBASE_OK;
+
+  if (got > 0U && (inc_vecs || inc_text)) {
+    if (lookup_ids == NULL && opt_res != NULL) {
+      id_buf = malloc((size_t)got * sizeof(uint64_t));
+      if (!id_buf) {
+        st = NBASE_ERR_NOMEM;
+      } else {
+        for (uint32_t i = 0U; i < got; i++) {
+          id_buf[i] = opt_res[i].id;
+        }
+        lookup_ids = id_buf;
+      }
+    }
+    if (st == NBASE_OK && inc_vecs) {
+      vecs = calloc((size_t)got * (size_t)dim, sizeof(float));
+      vfound = calloc(got, sizeof(bool));
+      if (!vecs || !vfound) {
+        st = NBASE_ERR_NOMEM;
+      } else {
+        st = nbase_get_batch(db, lookup_ids, got, dim, vecs, vfound);
+      }
+    }
+    if (st == NBASE_OK && inc_text) {
+      texts = calloc(got, sizeof(char *));
+      tfound = calloc(got, sizeof(bool));
+      if (!texts || !tfound) {
+        st = NBASE_ERR_NOMEM;
+      } else {
+        st = nbase_get_text_batch(db, lookup_ids, got, texts, tfound);
+      }
+    }
+  }
+
+  for (uint32_t i = 0U; i < got && st == NBASE_OK && !sb->oom; i++) {
+    uint64_t eid = (opt_res != NULL) ? opt_res[i].id : ids[i];
+    if (opt_res != NULL) {
+      nbase_sbuf_appendf(
+          sb,
+          i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
+          (unsigned long long)eid,
+          (double)opt_res[i].distance);
+    } else {
+      nbase_sbuf_appendf(sb, i == 0U ? "{\"id\":%llu" : ",{\"id\":%llu", (unsigned long long)eid);
+    }
+    if (inc_vecs && vfound != NULL && vfound[i]) {
+      const float *v = vecs + (size_t)i * (size_t)dim;
+      nbase_sbuf_append(sb, ",\"vector\":[");
+      for (uint32_t d = 0U; d < dim; d++) {
+        nbase_sbuf_appendf(sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+      }
+      nbase_sbuf_append_n(sb, "]", 1U);
+    }
+    if (inc_meta) {
+      cli_meta_ctx_t mctx = {sb, true, ",\"metadata\":{"};
+      nbase_status_t mst = nbase_foreach_meta(db, eid, cli_meta_cb, &mctx);
+      if (mst != NBASE_OK) {
+        st = mst;
+        break;
+      }
+      if (mctx.first) {
+        nbase_sbuf_append(sb, ",\"metadata\":{}");
+      } else {
+        nbase_sbuf_append_n(sb, "}", 1U);
+      }
+    }
+    if (inc_text) {
+      if (tfound != NULL && tfound[i] && texts != NULL && texts[i] != NULL) {
+        nbase_sbuf_append(sb, ",\"text\":");
+        nbase_sbuf_append_json_str(sb, texts[i]);
+      } else {
+        nbase_sbuf_append(sb, ",\"text\":null");
+      }
+    }
+    nbase_sbuf_append_n(sb, "}", 1U);
+  }
+
+  nbase_free_texts(texts, got);
+  free(texts);
+  free(tfound);
+  free(vecs);
+  free(vfound);
+  free(id_buf);
+
+  if (st != NBASE_OK || sb->oom) {
+    fprintf(stderr, "format entries failed: %s\n", nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
+    return false;
+  }
+  return true;
+}
+
 static bool cli_print_search_results_json(
     const nbase_db_t *db,
     uint32_t dim,
@@ -739,96 +846,16 @@ static bool cli_print_search_results_json(
     bool inc_vecs,
     bool inc_meta,
     bool inc_text) {
-  uint64_t *ids = NULL;
-  float *vecs = NULL;
-  bool *vfound = NULL;
-  char **texts = NULL;
-  bool *tfound = NULL;
-  nbase_status_t st = NBASE_OK;
-
-  if (got > 0U && (inc_vecs || inc_text)) {
-    ids = malloc((size_t)got * sizeof(uint64_t));
-    if (!ids) {
-      st = NBASE_ERR_NOMEM;
-    } else {
-      for (uint32_t i = 0U; i < got; i++) {
-        ids[i] = res[i].id;
-      }
-      if (inc_vecs) {
-        vecs = calloc((size_t)got * (size_t)dim, sizeof(float));
-        vfound = calloc(got, sizeof(bool));
-        if (!vecs || !vfound) {
-          st = NBASE_ERR_NOMEM;
-        } else {
-          st = nbase_get_batch(db, ids, got, dim, vecs, vfound);
-        }
-      }
-      if (st == NBASE_OK && inc_text) {
-        texts = calloc(got, sizeof(char *));
-        tfound = calloc(got, sizeof(bool));
-        if (!texts || !tfound) {
-          st = NBASE_ERR_NOMEM;
-        } else {
-          st = nbase_get_text_batch(db, ids, got, texts, tfound);
-        }
-      }
-    }
-  }
-
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
-  if (st == NBASE_OK) {
-    nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
-    for (uint32_t i = 0U; i < got && !sb.oom; i++) {
-      nbase_sbuf_appendf(
-          &sb,
-          i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
-          (unsigned long long)res[i].id,
-          (double)res[i].distance);
-      if (inc_vecs && vfound != NULL && vfound[i]) {
-        const float *v = vecs + (size_t)i * (size_t)dim;
-        nbase_sbuf_append(&sb, ",\"vector\":[");
-        for (uint32_t d = 0U; d < dim; d++) {
-          nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
-        }
-        nbase_sbuf_append_n(&sb, "]", 1U);
-      }
-      if (inc_meta) {
-        cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
-        nbase_status_t mst = nbase_foreach_meta(db, res[i].id, cli_meta_cb, &mctx);
-        if (mst != NBASE_OK) {
-          st = mst;
-          break;
-        }
-        if (mctx.first) {
-          nbase_sbuf_append(&sb, ",\"metadata\":{}");
-        } else {
-          nbase_sbuf_append_n(&sb, "}", 1U);
-        }
-      }
-      if (inc_text) {
-        if (tfound != NULL && tfound[i] && texts != NULL && texts[i] != NULL) {
-          nbase_sbuf_append(&sb, ",\"text\":");
-          nbase_sbuf_append_json_str(&sb, texts[i]);
-        } else {
-          nbase_sbuf_append(&sb, ",\"text\":null");
-        }
-      }
-      nbase_sbuf_append_n(&sb, "}", 1U);
-    }
+  nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
+  bool ok = cli_append_enriched_id_array(&sb, db, dim, NULL, res, got, inc_vecs, inc_meta, inc_text);
+  if (ok) {
     nbase_sbuf_append(&sb, "]}");
+    ok = !sb.oom && (sb.data != NULL);
   }
-
-  nbase_free_texts(texts, got);
-  free(texts);
-  free(tfound);
-  free(vecs);
-  free(vfound);
-  free(ids);
-
-  if (st != NBASE_OK || sb.oom || !sb.data) {
+  if (!ok) {
     nbase_sbuf_free(&sb);
-    fprintf(stderr, "format search results failed: %s\n", nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
     return false;
   }
   printf("%s\n", sb.data);
@@ -2352,6 +2379,9 @@ int main(int argc, char **argv) {
     }
     uint64_t offset = 0ULL;
     uint32_t limit = 50U;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     for (int i = 3; i < argc; i++) {
       if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc) {
         if (!parse_u64(argv[++i], &offset)) {
@@ -2363,6 +2393,12 @@ int main(int argc, char **argv) {
           fprintf(stderr, "Invalid --limit\n");
           return 1;
         }
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
@@ -2374,6 +2410,16 @@ int main(int argc, char **argv) {
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
     }
+    uint32_t dim = 0U;
+    if (inc_vecs) {
+      nbase_stats_t db_st;
+      if (nbase_stats(db, &db_st) != NBASE_OK) {
+        nbase_close(db);
+        fprintf(stderr, "stats failed\n");
+        return 1;
+      }
+      dim = db_st.dim;
+    }
     uint64_t *ids = malloc((size_t)limit * sizeof(uint64_t));
     if (!ids) {
       nbase_close(db);
@@ -2382,22 +2428,48 @@ int main(int argc, char **argv) {
     uint32_t got = 0U;
     uint64_t total = 0ULL;
     st = nbase_list_ids(db, offset, limit, ids, &got, &total);
-    nbase_close(db);
     if (st != NBASE_OK) {
       free(ids);
+      nbase_close(db);
       fprintf(stderr, "list failed: %s\n", nbase_strerror(st));
       return 1;
     }
-    printf("{\"total\":%llu,\"offset\":%llu,\"limit\":%u,\"count\":%u,\"ids\":[",
-           (unsigned long long)total,
-           (unsigned long long)offset,
-           limit,
-           got);
+
+    nbase_sbuf_t sb;
+    nbase_sbuf_init(&sb);
+    nbase_sbuf_appendf(
+        &sb,
+        "{\"total\":%llu,\"offset\":%llu,\"limit\":%u,\"count\":%u,\"ids\":[",
+        (unsigned long long)total,
+        (unsigned long long)offset,
+        limit,
+        got);
     for (uint32_t i = 0U; i < got; i++) {
-      printf(i == 0U ? "%llu" : ",%llu", (unsigned long long)ids[i]);
+      nbase_sbuf_appendf(&sb, i == 0U ? "%llu" : ",%llu", (unsigned long long)ids[i]);
     }
-    printf("]}\n");
+    nbase_sbuf_append_n(&sb, "]", 1U);
+
+    bool ok = true;
+    if (inc_vecs || inc_meta || inc_text) {
+      nbase_sbuf_append(&sb, ",\"results\":[");
+      ok = cli_append_enriched_id_array(&sb, db, dim, ids, NULL, got, inc_vecs, inc_meta, inc_text);
+      if (ok) {
+        nbase_sbuf_append_n(&sb, "]", 1U);
+      }
+    }
+    if (ok) {
+      nbase_sbuf_append_n(&sb, "}", 1U);
+      ok = !sb.oom && (sb.data != NULL);
+    }
+
     free(ids);
+    nbase_close(db);
+    if (!ok) {
+      nbase_sbuf_free(&sb);
+      return 1;
+    }
+    printf("%s\n", sb.data);
+    nbase_sbuf_free(&sb);
     return 0;
   }
 
@@ -3445,67 +3517,19 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    float *vec = inc_vecs ? malloc((size_t)db_st.dim * sizeof(float)) : NULL;
-    if (inc_vecs && !vec) {
-      free(ids);
-      nbase_close(db);
-      fprintf(stderr, "out of memory\n");
-      return 1;
-    }
-
     nbase_sbuf_t sb;
     nbase_sbuf_init(&sb);
     nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
-    char *txt_buf = NULL;
-    size_t txt_cap = 0U;
-    for (uint32_t i = 0U; i < got; i++) {
-      nbase_sbuf_appendf(&sb, i == 0U ? "{\"id\":%llu" : ",{\"id\":%llu", (unsigned long long)ids[i]);
-      if (inc_vecs && nbase_get(db, ids[i], vec, db_st.dim) == NBASE_OK) {
-        nbase_sbuf_append(&sb, ",\"vector\":[");
-        for (uint32_t d = 0U; d < db_st.dim; d++) {
-          nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)vec[d]);
-        }
-        nbase_sbuf_append_n(&sb, "]", 1U);
-      }
-      if (inc_meta) {
-        cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
-        (void)nbase_foreach_meta(db, ids[i], cli_meta_cb, &mctx);
-        if (mctx.first) {
-          nbase_sbuf_append(&sb, ",\"metadata\":{}");
-        } else {
-          nbase_sbuf_append_n(&sb, "}", 1U);
-        }
-      }
-      if (inc_text) {
-        size_t tlen = 0U;
-        if (nbase_get_text(db, ids[i], NULL, 0U, &tlen) == NBASE_OK) {
-          if (tlen + 1U > txt_cap) {
-            char *nb = realloc(txt_buf, tlen + 1U);
-            if (nb) {
-              txt_buf = nb;
-              txt_cap = tlen + 1U;
-            }
-          }
-          if (txt_buf && nbase_get_text(db, ids[i], txt_buf, txt_cap, &tlen) == NBASE_OK) {
-            nbase_sbuf_append(&sb, ",\"text\":");
-            nbase_sbuf_append_json_str(&sb, txt_buf);
-          } else {
-            nbase_sbuf_append(&sb, ",\"text\":null");
-          }
-        } else {
-          nbase_sbuf_append(&sb, ",\"text\":null");
-        }
-      }
-      nbase_sbuf_append_n(&sb, "}", 1U);
+    bool ok = cli_append_enriched_id_array(
+        &sb, db, db_st.dim, ids, NULL, got, inc_vecs, inc_meta, inc_text);
+    if (ok) {
+      nbase_sbuf_append(&sb, "]}");
+      ok = !sb.oom && (sb.data != NULL);
     }
-    nbase_sbuf_append(&sb, "]}");
-    free(txt_buf);
-    free(vec);
     free(ids);
     nbase_close(db);
-    if (sb.oom || !sb.data) {
+    if (!ok) {
       nbase_sbuf_free(&sb);
-      fprintf(stderr, "out of memory\n");
       return 1;
     }
     printf("%s\n", sb.data);

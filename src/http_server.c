@@ -722,6 +722,95 @@ static void append_text_json(nbase_sbuf_t *sb, const nbase_db_t *db, uint64_t id
   }
 }
 
+typedef struct http_batch_enrich {
+  float *vecs;
+  bool *vfound;
+  char **texts;
+  bool *tfound;
+  uint32_t count;
+  uint32_t dim;
+} http_batch_enrich_t;
+
+static void http_batch_enrich_free(http_batch_enrich_t *e) {
+  nbase_free_texts(e->texts, e->count);
+  free(e->texts);
+  free(e->tfound);
+  free(e->vecs);
+  free(e->vfound);
+  memset(e, 0, sizeof(*e));
+}
+
+static bool http_batch_enrich_load(
+    const nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t count,
+    uint32_t dim,
+    bool inc_vec,
+    bool inc_text,
+    http_batch_enrich_t *out) {
+  memset(out, 0, sizeof(*out));
+  out->count = count;
+  out->dim = dim;
+  if (count == 0U || (!inc_vec && !inc_text)) {
+    return true;
+  }
+  if (inc_vec) {
+    out->vecs = calloc((size_t)count * (size_t)dim, sizeof(float));
+    out->vfound = calloc(count, sizeof(bool));
+    if (!out->vecs || !out->vfound ||
+        nbase_get_batch(db, ids, count, dim, out->vecs, out->vfound) != NBASE_OK) {
+      http_batch_enrich_free(out);
+      return false;
+    }
+  }
+  if (inc_text) {
+    out->texts = calloc(count, sizeof(char *));
+    out->tfound = calloc(count, sizeof(bool));
+    if (!out->texts || !out->tfound ||
+        nbase_get_text_batch(db, ids, count, out->texts, out->tfound) != NBASE_OK) {
+      http_batch_enrich_free(out);
+      return false;
+    }
+  }
+  return true;
+}
+
+static void append_enriched_fields_json(
+    nbase_sbuf_t *sb,
+    const nbase_db_t *db,
+    uint64_t id,
+    uint32_t idx,
+    bool inc_meta,
+    bool inc_vec,
+    bool inc_text,
+    bool vec_null_on_missing,
+    const http_batch_enrich_t *e) {
+  if (inc_meta) {
+    nbase_sbuf_append(sb, ",\"metadata\":");
+    append_meta_json(sb, db, id);
+  }
+  if (inc_vec) {
+    if (e != NULL && e->vfound != NULL && idx < e->count && e->vfound[idx]) {
+      const float *v = e->vecs + (size_t)idx * (size_t)e->dim;
+      nbase_sbuf_append(sb, ",\"vector\":[");
+      for (uint32_t d = 0U; d < e->dim; d++) {
+        nbase_sbuf_appendf(sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+      }
+      nbase_sbuf_append_n(sb, "]", 1U);
+    } else if (vec_null_on_missing) {
+      nbase_sbuf_append(sb, ",\"vector\":null");
+    }
+  }
+  if (inc_text) {
+    if (e != NULL && e->tfound != NULL && idx < e->count && e->tfound[idx] && e->texts[idx] != NULL) {
+      nbase_sbuf_append(sb, ",\"text\":");
+      nbase_sbuf_append_json_str(sb, e->texts[idx]);
+    } else {
+      nbase_sbuf_append(sb, ",\"text\":null");
+    }
+  }
+}
+
 static void handle_health(const http_conn_t *c) {
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
@@ -1914,8 +2003,6 @@ static void handle_list_vectors(const http_conn_t *c, const char *query_str) {
   }
 
   uint32_t dim = 0U;
-  float *vecs = NULL;
-  bool *found = NULL;
   if (inc_vec && got > 0U) {
     nbase_stats_t db_st;
     st = nbase_stats(srv->db, &db_st);
@@ -1925,23 +2012,13 @@ static void handle_list_vectors(const http_conn_t *c, const char *query_str) {
       return;
     }
     dim = db_st.dim;
-    vecs = malloc((size_t)got * (size_t)dim * sizeof(float));
-    found = malloc((size_t)got * sizeof(bool));
-    if (!vecs || !found) {
-      free(vecs);
-      free(found);
-      free(ids);
-      send_error_json(c, 500, "out of memory");
-      return;
-    }
-    st = nbase_get_batch(srv->db, ids, got, dim, vecs, found);
-    if (st != NBASE_OK) {
-      free(vecs);
-      free(found);
-      free(ids);
-      send_error_json(c, http_code_for_status(st), nbase_strerror(st));
-      return;
-    }
+  }
+
+  http_batch_enrich_t enrich;
+  if (!http_batch_enrich_load(srv->db, ids, got, dim, inc_vec, inc_text, &enrich)) {
+    free(ids);
+    send_error_json(c, 500, "out of memory");
+    return;
   }
 
   nbase_sbuf_t sb;
@@ -1959,28 +2036,12 @@ static void handle_list_vectors(const http_conn_t *c, const char *query_str) {
   nbase_sbuf_append(&sb, "],\"results\":[");
   for (uint32_t i = 0U; i < got; i++) {
     nbase_sbuf_appendf(&sb, i == 0U ? "{\"id\":%llu" : ",{\"id\":%llu", (unsigned long long)ids[i]);
-    if (inc_vec && found != NULL && found[i]) {
-      nbase_sbuf_append(&sb, ",\"vector\":[");
-      const float *v = vecs + (size_t)i * (size_t)dim;
-      for (uint32_t d = 0U; d < dim; d++) {
-        nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
-      }
-      nbase_sbuf_append_n(&sb, "]", 1U);
-    }
-    if (inc_meta) {
-      nbase_sbuf_append(&sb, ",\"metadata\":");
-      append_meta_json(&sb, srv->db, ids[i]);
-    }
-    if (inc_text) {
-      nbase_sbuf_append(&sb, ",\"text\":");
-      append_text_json(&sb, srv->db, ids[i]);
-    }
+    append_enriched_fields_json(&sb, srv->db, ids[i], i, inc_meta, inc_vec, inc_text, false, &enrich);
     nbase_sbuf_append_n(&sb, "}", 1U);
   }
   nbase_sbuf_append(&sb, "]}");
 
-  free(vecs);
-  free(found);
+  http_batch_enrich_free(&enrich);
   free(ids);
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
@@ -2327,6 +2388,16 @@ static void handle_get_vector_id(const http_conn_t *c, uint64_t id, const char *
   nbase_sbuf_free(&sb);
 }
 
+static void append_result_entries_json(
+    nbase_sbuf_t *sb,
+    nbase_db_t *db,
+    const nbase_result_t *res,
+    uint32_t count,
+    uint32_t dim,
+    bool inc_meta,
+    bool inc_vec,
+    bool inc_text);
+
 static void send_similar_results(
     const http_conn_t *c,
     const nbase_result_t *res,
@@ -2335,30 +2406,10 @@ static void send_similar_results(
     bool inc_meta,
     bool inc_vec,
     bool inc_text) {
-  nbase_http_server_t *srv = c->srv;
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
   nbase_sbuf_appendf(&sb, "{\"success\":true,\"count\":%u,\"results\":[", got);
-  for (uint32_t i = 0U; i < got; i++) {
-    nbase_sbuf_appendf(
-        &sb,
-        i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
-        (unsigned long long)res[i].id,
-        (double)res[i].distance);
-    if (inc_meta) {
-      nbase_sbuf_append(&sb, ",\"metadata\":");
-      append_meta_json(&sb, srv->db, res[i].id);
-    }
-    if (inc_vec) {
-      nbase_sbuf_append(&sb, ",\"vector\":");
-      append_vector_json(&sb, srv->db, res[i].id, dim);
-    }
-    if (inc_text) {
-      nbase_sbuf_append(&sb, ",\"text\":");
-      append_text_json(&sb, srv->db, res[i].id);
-    }
-    nbase_sbuf_append_n(&sb, "}", 1U);
-  }
+  append_result_entries_json(&sb, c->srv->db, res, got, dim, inc_meta, inc_vec, inc_text);
   nbase_sbuf_append(&sb, "]}");
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
@@ -2492,6 +2543,149 @@ static void handle_post_similar(
 
   send_similar_results(c, res, got, db_st.dim, inc_meta, inc_vec, inc_text);
   free(res);
+}
+
+static void handle_search_similar_batch(const http_conn_t *c, const char *body, size_t body_len) {
+  nbase_http_server_t *srv = c->srv;
+  nbase_json_t *root = NULL;
+  if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
+    nbase_json_free(root);
+    send_error_json(c, 400, "invalid JSON request body");
+    return;
+  }
+
+  const nbase_json_t *jids = nbase_json_obj_get(root, "ids");
+  if (!jids || jids->type != NBASE_JSON_ARRAY || jids->len == 0U || jids->len > 1000U) {
+    nbase_json_free(root);
+    send_error_json(c, 400, "ids must be a non-empty array of at most 1000 ids");
+    return;
+  }
+
+  uint32_t k = 10U;
+  const nbase_json_t *jk = nbase_json_obj_get(root, "k");
+  if (jk != NULL) {
+    if (jk->type != NBASE_JSON_NUMBER || !jk->is_int || jk->i64 <= 0 || jk->i64 > 10000) {
+      nbase_json_free(root);
+      send_error_json(c, 400, "k must be in 1..10000");
+      return;
+    }
+    k = (uint32_t)jk->i64;
+  }
+
+  bool inc_meta = false;
+  bool inc_vec = false;
+  bool inc_text = false;
+  if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
+    nbase_json_free(root);
+    return;
+  }
+
+  nbase_search_opts_t opts = nbase_search_opts_default();
+  nbase_meta_cond_t *conds = NULL;
+  nbase_meta_filter_t meta_flt = {NULL, 0U};
+  if (!parse_search_common_opts(root, &opts, &conds, &meta_flt)) {
+    free(conds);
+    nbase_json_free(root);
+    send_error_json(c, 400, "invalid search options");
+    return;
+  }
+
+  uint32_t cnt = (uint32_t)jids->len;
+  uint64_t *ids = malloc((size_t)cnt * sizeof(uint64_t));
+  if (!ids) {
+    free(conds);
+    nbase_json_free(root);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+  for (uint32_t i = 0U; i < cnt; i++) {
+    if (!parse_json_u64(jids->items[i], &ids[i])) {
+      free(ids);
+      free(conds);
+      nbase_json_free(root);
+      send_error_json(c, 400, "ids array elements must be unsigned 64-bit integers");
+      return;
+    }
+  }
+
+  nbase_stats_t db_st;
+  if (nbase_stats(srv->db, &db_st) != NBASE_OK) {
+    free(ids);
+    free(conds);
+    nbase_json_free(root);
+    send_error_json(c, 500, "failed to read db stats");
+    return;
+  }
+
+  for (uint32_t i = 0U; i < cnt; i++) {
+    if (!nbase_contains(srv->db, ids[i])) {
+      free(ids);
+      free(conds);
+      nbase_json_free(root);
+      send_error_json(c, 404, nbase_strerror(NBASE_ERR_NOT_FOUND));
+      return;
+    }
+  }
+
+  nbase_result_t *res_buf = malloc((size_t)cnt * (size_t)k * sizeof(nbase_result_t));
+  uint32_t *res_cnts = calloc(cnt, sizeof(uint32_t));
+  if (!res_buf || !res_cnts) {
+    free(res_buf);
+    free(res_cnts);
+    free(ids);
+    free(conds);
+    nbase_json_free(root);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+
+  uint64_t t0 = monotonic_us();
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t q = 0U; q < cnt && st == NBASE_OK; q++) {
+    st = nbase_find_similar(
+        srv->db, ids[q], k, &opts, res_buf + (size_t)q * (size_t)k, &res_cnts[q]);
+  }
+  uint64_t t1 = monotonic_us();
+  record_search_latency(srv, cnt, t1 - t0);
+
+  free(ids);
+  free(conds);
+  nbase_json_free(root);
+
+  if (st != NBASE_OK) {
+    free(res_buf);
+    free(res_cnts);
+    send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(&sb, "{\"success\":true,\"count\":%u,\"results\":[", cnt);
+  for (uint32_t q = 0U; q < cnt && !sb.oom; q++) {
+    nbase_sbuf_append_n(&sb, q == 0U ? "[" : ",[", q == 0U ? 1U : 2U);
+    append_result_entries_json(
+        &sb,
+        srv->db,
+        res_buf + (size_t)q * (size_t)k,
+        res_cnts[q],
+        db_st.dim,
+        inc_meta,
+        inc_vec,
+        inc_text);
+    nbase_sbuf_append_n(&sb, "]", 1U);
+  }
+  nbase_sbuf_append(&sb, "]}");
+  free(res_buf);
+  free(res_cnts);
+
+  if (sb.oom) {
+    nbase_sbuf_free(&sb);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+  send_sbuf_json(c, 200, &sb);
+  nbase_sbuf_free(&sb);
 }
 
 static void handle_id_metadata_write(
@@ -2849,26 +3043,37 @@ static void append_result_entries_json(
     bool inc_meta,
     bool inc_vec,
     bool inc_text) {
+  http_batch_enrich_t enrich;
+  memset(&enrich, 0, sizeof(enrich));
+  if (count > 0U && (inc_vec || inc_text)) {
+    uint64_t stack_ids[128];
+    uint64_t *ids = (count <= 128U) ? stack_ids : malloc((size_t)count * sizeof(uint64_t));
+    if (!ids) {
+      sb->oom = true;
+      return;
+    }
+    for (uint32_t i = 0U; i < count; i++) {
+      ids[i] = res[i].id;
+    }
+    bool ok = http_batch_enrich_load(db, ids, count, dim, inc_vec, inc_text, &enrich);
+    if (ids != stack_ids) {
+      free(ids);
+    }
+    if (!ok) {
+      sb->oom = true;
+      return;
+    }
+  }
   for (uint32_t i = 0U; i < count; i++) {
     nbase_sbuf_appendf(
         sb,
         i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
         (unsigned long long)res[i].id,
         (double)res[i].distance);
-    if (inc_meta) {
-      nbase_sbuf_append(sb, ",\"metadata\":");
-      append_meta_json(sb, db, res[i].id);
-    }
-    if (inc_vec) {
-      nbase_sbuf_append(sb, ",\"vector\":");
-      append_vector_json(sb, db, res[i].id, dim);
-    }
-    if (inc_text) {
-      nbase_sbuf_append(sb, ",\"text\":");
-      append_text_json(sb, db, res[i].id);
-    }
+    append_enriched_fields_json(sb, db, res[i].id, i, inc_meta, inc_vec, inc_text, true, &enrich);
     nbase_sbuf_append_n(sb, "}", 1U);
   }
+  http_batch_enrich_free(&enrich);
 }
 
 static void handle_search(const http_conn_t *c, const char *body, size_t body_len) {
@@ -3369,26 +3574,23 @@ static void handle_search_metadata(const http_conn_t *c, const char *body, size_
     return;
   }
 
+  http_batch_enrich_t enrich;
+  if (!http_batch_enrich_load(srv->db, ids, got, db_st.dim, inc_vec, inc_text, &enrich)) {
+    free(ids);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
+
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
   nbase_sbuf_appendf(&sb, "{\"success\":true,\"count\":%u,\"results\":[", got);
   for (uint32_t i = 0U; i < got; i++) {
     nbase_sbuf_appendf(&sb, i == 0U ? "{\"id\":%llu" : ",{\"id\":%llu", (unsigned long long)ids[i]);
-    if (inc_meta) {
-      nbase_sbuf_append(&sb, ",\"metadata\":");
-      append_meta_json(&sb, srv->db, ids[i]);
-    }
-    if (inc_vec) {
-      nbase_sbuf_append(&sb, ",\"vector\":");
-      append_vector_json(&sb, srv->db, ids[i], db_st.dim);
-    }
-    if (inc_text) {
-      nbase_sbuf_append(&sb, ",\"text\":");
-      append_text_json(&sb, srv->db, ids[i]);
-    }
+    append_enriched_fields_json(&sb, srv->db, ids[i], i, inc_meta, inc_vec, inc_text, true, &enrich);
     nbase_sbuf_append_n(&sb, "}", 1U);
   }
   nbase_sbuf_append(&sb, "]}");
+  http_batch_enrich_free(&enrich);
   free(ids);
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
@@ -3403,26 +3605,37 @@ static void append_scored_entries_json(
     bool inc_meta,
     bool inc_vec,
     bool inc_text) {
+  http_batch_enrich_t enrich;
+  memset(&enrich, 0, sizeof(enrich));
+  if (count > 0U && (inc_vec || inc_text)) {
+    uint64_t stack_ids[128];
+    uint64_t *ids = (count <= 128U) ? stack_ids : malloc((size_t)count * sizeof(uint64_t));
+    if (!ids) {
+      sb->oom = true;
+      return;
+    }
+    for (uint32_t i = 0U; i < count; i++) {
+      ids[i] = res[i].id;
+    }
+    bool ok = http_batch_enrich_load(db, ids, count, dim, inc_vec, inc_text, &enrich);
+    if (ids != stack_ids) {
+      free(ids);
+    }
+    if (!ok) {
+      sb->oom = true;
+      return;
+    }
+  }
   for (uint32_t i = 0U; i < count; i++) {
     nbase_sbuf_appendf(
         sb,
         i == 0U ? "{\"id\":%llu,\"score\":%.7g" : ",{\"id\":%llu,\"score\":%.7g",
         (unsigned long long)res[i].id,
         (double)res[i].score);
-    if (inc_meta) {
-      nbase_sbuf_append(sb, ",\"metadata\":");
-      append_meta_json(sb, db, res[i].id);
-    }
-    if (inc_vec) {
-      nbase_sbuf_append(sb, ",\"vector\":");
-      append_vector_json(sb, db, res[i].id, dim);
-    }
-    if (inc_text) {
-      nbase_sbuf_append(sb, ",\"text\":");
-      append_text_json(sb, db, res[i].id);
-    }
+    append_enriched_fields_json(sb, db, res[i].id, i, inc_meta, inc_vec, inc_text, true, &enrich);
     nbase_sbuf_append_n(sb, "}", 1U);
   }
+  http_batch_enrich_free(&enrich);
 }
 
 static void handle_search_text(const http_conn_t *c, const char *body, size_t body_len) {
@@ -5032,6 +5245,14 @@ static void dispatch_request(
   }
   if (strcmp(method, "POST") == 0 && strcmp(path, "/api/search/batch") == 0) {
     handle_search_batch(c, body, body_len);
+    return;
+  }
+  if (strcmp(path, "/api/search/similar") == 0) {
+    if (strcmp(method, "POST") == 0) {
+      handle_search_similar_batch(c, body, body_len);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
     return;
   }
   if (strcmp(path, "/api/search/radius") == 0) {

@@ -993,6 +993,57 @@ static nbase_status_t cl_search_internal(
   return st;
 }
 
+typedef struct cl_exclude_id_ctx {
+  uint64_t exclude_id;
+  nbase_filter_fn inner;
+  void *inner_ctx;
+} cl_exclude_id_ctx_t;
+
+static bool cl_exclude_id_filter(uint64_t cand_id, void *raw) {
+  const cl_exclude_id_ctx_t *ctx = (const cl_exclude_id_ctx_t *)raw;
+  if (cand_id == ctx->exclude_id) {
+    return false;
+  }
+  return ctx->inner ? ctx->inner(cand_id, ctx->inner_ctx) : true;
+}
+
+nbase_status_t nbase_clustered_find_similar(
+    const nbase_clustered_t *cl,
+    uint64_t id,
+    uint32_t k,
+    uint32_t nprobe,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_count) {
+  if (!cl || !out_count || (k > 0U && !out_results)) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  *out_count = 0U;
+
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+  uint32_t slot = NBASE_INVALID_SLOT;
+  const float *qvec = NULL;
+  if (nbase_store_find_slot(cl->store, id, &slot)) {
+    qvec = nbase_store_get_vector(cl->store, slot);
+  }
+  if (!qvec) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    return NBASE_ERR_NOT_FOUND;
+  }
+  if (k == 0U) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    return NBASE_OK;
+  }
+
+  cl_exclude_id_ctx_t ex = {id, filter, filter_ctx};
+  nbase_status_t st = cl_search_unlocked(
+      cl, qvec, cl->cfg.dim, k, false, 0.0f, nprobe, cl_exclude_id_filter, &ex, out_results, out_count);
+  pthread_rwlock_unlock(&mcl->rwlock);
+  return st;
+}
+
 nbase_status_t nbase_clustered_compact(nbase_clustered_t *cl) {
   if (!cl) {
     return NBASE_ERR_INVALID_ARG;
