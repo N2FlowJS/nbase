@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-11-26
+
+Embedded & partitioned batch text retrieval (`nbase_get_text_batch`, `nbase_pdb_get_text_batch`), C++17 `Database::get_text_batch` & `PartitionedDatabase::get_text_batch` sharing `detail::unpack_texts_batch`, AVX2 integer-accumulated Hamming single/batch kernels (`hamming_avx2`, `hamming_batch_avx2`), 4-row BQ `popcnt` unrolling for `num_words == 4` (`dim=256`), HTTP `PATCH`/`POST /api/vectors/patch` atomic batch patching & batch text lookup upgrade, and CLI `--json`/`--include-*` flags on `search` and `find-similar`.
+
+### Added & Changed
+- **Core C11 & C++17 Batch Text Retrieval (`include/nbase.h`, `src/nbase.c`, `src/partitioned.c`, `include/nbase.hpp`)**:
+  - Added `nbase_get_text_batch(const nbase_db_t *, const uint64_t *, uint32_t, char **, bool *)` and `nbase_pdb_get_text_batch(nbase_pdb_t *, const uint64_t *, uint32_t, char **, bool *)` (with `nbase_free_texts` ownership), grouped by partition ID under a single lock acquisition.
+  - Added `nbase::detail::unpack_texts_batch` RAII helper shared across `Database::get_text_batch`, `PartitionedDatabase::get_text_batch`, and `Bm25::get_batch`.
+- **SIMD & Search Performance (`src/distance.c`, `src/bq.c`, `bench/bench_nbase.c`)**:
+  - Added `hsum256_epi32` and upgraded `hamming_avx2` + `hamming_batch_avx2` to 2-row 2-way (`i += 16`) pure 256-bit SIMD integer accumulation replacing per-lane `movemask + popcnt`.
+  - Extended `bq_hamming_batch_popcnt` `num_words == 4U` (`dim=256`) to a 4-row unrolled loop (`i += 4`) matching the `num_words == 1U` and `2U` fast paths.
+  - Added `nbase_get_text_batch` (`text_get_batch(2000)`) benchmark coverage in `bench/bench_nbase.c`.
+- **HTTP/1.1 Server & CLI Parity (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Refactored single/batch vector patching around shared `parse_and_validate_patch_item` / `apply_patch_item` helpers and added atomic `PATCH` / `POST /api/vectors/patch`.
+  - Switched `POST /api/vectors/text/get` and `nbase-cli get-text-batch` onto `nbase_get_text_batch`.
+  - Added `--json`, `--include-vectors`, `--include-meta`, and `--include-text` to `nbase-cli search` and `find-similar` (plus `--metric <M>` on `find-similar`) backed by `cli_print_search_results_json`.
+- **Tests (`tests/test_db.c`, `tests/test_partitioned.c`, `tests/test_distance.c`, `tests/test_bq.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.17.0"`, added `test_db_get_text_batch_and_concurrent_reads`, `test_pdb_get_text_batch_multi_partition_and_eviction`, `test_hamming_avx2_and_signed_zero_edges`, `num_words == 4` unroll edges in `test_bq.c`, and `test_http_server_patch_batch_and_text_get_edges`.
+
 ## [1.16.0] - 2026-11-26
 
 BM25 telemetry (`nbase_bm25_stats`), `nbase_bm25_get_batch` / `nbase_free_texts`, per-worker generation-stamped `score_map_t` scratch & single-term search fast path, C++17 `Bm25::{stats, get_batch}`, 2-row AVX2 Manhattan batch (`manhattan_batch_avx2`), HTTP `POST /api/vectors/{metadata,text}/get` & `parse_include_flags` deduplication, and CLI `patch-batch`.

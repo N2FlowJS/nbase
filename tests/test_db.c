@@ -1,6 +1,7 @@
 #include "test_common.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -363,7 +364,7 @@ static void test_db_query_lru_cache_and_invalidation(void) {
 }
 
 static void test_db_upsert_batch_and_get_batch(void) {
-  ASSERT_TRUE(strcmp(nbase_version(), "1.16.0") == 0);
+  ASSERT_TRUE(strcmp(nbase_version(), "1.17.0") == 0);
 
   const uint32_t dim = 3U;
   char dir[256];
@@ -816,6 +817,95 @@ static void test_binary_formats_fuzz_corruption_and_truncation(void) {
   test_rm_rf(fuzz_dir);
 }
 
+typedef struct db_text_batch_worker_ctx {
+  const nbase_db_t *db;
+} db_text_batch_worker_ctx_t;
+
+static void *db_text_batch_reader_worker(void *raw) {
+  const db_text_batch_worker_ctx_t *ctx = (const db_text_batch_worker_ctx_t *)raw;
+  static const uint64_t qids[5] = {3ULL, 999ULL, 1ULL, 2ULL, 1ULL};
+  for (uint32_t it = 0U; it < 200U; it++) {
+    char *texts[5] = {NULL, NULL, NULL, NULL, NULL};
+    bool found[5] = {false, false, false, false, false};
+    if (nbase_get_text_batch(ctx->db, qids, 5U, texts, found) != NBASE_OK) {
+      return (void *)(uintptr_t)1U;
+    }
+    bool ok = found[0] && texts[0] != NULL && strcmp(texts[0], "") == 0 &&
+              !found[1] && texts[1] == NULL &&
+              found[2] && texts[2] != NULL && strcmp(texts[2], "alpha vector doc") == 0 &&
+              !found[3] && texts[3] == NULL &&
+              found[4] && texts[4] != NULL && strcmp(texts[4], "alpha vector doc") == 0;
+    nbase_free_texts(texts, 5U);
+    if (!ok) {
+      return (void *)(uintptr_t)1U;
+    }
+  }
+  return NULL;
+}
+
+static void test_db_get_text_batch_and_concurrent_reads(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  nbase_config_t cfg = nbase_config_default(4U);
+  cfg.seed = 4217ULL;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  ASSERT_STATUS(nbase_add(db, 1ULL, v, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 2ULL, v, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 3ULL, v, 4U), NBASE_OK);
+
+  /* DB without BM25 initialized (db->bm25 == NULL) still handles get_text_batch safely. */
+  uint64_t pre_ids[2] = {1ULL, 999ULL};
+  char *pre_texts[2] = {NULL, NULL};
+  bool pre_found[2] = {true, true};
+  ASSERT_STATUS(nbase_get_text_batch(db, pre_ids, 2U, pre_texts, pre_found), NBASE_OK);
+  ASSERT_TRUE(!pre_found[0] && pre_texts[0] == NULL);
+  ASSERT_TRUE(!pre_found[1] && pre_texts[1] == NULL);
+
+  ASSERT_STATUS(nbase_get_text_batch(NULL, pre_ids, 2U, pre_texts, pre_found), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_get_text_batch(db, NULL, 2U, pre_texts, pre_found), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_get_text_batch(db, pre_ids, 2U, NULL, pre_found), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_get_text_batch(db, pre_ids, 2U, pre_texts, NULL), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_get_text_batch(db, NULL, 0U, NULL, NULL), NBASE_OK);
+
+  ASSERT_STATUS(nbase_set_text(db, 1ULL, "alpha vector doc"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 3ULL, ""), NBASE_OK);
+
+  ASSERT_STATUS(nbase_save(db, dir), NBASE_OK);
+  nbase_close(db);
+
+  ASSERT_STATUS(nbase_open(dir, &db), NBASE_OK);
+
+  uint64_t qids[5] = {3ULL, 999ULL, 1ULL, 2ULL, 1ULL};
+  char *texts[5] = {NULL, NULL, NULL, NULL, NULL};
+  bool found[5] = {false, false, false, false, false};
+  ASSERT_STATUS(nbase_get_text_batch(db, qids, 5U, texts, found), NBASE_OK);
+  ASSERT_TRUE(found[0] && texts[0] != NULL && strcmp(texts[0], "") == 0);
+  ASSERT_TRUE(!found[1] && texts[1] == NULL);
+  ASSERT_TRUE(found[2] && texts[2] != NULL && strcmp(texts[2], "alpha vector doc") == 0);
+  ASSERT_TRUE(!found[3] && texts[3] == NULL);
+  ASSERT_TRUE(found[4] && texts[4] != NULL && strcmp(texts[4], "alpha vector doc") == 0);
+  nbase_free_texts(texts, 5U);
+
+  /* Concurrent rdlock get_text_batch stress test for TSan verification. */
+  db_text_batch_worker_ctx_t ctx = {db};
+  pthread_t th[4];
+  for (uint32_t t = 0U; t < 4U; t++) {
+    ASSERT_TRUE(pthread_create(&th[t], NULL, db_text_batch_reader_worker, &ctx) == 0);
+  }
+  for (uint32_t t = 0U; t < 4U; t++) {
+    void *ret = NULL;
+    ASSERT_TRUE(pthread_join(th[t], &ret) == 0);
+    ASSERT_TRUE(ret == NULL);
+  }
+
+  nbase_close(db);
+  test_rm_rf(dir);
+}
+
 void test_db_run(void) {
   RUN_TEST(test_db_upsert_with_and_without_hnsw);
   RUN_TEST(test_db_batch_search);
@@ -827,4 +917,5 @@ void test_db_run(void) {
   RUN_TEST(test_db_list_ids_and_search_radius);
   RUN_TEST(test_db_count_filtered_and_unfiltered);
   RUN_TEST(test_binary_formats_fuzz_corruption_and_truncation);
+  RUN_TEST(test_db_get_text_batch_and_concurrent_reads);
 }

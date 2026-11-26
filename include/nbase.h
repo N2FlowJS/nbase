@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 16
+#define NBASE_VERSION_MINOR 17
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -226,6 +226,13 @@ nbase_status_t nbase_search_batch(const nbase_db_t *db, const float *queries, ui
 nbase_status_t nbase_set_text(nbase_db_t *db, uint64_t id, const char *text);
 nbase_status_t nbase_set_text_batch(nbase_db_t *db, const uint64_t *ids, const char *const *texts, uint32_t count);
 nbase_status_t nbase_get_text(const nbase_db_t *db, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
+/* Caller must free strings in out_texts via nbase_free_texts(out_texts, count). */
+nbase_status_t nbase_get_text_batch(
+    const nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t count,
+    char **out_texts,
+    bool *out_found);
 nbase_status_t nbase_delete_text(nbase_db_t *db, uint64_t id);
 nbase_status_t nbase_delete_text_batch(nbase_db_t *db, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 nbase_status_t nbase_search_text(const nbase_db_t *db, const char *query, uint32_t k, const nbase_meta_filter_t *meta_filter, nbase_scored_id_t *out_results, uint32_t *out_count);
@@ -332,6 +339,12 @@ nbase_status_t nbase_pdb_query_meta(nbase_pdb_t *pdb, const nbase_meta_filter_t 
 nbase_status_t nbase_pdb_set_text(nbase_pdb_t *pdb, uint64_t id, const char *text);
 nbase_status_t nbase_pdb_set_text_batch(nbase_pdb_t *pdb, const uint64_t *ids, const char *const *texts, uint32_t count);
 nbase_status_t nbase_pdb_get_text(nbase_pdb_t *pdb, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
+nbase_status_t nbase_pdb_get_text_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t count,
+    char **out_texts,
+    bool *out_found);
 nbase_status_t nbase_pdb_delete_text(nbase_pdb_t *pdb, uint64_t id);
 nbase_status_t nbase_pdb_delete_text_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
 

@@ -1,5 +1,6 @@
 #include "test_common.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -645,6 +646,101 @@ static void test_pdb_batch_delete_meta_text_and_search_text_hybrid_batch(void) {
   test_rm_rf(dir);
 }
 
+typedef struct pdb_text_batch_worker_ctx {
+  nbase_pdb_t *pdb;
+} pdb_text_batch_worker_ctx_t;
+
+static void *pdb_text_batch_reader_worker(void *raw) {
+  pdb_text_batch_worker_ctx_t *ctx = (pdb_text_batch_worker_ctx_t *)raw;
+  static const uint64_t qids[8] = {50ULL, 20ULL, 10ULL, 999ULL, 50ULL, 40ULL, 30ULL, 60ULL};
+  for (uint32_t it = 0U; it < 60U; it++) {
+    char *texts[8] = {NULL};
+    bool found[8] = {false};
+    if (nbase_pdb_get_text_batch(ctx->pdb, qids, 8U, texts, found) != NBASE_OK) {
+      return (void *)(uintptr_t)1U;
+    }
+    bool ok = !found[0] && texts[0] == NULL &&
+              found[1] && texts[1] != NULL && strcmp(texts[1], "part text twenty") == 0 &&
+              found[2] && texts[2] != NULL && strcmp(texts[2], "part text ten") == 0 &&
+              !found[3] && texts[3] == NULL &&
+              !found[4] && texts[4] == NULL &&
+              found[5] && texts[5] != NULL && strcmp(texts[5], "part text forty") == 0 &&
+              !found[6] && texts[6] == NULL &&
+              found[7] && texts[7] != NULL && strcmp(texts[7], "part text sixty") == 0;
+    nbase_free_texts(texts, 8U);
+    if (!ok) {
+      return (void *)(uintptr_t)1U;
+    }
+  }
+  return NULL;
+}
+
+static void test_pdb_get_text_batch_multi_partition_and_eviction(void) {
+  char dir[256];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(4U);
+  cfg.partition_capacity = 2U;
+  cfg.max_active_partitions = 1U;
+  cfg.seed = 4317ULL;
+
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  float vecs[6 * 4];
+  test_fill_vectors(vecs, 6U, 4U, 917ULL);
+  uint64_t ids[6] = {10ULL, 20ULL, 30ULL, 40ULL, 50ULL, 60ULL};
+  ASSERT_STATUS(nbase_pdb_add_batch(pdb, ids, vecs, 6U, 4U, 2U), NBASE_OK);
+
+  uint64_t tids[4] = {10ULL, 20ULL, 40ULL, 60ULL};
+  const char *tvals[4] = {
+      "part text ten",
+      "part text twenty",
+      "part text forty",
+      "part text sixty"};
+  ASSERT_STATUS(nbase_pdb_set_text_batch(pdb, tids, tvals, 4U), NBASE_OK);
+
+  char *bad_texts[2] = {NULL, NULL};
+  bool bad_found[2] = {false, false};
+  ASSERT_STATUS(nbase_pdb_get_text_batch(NULL, tids, 2U, bad_texts, bad_found), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_pdb_get_text_batch(pdb, NULL, 2U, bad_texts, bad_found), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_pdb_get_text_batch(pdb, tids, 2U, NULL, bad_found), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_pdb_get_text_batch(pdb, tids, 2U, bad_texts, NULL), NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(nbase_pdb_get_text_batch(pdb, NULL, 0U, NULL, NULL), NBASE_OK);
+
+  ASSERT_STATUS(nbase_pdb_save(pdb), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  uint64_t qids[8] = {50ULL, 20ULL, 10ULL, 999ULL, 50ULL, 40ULL, 30ULL, 60ULL};
+  char *out_texts[8] = {NULL};
+  bool out_found[8] = {false};
+  ASSERT_STATUS(nbase_pdb_get_text_batch(pdb, qids, 8U, out_texts, out_found), NBASE_OK);
+  ASSERT_TRUE(!out_found[0] && out_texts[0] == NULL);
+  ASSERT_TRUE(out_found[1] && out_texts[1] != NULL && strcmp(out_texts[1], "part text twenty") == 0);
+  ASSERT_TRUE(out_found[2] && out_texts[2] != NULL && strcmp(out_texts[2], "part text ten") == 0);
+  ASSERT_TRUE(!out_found[3] && out_texts[3] == NULL);
+  ASSERT_TRUE(!out_found[4] && out_texts[4] == NULL);
+  ASSERT_TRUE(out_found[5] && out_texts[5] != NULL && strcmp(out_texts[5], "part text forty") == 0);
+  ASSERT_TRUE(!out_found[6] && out_texts[6] == NULL);
+  ASSERT_TRUE(out_found[7] && out_texts[7] != NULL && strcmp(out_texts[7], "part text sixty") == 0);
+  nbase_free_texts(out_texts, 8U);
+
+  pdb_text_batch_worker_ctx_t ctx = {pdb};
+  pthread_t th[4];
+  for (uint32_t t = 0U; t < 4U; t++) {
+    ASSERT_TRUE(pthread_create(&th[t], NULL, pdb_text_batch_reader_worker, &ctx) == 0);
+  }
+  for (uint32_t t = 0U; t < 4U; t++) {
+    void *ret = NULL;
+    ASSERT_TRUE(pthread_join(th[t], &ret) == 0);
+    ASSERT_TRUE(ret == NULL);
+  }
+
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
@@ -654,4 +750,5 @@ void test_partitioned_run(void) {
   RUN_TEST(test_pdb_meta_text_batch_and_filtered_relationships);
   RUN_TEST(test_pdb_count_filtered_and_unfiltered);
   RUN_TEST(test_pdb_batch_delete_meta_text_and_search_text_hybrid_batch);
+  RUN_TEST(test_pdb_get_text_batch_multi_partition_and_eviction);
 }

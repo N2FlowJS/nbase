@@ -121,7 +121,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.16.0";
+  return "1.17.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -1722,6 +1722,42 @@ nbase_status_t nbase_get_text(
     st = NBASE_ERR_NOT_FOUND;
   } else {
     st = nbase_bm25_get(db->bm25, id, out_buf, buf_len, out_len);
+  }
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  return st;
+}
+
+nbase_status_t nbase_get_text_batch(
+    const nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t count,
+    char **out_texts,
+    bool *out_found) {
+  if (!db || (count > 0U && (!ids || !out_texts || !out_found))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    out_texts[i] = NULL;
+    out_found[i] = false;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+  nbase_status_t st = NBASE_OK;
+  if (db->bm25 != NULL) {
+    st = nbase_bm25_get_batch(db->bm25, ids, count, out_texts, out_found);
+    if (st == NBASE_OK) {
+      for (uint32_t i = 0U; i < count; i++) {
+        if (out_found[i] && !nbase_store_find_slot(db->store, ids[i], NULL)) {
+          free(out_texts[i]);
+          out_texts[i] = NULL;
+          out_found[i] = false;
+        }
+      }
+    }
   }
   pthread_rwlock_unlock(&mutable_db->rwlock);
   return st;

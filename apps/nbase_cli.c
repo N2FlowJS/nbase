@@ -43,11 +43,11 @@ static void print_usage(const char *prog) {
       "  get-text-batch <dir> <id1,id2,...>\n"
       "  delete-text <dir> <id>\n"
       "  delete-text-batch <dir> <id1,id2,...>\n"
-      "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>]\n"
+      "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
       "  search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>]\n"
       "  search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  rerank <dir> <diversity|weighted|standard> <id1:dist1,id2:dist2,...> [--k <K>] [--lambda <L>] [--weights <json>]\n"
-      "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--filter <json>]\n"
+      "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
       "  relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]\n"
@@ -729,6 +729,111 @@ static bool cli_meta_cb(const char *key, const nbase_meta_value_t *val, void *ra
       break;
   }
   return !ctx->sb->oom;
+}
+
+static bool cli_print_search_results_json(
+    const nbase_db_t *db,
+    uint32_t dim,
+    const nbase_result_t *res,
+    uint32_t got,
+    bool inc_vecs,
+    bool inc_meta,
+    bool inc_text) {
+  uint64_t *ids = NULL;
+  float *vecs = NULL;
+  bool *vfound = NULL;
+  char **texts = NULL;
+  bool *tfound = NULL;
+  nbase_status_t st = NBASE_OK;
+
+  if (got > 0U && (inc_vecs || inc_text)) {
+    ids = malloc((size_t)got * sizeof(uint64_t));
+    if (!ids) {
+      st = NBASE_ERR_NOMEM;
+    } else {
+      for (uint32_t i = 0U; i < got; i++) {
+        ids[i] = res[i].id;
+      }
+      if (inc_vecs) {
+        vecs = calloc((size_t)got * (size_t)dim, sizeof(float));
+        vfound = calloc(got, sizeof(bool));
+        if (!vecs || !vfound) {
+          st = NBASE_ERR_NOMEM;
+        } else {
+          st = nbase_get_batch(db, ids, got, dim, vecs, vfound);
+        }
+      }
+      if (st == NBASE_OK && inc_text) {
+        texts = calloc(got, sizeof(char *));
+        tfound = calloc(got, sizeof(bool));
+        if (!texts || !tfound) {
+          st = NBASE_ERR_NOMEM;
+        } else {
+          st = nbase_get_text_batch(db, ids, got, texts, tfound);
+        }
+      }
+    }
+  }
+
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  if (st == NBASE_OK) {
+    nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
+    for (uint32_t i = 0U; i < got && !sb.oom; i++) {
+      nbase_sbuf_appendf(
+          &sb,
+          i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
+          (unsigned long long)res[i].id,
+          (double)res[i].distance);
+      if (inc_vecs && vfound != NULL && vfound[i]) {
+        const float *v = vecs + (size_t)i * (size_t)dim;
+        nbase_sbuf_append(&sb, ",\"vector\":[");
+        for (uint32_t d = 0U; d < dim; d++) {
+          nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+        }
+        nbase_sbuf_append_n(&sb, "]", 1U);
+      }
+      if (inc_meta) {
+        cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
+        nbase_status_t mst = nbase_foreach_meta(db, res[i].id, cli_meta_cb, &mctx);
+        if (mst != NBASE_OK) {
+          st = mst;
+          break;
+        }
+        if (mctx.first) {
+          nbase_sbuf_append(&sb, ",\"metadata\":{}");
+        } else {
+          nbase_sbuf_append_n(&sb, "}", 1U);
+        }
+      }
+      if (inc_text) {
+        if (tfound != NULL && tfound[i] && texts != NULL && texts[i] != NULL) {
+          nbase_sbuf_append(&sb, ",\"text\":");
+          nbase_sbuf_append_json_str(&sb, texts[i]);
+        } else {
+          nbase_sbuf_append(&sb, ",\"text\":null");
+        }
+      }
+      nbase_sbuf_append_n(&sb, "}", 1U);
+    }
+    nbase_sbuf_append(&sb, "]}");
+  }
+
+  nbase_free_texts(texts, got);
+  free(texts);
+  free(tfound);
+  free(vecs);
+  free(vfound);
+  free(ids);
+
+  if (st != NBASE_OK || sb.oom || !sb.data) {
+    nbase_sbuf_free(&sb);
+    fprintf(stderr, "format search results failed: %s\n", nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
+    return false;
+  }
+  printf("%s\n", sb.data);
+  nbase_sbuf_free(&sb);
+  return true;
 }
 
 int main(int argc, char **argv) {
@@ -1538,8 +1643,17 @@ int main(int argc, char **argv) {
     nbase_sbuf_t sb;
     nbase_sbuf_init(&sb);
     nbase_sbuf_append_n(&sb, "[", 1U);
-    char *tbuf = NULL;
-    size_t tcap = 0U;
+    char **texts = NULL;
+    bool *found = NULL;
+    if (!is_meta && cnt > 0U) {
+      texts = calloc(cnt, sizeof(char *));
+      found = calloc(cnt, sizeof(bool));
+      if (!texts || !found) {
+        st = NBASE_ERR_NOMEM;
+      } else {
+        st = nbase_get_text_batch(db, ids, cnt, texts, found);
+      }
+    }
 
     for (uint32_t i = 0U; i < cnt && st == NBASE_OK && !sb.oom; i++) {
       if (i > 0U) {
@@ -1557,40 +1671,21 @@ int main(int argc, char **argv) {
             nbase_sbuf_append(&sb, mctx.first ? "{}}" : "}}");
           }
         }
+      } else if (found[i] && texts[i] != NULL) {
+        nbase_sbuf_append(&sb, "\"found\":true,\"text\":");
+        nbase_sbuf_append_json_str(&sb, texts[i]);
+        nbase_sbuf_append_n(&sb, "}", 1U);
       } else {
-        size_t tlen = 0U;
-        nbase_status_t gst = nbase_get_text(db, ids[i], NULL, 0U, &tlen);
-        if (gst == NBASE_ERR_NOT_FOUND) {
-          nbase_sbuf_append(&sb, "\"found\":false,\"text\":null}");
-        } else if (gst != NBASE_OK) {
-          st = gst;
-        } else {
-          if (tlen + 1U > tcap) {
-            size_t new_cap = tlen + 64U;
-            char *grown = realloc(tbuf, new_cap);
-            if (!grown) {
-              st = NBASE_ERR_NOMEM;
-              break;
-            }
-            tbuf = grown;
-            tcap = new_cap;
-          }
-          gst = nbase_get_text(db, ids[i], tbuf, tcap, &tlen);
-          if (gst != NBASE_OK) {
-            st = gst;
-          } else {
-            nbase_sbuf_append(&sb, "\"found\":true,\"text\":");
-            nbase_sbuf_append_json_str(&sb, tbuf);
-            nbase_sbuf_append_n(&sb, "}", 1U);
-          }
-        }
+        nbase_sbuf_append(&sb, "\"found\":false,\"text\":null}");
       }
     }
 
     if (st == NBASE_OK && !sb.oom) {
       nbase_sbuf_append_n(&sb, "]", 1U);
     }
-    free(tbuf);
+    nbase_free_texts(texts, cnt);
+    free(texts);
+    free(found);
     free(ids);
     nbase_close(db);
     if (st != NBASE_OK || sb.oom || !sb.data) {
@@ -2759,12 +2854,24 @@ int main(int argc, char **argv) {
     }
     uint32_t k = 10U;
     bool use_radius = false;
+    bool json_out = false;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     float max_dist = 0.0f;
     nbase_search_opts_t opts = nbase_search_opts_default();
     const char *flt_json = NULL;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--exact") == 0) {
         opts.mode = NBASE_SEARCH_EXACT;
+      } else if (strcmp(argv[i], "--json") == 0) {
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
       } else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
           fprintf(stderr, "Invalid --k\n");
@@ -2842,19 +2949,27 @@ int main(int argc, char **argv) {
              ? nbase_search_radius(db, q, s.dim, max_dist, k, &opts, res, &got)
              : nbase_search(db, q, s.dim, k, &opts, res, &got);
     free(q);
-    nbase_close(db);
     free(conds);
     nbase_json_free(flt_root);
     if (st != NBASE_OK) {
       free(res);
+      nbase_close(db);
       fprintf(stderr, "search failed: %s\n", nbase_strerror(st));
       return 1;
     }
-    for (uint32_t i = 0U; i < got; i++) {
-      printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].distance);
+    int rc = 0;
+    if (json_out || inc_vecs || inc_meta || inc_text) {
+      if (!cli_print_search_results_json(db, s.dim, res, got, inc_vecs, inc_meta, inc_text)) {
+        rc = 1;
+      }
+    } else {
+      for (uint32_t i = 0U; i < got; i++) {
+        printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].distance);
+      }
     }
     free(res);
-    return 0;
+    nbase_close(db);
+    return rc;
   }
 
   if (strcmp(cmd, "find-similar") == 0) {
@@ -2868,11 +2983,23 @@ int main(int argc, char **argv) {
       return 1;
     }
     uint32_t k = 10U;
+    bool json_out = false;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     nbase_search_opts_t opts = nbase_search_opts_default();
     const char *flt_json = NULL;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--exact") == 0) {
         opts.mode = NBASE_SEARCH_EXACT;
+      } else if (strcmp(argv[i], "--json") == 0) {
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
       } else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
           fprintf(stderr, "Invalid --k\n");
@@ -2883,6 +3010,12 @@ int main(int argc, char **argv) {
           fprintf(stderr, "Invalid --ef\n");
           return 1;
         }
+      } else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc) {
+        if (!parse_metric(argv[++i], &opts.metric)) {
+          fprintf(stderr, "Invalid --metric\n");
+          return 1;
+        }
+        opts.use_metric_override = true;
       } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
       } else {
@@ -2915,6 +3048,8 @@ int main(int argc, char **argv) {
       fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
       return 1;
     }
+    nbase_stats_t s;
+    (void)nbase_stats(db, &s);
     nbase_result_t *res = malloc((size_t)k * sizeof(nbase_result_t));
     if (!res) {
       nbase_close(db);
@@ -2924,19 +3059,27 @@ int main(int argc, char **argv) {
     }
     uint32_t got = 0U;
     st = nbase_find_similar(db, id, k, &opts, res, &got);
-    nbase_close(db);
     free(conds);
     nbase_json_free(flt_root);
     if (st != NBASE_OK) {
       free(res);
+      nbase_close(db);
       fprintf(stderr, "find-similar failed: %s\n", nbase_strerror(st));
       return 1;
     }
-    for (uint32_t i = 0U; i < got; i++) {
-      printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].distance);
+    int rc = 0;
+    if (json_out || inc_vecs || inc_meta || inc_text) {
+      if (!cli_print_search_results_json(db, s.dim, res, got, inc_vecs, inc_meta, inc_text)) {
+        rc = 1;
+      }
+    } else {
+      for (uint32_t i = 0U; i < got; i++) {
+        printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].distance);
+      }
     }
     free(res);
-    return 0;
+    nbase_close(db);
+    return rc;
   }
 
   if (strcmp(cmd, "relationships") == 0) {

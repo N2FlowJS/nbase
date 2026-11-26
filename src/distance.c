@@ -147,6 +147,17 @@ static inline __attribute__((target("avx2,fma"))) float hmax256_ps(__m256 v) {
   return _mm_cvtss_f32(m);
 }
 
+static inline __attribute__((target("avx2"))) uint32_t hsum256_epi32(__m256i v) {
+  __m128i lo = _mm256_castsi256_si128(v);
+  __m128i hi = _mm256_extracti128_si256(v, 1);
+  __m128i s = _mm_add_epi32(lo, hi);
+  __m128i shuf = _mm_shuffle_epi32(s, _MM_SHUFFLE(1, 0, 3, 2));
+  s = _mm_add_epi32(s, shuf);
+  shuf = _mm_shuffle_epi32(s, _MM_SHUFFLE(2, 3, 0, 1));
+  s = _mm_add_epi32(s, shuf);
+  return (uint32_t)_mm_cvtsi128_si32(s);
+}
+
 static __attribute__((target("avx2,fma"))) float squared_euclidean_avx2(const float *a, const float *b, uint32_t dim) {
   __m256 acc = _mm256_setzero_ps();
   uint32_t i = 0;
@@ -252,15 +263,21 @@ static __attribute__((target("avx2,fma"))) float chebyshev_avx2(const float *a, 
 }
 
 static __attribute__((target("avx2,fma"))) float hamming_avx2(const float *a, const float *b, uint32_t dim) {
-  uint32_t count = 0;
-  uint32_t i = 0;
-  for (; i + 8U <= dim; i += 8U) {
-    __m256 va = _mm256_loadu_ps(a + i);
-    __m256 vb = _mm256_loadu_ps(b + i);
-    __m256 cmp = _mm256_cmp_ps(va, vb, _CMP_NEQ_UQ);
-    int mask = _mm256_movemask_ps(cmp);
-    count += (uint32_t)__builtin_popcount((unsigned int)mask);
+  __m256i acc0 = _mm256_setzero_si256();
+  __m256i acc1 = _mm256_setzero_si256();
+  uint32_t i = 0U;
+  for (; i + 16U <= dim; i += 16U) {
+    __m256 c0 = _mm256_cmp_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), _CMP_NEQ_UQ);
+    __m256 c1 = _mm256_cmp_ps(_mm256_loadu_ps(a + i + 8U), _mm256_loadu_ps(b + i + 8U), _CMP_NEQ_UQ);
+    acc0 = _mm256_sub_epi32(acc0, _mm256_castps_si256(c0));
+    acc1 = _mm256_sub_epi32(acc1, _mm256_castps_si256(c1));
   }
+  __m256i acc = _mm256_add_epi32(acc0, acc1);
+  for (; i + 8U <= dim; i += 8U) {
+    __m256 c = _mm256_cmp_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), _CMP_NEQ_UQ);
+    acc = _mm256_sub_epi32(acc, _mm256_castps_si256(c));
+  }
+  uint32_t count = hsum256_epi32(acc);
   for (; i < dim; i++) {
     if (a[i] != b[i]) {
       count++;
@@ -714,27 +731,37 @@ static __attribute__((target("avx2,fma"))) void hamming_batch_avx2(
     uint32_t dim,
     float *out_distances) {
   uint32_t n = 0U;
-  for (; n + 4U <= count; n += 4U) {
+  for (; n + 2U <= count; n += 2U) {
     const float *v0 = vectors + (size_t)n * (size_t)dim;
     const float *v1 = vectors + (size_t)(n + 1U) * (size_t)dim;
-    const float *v2 = vectors + (size_t)(n + 2U) * (size_t)dim;
-    const float *v3 = vectors + (size_t)(n + 3U) * (size_t)dim;
-    uint32_t c0 = 0U;
-    uint32_t c1 = 0U;
-    uint32_t c2 = 0U;
-    uint32_t c3 = 0U;
+    __m256i acc00 = _mm256_setzero_si256();
+    __m256i acc01 = _mm256_setzero_si256();
+    __m256i acc10 = _mm256_setzero_si256();
+    __m256i acc11 = _mm256_setzero_si256();
     uint32_t i = 0U;
+    for (; i + 16U <= dim; i += 16U) {
+      __m256 vq0 = _mm256_loadu_ps(query + i);
+      __m256 vq1 = _mm256_loadu_ps(query + i + 8U);
+      __m256 c00 = _mm256_cmp_ps(vq0, _mm256_loadu_ps(v0 + i), _CMP_NEQ_UQ);
+      __m256 c01 = _mm256_cmp_ps(vq1, _mm256_loadu_ps(v0 + i + 8U), _CMP_NEQ_UQ);
+      __m256 c10 = _mm256_cmp_ps(vq0, _mm256_loadu_ps(v1 + i), _CMP_NEQ_UQ);
+      __m256 c11 = _mm256_cmp_ps(vq1, _mm256_loadu_ps(v1 + i + 8U), _CMP_NEQ_UQ);
+      acc00 = _mm256_sub_epi32(acc00, _mm256_castps_si256(c00));
+      acc01 = _mm256_sub_epi32(acc01, _mm256_castps_si256(c01));
+      acc10 = _mm256_sub_epi32(acc10, _mm256_castps_si256(c10));
+      acc11 = _mm256_sub_epi32(acc11, _mm256_castps_si256(c11));
+    }
+    __m256i acc0 = _mm256_add_epi32(acc00, acc01);
+    __m256i acc1 = _mm256_add_epi32(acc10, acc11);
     for (; i + 8U <= dim; i += 8U) {
       __m256 vq = _mm256_loadu_ps(query + i);
-      c0 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
-          _mm256_cmp_ps(vq, _mm256_loadu_ps(v0 + i), _CMP_NEQ_UQ)));
-      c1 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
-          _mm256_cmp_ps(vq, _mm256_loadu_ps(v1 + i), _CMP_NEQ_UQ)));
-      c2 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
-          _mm256_cmp_ps(vq, _mm256_loadu_ps(v2 + i), _CMP_NEQ_UQ)));
-      c3 += (uint32_t)__builtin_popcount((unsigned int)_mm256_movemask_ps(
-          _mm256_cmp_ps(vq, _mm256_loadu_ps(v3 + i), _CMP_NEQ_UQ)));
+      acc0 = _mm256_sub_epi32(
+          acc0, _mm256_castps_si256(_mm256_cmp_ps(vq, _mm256_loadu_ps(v0 + i), _CMP_NEQ_UQ)));
+      acc1 = _mm256_sub_epi32(
+          acc1, _mm256_castps_si256(_mm256_cmp_ps(vq, _mm256_loadu_ps(v1 + i), _CMP_NEQ_UQ)));
     }
+    uint32_t c0 = hsum256_epi32(acc0);
+    uint32_t c1 = hsum256_epi32(acc1);
     for (; i < dim; i++) {
       float q = query[i];
       if (q != v0[i]) {
@@ -743,17 +770,9 @@ static __attribute__((target("avx2,fma"))) void hamming_batch_avx2(
       if (q != v1[i]) {
         c1++;
       }
-      if (q != v2[i]) {
-        c2++;
-      }
-      if (q != v3[i]) {
-        c3++;
-      }
     }
     out_distances[n] = (float)c0;
     out_distances[n + 1U] = (float)c1;
-    out_distances[n + 2U] = (float)c2;
-    out_distances[n + 3U] = (float)c3;
   }
   for (; n < count; n++) {
     out_distances[n] = hamming_avx2(query, vectors + (size_t)n * (size_t)dim, dim);

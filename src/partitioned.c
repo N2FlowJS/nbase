@@ -2055,6 +2055,96 @@ nbase_status_t nbase_pdb_get_text(
   return st;
 }
 
+nbase_status_t nbase_pdb_get_text_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t count,
+    char **out_texts,
+    bool *out_found) {
+  if (!pdb || (count > 0U && (!ids || !out_texts || !out_found))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    out_texts[i] = NULL;
+    out_found[i] = false;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  pdb_part_ref_t *refs = malloc((size_t)count * sizeof(pdb_part_ref_t));
+  if (!refs) {
+    return NBASE_ERR_NOMEM;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  uint32_t ref_cnt = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    uint32_t pid = 0U;
+    if (pdb_id_map_find(&pdb->id_map, ids[i], &pid)) {
+      refs[ref_cnt].part_id = pid;
+      refs[ref_cnt].orig_idx = i;
+      ref_cnt++;
+    }
+  }
+
+  nbase_status_t st = NBASE_OK;
+  if (ref_cnt > 0U) {
+    qsort(refs, ref_cnt, sizeof(pdb_part_ref_t), cmp_pdb_part_ref_asc);
+    uint64_t *batch_ids = malloc((size_t)ref_cnt * sizeof(uint64_t));
+    char **batch_texts = calloc(ref_cnt, sizeof(char *));
+    bool *batch_found = calloc(ref_cnt, sizeof(bool));
+    if (!batch_ids || !batch_texts || !batch_found) {
+      st = NBASE_ERR_NOMEM;
+    } else {
+      uint32_t start = 0U;
+      while (start < ref_cnt && st == NBASE_OK) {
+        uint32_t pid = refs[start].part_id;
+        uint32_t end = start;
+        while (end < ref_cnt && refs[end].part_id == pid) {
+          batch_ids[end - start] = ids[refs[end].orig_idx];
+          end++;
+        }
+        uint32_t sub_cnt = end - start;
+        pdb_part_t *part = pdb_find_part(pdb, pid);
+        if (!part) {
+          st = NBASE_ERR_CORRUPT;
+          break;
+        }
+        st = pdb_load_partition(pdb, part);
+        if (st != NBASE_OK) {
+          break;
+        }
+        st = nbase_get_text_batch(part->db, batch_ids, sub_cnt, batch_texts, batch_found);
+        if (st != NBASE_OK) {
+          break;
+        }
+        for (uint32_t j = 0U; j < sub_cnt; j++) {
+          uint32_t oi = refs[start + j].orig_idx;
+          out_found[oi] = batch_found[j];
+          out_texts[oi] = batch_texts[j];
+          batch_texts[j] = NULL;
+        }
+        start = end;
+      }
+    }
+    nbase_free_texts(batch_texts, ref_cnt);
+    free(batch_ids);
+    free(batch_texts);
+    free(batch_found);
+  }
+  pthread_mutex_unlock(&pdb->mu);
+  free(refs);
+
+  if (st != NBASE_OK) {
+    nbase_free_texts(out_texts, count);
+    for (uint32_t i = 0U; i < count; i++) {
+      out_found[i] = false;
+    }
+  }
+  return st;
+}
+
 nbase_status_t nbase_pdb_delete_text(nbase_pdb_t *pdb, uint64_t id) {
   if (!pdb) {
     return NBASE_ERR_INVALID_ARG;

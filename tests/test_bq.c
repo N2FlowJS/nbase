@@ -102,7 +102,7 @@ static void test_bq_hamming_batch(void) {
 
 static void test_bq_avx2_encode_and_popcnt_batch_edges(void) {
   static const uint32_t dims[10] = {1U, 7U, 8U, 15U, 16U, 63U, 64U, 65U, 130U, 256U};
-  static const uint32_t sub_counts[8] = {0U, 1U, 2U, 3U, 4U, 5U, 7U, 13U};
+  static const uint32_t sub_counts[10] = {0U, 1U, 2U, 3U, 4U, 5U, 7U, 9U, 13U, 17U};
   const uint32_t n = 20U;
 
   for (uint32_t di = 0U; di < 10U; di++) {
@@ -134,11 +134,12 @@ static void test_bq_avx2_encode_and_popcnt_batch_edges(void) {
       }
     }
 
-    for (uint32_t si = 0U; si < 8U; si++) {
+    for (uint32_t si = 0U; si < 10U; si++) {
       uint32_t sc = sub_counts[si];
-      ASSERT_STATUS(nbase_bq_hamming_batch(codes, codes, sc, wpv, out), NBASE_OK);
+      const uint64_t *qptr = codes + (size_t)(si % 3U) * wpv;
+      ASSERT_STATUS(nbase_bq_hamming_batch(qptr, codes, sc, wpv, out), NBASE_OK);
       for (uint32_t i = 0U; i < sc; i++) {
-        uint32_t exact = nbase_bq_hamming(codes, codes + (size_t)i * wpv, wpv);
+        uint32_t exact = nbase_bq_hamming(qptr, codes + (size_t)i * wpv, wpv);
         ASSERT_EQ_U64(out[i], exact);
       }
     }

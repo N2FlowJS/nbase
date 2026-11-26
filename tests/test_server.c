@@ -2195,6 +2195,118 @@ static void test_http_server_attr_batch_get_and_include_defaults(void) {
   nbase_close(db);
 }
 
+static void test_http_server_patch_batch_and_text_get_edges(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.seed = 4117ULL;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v1[3] = {1.0f, 0.0f, 0.0f};
+  float v2[3] = {0.0f, 1.0f, 0.0f};
+  ASSERT_STATUS(nbase_add(db, 10ULL, v1, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 20ULL, v2, 3U), NBASE_OK);
+
+  nbase_meta_field_t m1[2] = {
+      {"grp", {.type = NBASE_META_STRING, .as = {.str = "alpha"}}},
+      {"ver", {.type = NBASE_META_INT64, .as = {.i64 = 1}}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, m1, 2U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 10ULL, "initial text ten"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/patch", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "PATCH", "/api/vectors/patch", NULL, "{\"items\":[]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "PATCH", "/api/vectors/patch", NULL, "{\"items\":[{\"id\":10}]}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "PATCH",
+      "/api/vectors/patch",
+      NULL,
+      "{\"items\":[{\"id\":10,\"vector\":[1.0,2.0]}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  /* Atomic validation: 2nd item missing ID -> 404 and 1st item remains untouched. */
+  ASSERT_TRUE(http_req(
+      port,
+      "PATCH",
+      "/api/vectors/patch",
+      NULL,
+      "{\"items\":[{\"id\":10,\"text\":\"should not apply\"},{\"id\":999,\"text\":\"missing\"}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 404);
+  free(r.body);
+
+  char check_buf[64];
+  size_t check_len = 0U;
+  ASSERT_STATUS(nbase_get_text(db, 10ULL, check_buf, sizeof(check_buf), &check_len), NBASE_OK);
+  ASSERT_TRUE(strcmp(check_buf, "initial text ten") == 0);
+
+  /* Valid PATCH /api/vectors/patch + POST /api/vectors/patch */
+  ASSERT_TRUE(http_req(
+      port,
+      "PATCH",
+      "/api/vectors/patch",
+      NULL,
+      "{\"items\":[{\"id\":10,\"metadata\":{\"ver\":2},\"text\":null},"
+      "{\"id\":20,\"vector\":[0.5,0.5,0.0],\"metadata\":{\"tag\":\"patched\"},\"text\":\"twenty updated\"}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"patched\":2") != NULL);
+  free(r.body);
+
+  ASSERT_STATUS(nbase_get_text(db, 10ULL, NULL, 0U, &check_len), NBASE_ERR_NOT_FOUND);
+  nbase_meta_value_t mv;
+  char sbuf[32];
+  ASSERT_STATUS(nbase_get_meta(db, 10ULL, "grp", &mv, sbuf, sizeof(sbuf)), NBASE_OK);
+  ASSERT_TRUE(strcmp(sbuf, "alpha") == 0);
+  ASSERT_STATUS(nbase_get_meta(db, 10ULL, "ver", &mv, NULL, 0U), NBASE_OK);
+  ASSERT_EQ_I64(mv.as.i64, 2);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/patch",
+      NULL,
+      "{\"items\":[{\"id\":10,\"text\":\"restored ten\"}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"patched\":1") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/text/get",
+      NULL,
+      "{\"ids\":[20,999,10,20]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20,\"found\":true,\"text\":\"twenty updated\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":999,\"found\":false,\"text\":null") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10,\"found\":true,\"text\":\"restored ten\"") != NULL);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -2214,4 +2326,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_patch_vector_head_subresources_and_export_ids);
   RUN_TEST(test_http_server_text_and_hybrid_batch_search);
   RUN_TEST(test_http_server_attr_batch_get_and_include_defaults);
+  RUN_TEST(test_http_server_patch_batch_and_text_get_edges);
 }

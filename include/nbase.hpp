@@ -45,6 +45,36 @@ inline std::vector<std::vector<T>> unpack_batch_results(
   }
   return out;
 }
+
+template <typename Fn>
+inline void unpack_texts_batch(
+    size_t n,
+    Fn &&fn,
+    std::vector<std::string> &out_texts,
+    std::vector<bool> &out_found) {
+  out_texts.assign(n, std::string());
+  out_found.assign(n, false);
+  if (n == 0U) {
+    return;
+  }
+  struct TextsGuard {
+    std::vector<char *> ptrs;
+    explicit TextsGuard(size_t cnt) : ptrs(cnt, nullptr) {}
+    ~TextsGuard() {
+      if (!ptrs.empty()) {
+        nbase_free_texts(ptrs.data(), static_cast<uint32_t>(ptrs.size()));
+      }
+    }
+  } guard(n);
+  std::unique_ptr<bool[]> found_buf(new bool[n]);
+  check(fn(guard.ptrs.data(), found_buf.get()));
+  for (size_t i = 0U; i < n; ++i) {
+    out_found[i] = found_buf[i];
+    if (found_buf[i] && guard.ptrs[i] != nullptr) {
+      out_texts[i] = guard.ptrs[i];
+    }
+  }
+}
 }  // namespace detail
 
 inline std::vector<float> distance_batch(
@@ -384,6 +414,20 @@ class Database {
     std::string out(len, '\0');
     detail::check(nbase_get_text(db_, id, &out[0], len + 1U, &len));
     return out;
+  }
+
+  void get_text_batch(
+      const std::vector<uint64_t> &ids,
+      std::vector<std::string> &out_texts,
+      std::vector<bool> &out_found) const {
+    detail::unpack_texts_batch(
+        ids.size(),
+        [&](char **ptrs, bool *found) {
+          return nbase_get_text_batch(
+              db_, ids.data(), static_cast<uint32_t>(ids.size()), ptrs, found);
+        },
+        out_texts,
+        out_found);
   }
 
   void delete_text(uint64_t id) {
@@ -1006,34 +1050,14 @@ class Bm25 {
       const std::vector<uint64_t> &ids,
       std::vector<std::string> &out_texts,
       std::vector<bool> &out_found) const {
-    const size_t n = ids.size();
-    out_texts.assign(n, std::string());
-    out_found.assign(n, false);
-    if (n == 0U) {
-      return;
-    }
-    struct TextsGuard {
-      std::vector<char *> ptrs;
-      explicit TextsGuard(size_t cnt) : ptrs(cnt, nullptr) {}
-      ~TextsGuard() {
-        if (!ptrs.empty()) {
-          nbase_free_texts(ptrs.data(), static_cast<uint32_t>(ptrs.size()));
-        }
-      }
-    } guard(n);
-    std::unique_ptr<bool[]> found_buf(new bool[n]);
-    detail::check(nbase_bm25_get_batch(
-        ptr_,
-        ids.data(),
-        static_cast<uint32_t>(n),
-        guard.ptrs.data(),
-        found_buf.get()));
-    for (size_t i = 0U; i < n; ++i) {
-      out_found[i] = found_buf[i];
-      if (found_buf[i] && guard.ptrs[i] != nullptr) {
-        out_texts[i] = guard.ptrs[i];
-      }
-    }
+    detail::unpack_texts_batch(
+        ids.size(),
+        [&](char **ptrs, bool *found) {
+          return nbase_bm25_get_batch(
+              ptr_, ids.data(), static_cast<uint32_t>(ids.size()), ptrs, found);
+        },
+        out_texts,
+        out_found);
   }
 
   bool contains(uint64_t id) const { return nbase_bm25_contains(ptr_, id); }
@@ -1616,6 +1640,20 @@ class PartitionedDatabase {
     std::string out(len, '\0');
     detail::check(nbase_pdb_get_text(pdb_, id, &out[0], len + 1U, &len));
     return out;
+  }
+
+  void get_text_batch(
+      const std::vector<uint64_t> &ids,
+      std::vector<std::string> &out_texts,
+      std::vector<bool> &out_found) const {
+    detail::unpack_texts_batch(
+        ids.size(),
+        [&](char **ptrs, bool *found) {
+          return nbase_pdb_get_text_batch(
+              pdb_, ids.data(), static_cast<uint32_t>(ids.size()), ptrs, found);
+        },
+        out_texts,
+        out_found);
   }
 
   void delete_text(uint64_t id) { detail::check(nbase_pdb_delete_text(pdb_, id)); }

@@ -731,9 +731,12 @@ static void bench_batch_threads_and_pq(void) {
     nbase_meta_field_t *mflds = malloc(2000U * sizeof(*mflds));
     uint64_t *tids = malloc(2000U * sizeof(uint64_t));
     const char **tptrs = malloc(2000U * sizeof(const char *));
+    char **gtexts = calloc(2000U, sizeof(char *));
+    bool *gfound = calloc(2000U, sizeof(bool));
     double meta_batch_ms = 0.0;
     double text_batch_ms = 0.0;
-    if (mitems && mflds && tids && tptrs) {
+    double text_get_batch_ms = 0.0;
+    if (mitems && mflds && tids && tptrs && gtexts && gfound) {
       for (uint32_t i = 0U; i < 2000U; i++) {
         mflds[i].key = "score";
         mflds[i].value.type = NBASE_META_DOUBLE;
@@ -750,21 +753,29 @@ static void bench_batch_threads_and_pq(void) {
       uint64_t tb0 = now_ns();
       (void)nbase_set_text_batch(cdb, tids, tptrs, 2000U);
       uint64_t tb1 = now_ns();
+      uint64_t tgb0 = now_ns();
+      (void)nbase_get_text_batch(cdb, tids, 2000U, gtexts, gfound);
+      uint64_t tgb1 = now_ns();
+      nbase_free_texts(gtexts, 2000U);
       meta_batch_ms = (double)(mb1 - mb0) / 1e6;
       text_batch_ms = (double)(tb1 - tb0) / 1e6;
+      text_get_batch_ms = (double)(tgb1 - tgb0) / 1e6;
     }
+    free(gtexts);
+    free(gfound);
     free(mitems);
     free(mflds);
     free(tids);
     free((void *)tptrs);
 
-    printf("  lru_cache  miss=%6.2f us/query  hit=%5.2f us/query  weighted_rerank(20->10)=%5.2f us/call  radius=%6.2f us/query  meta_batch(2000)=%.2f ms  text_batch(2000)=%.2f ms\n",
+    printf("  lru_cache  miss=%6.2f us/query  hit=%5.2f us/query  weighted_rerank(20->10)=%5.2f us/call  radius=%6.2f us/query  meta_batch(2000)=%.2f ms  text_batch(2000)=%.2f ms  text_get_batch(2000)=%.2f ms\n",
            (double)(m1 - m0) / (double)nqueries / 1e3,
            (double)(h1 - h0) / (double)(10U * nqueries) / 1e3,
            (double)(w1 - w0) / 200.0 / 1e3,
            (double)(rad1 - rad0) / (double)nqueries / 1e3,
            meta_batch_ms,
-           text_batch_ms);
+           text_batch_ms,
+           text_get_batch_ms);
 
     const uint32_t tb_n = 20U;
     const char *tb_qs[20];

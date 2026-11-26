@@ -183,7 +183,30 @@ static __attribute__((target("popcnt"))) void bq_hamming_batch_popcnt(
     uint64_t q1 = query_words[1];
     uint64_t q2 = query_words[2];
     uint64_t q3 = query_words[3];
-    for (i = 0U; i < count; i++) {
+    for (; i + 3U < count; i += 4U) {
+      const uint64_t *r0 = codes + (size_t)i * 4U;
+      out_distances[i] =
+          (uint32_t)__builtin_popcountll(q0 ^ r0[0]) +
+          (uint32_t)__builtin_popcountll(q1 ^ r0[1]) +
+          (uint32_t)__builtin_popcountll(q2 ^ r0[2]) +
+          (uint32_t)__builtin_popcountll(q3 ^ r0[3]);
+      out_distances[i + 1U] =
+          (uint32_t)__builtin_popcountll(q0 ^ r0[4]) +
+          (uint32_t)__builtin_popcountll(q1 ^ r0[5]) +
+          (uint32_t)__builtin_popcountll(q2 ^ r0[6]) +
+          (uint32_t)__builtin_popcountll(q3 ^ r0[7]);
+      out_distances[i + 2U] =
+          (uint32_t)__builtin_popcountll(q0 ^ r0[8]) +
+          (uint32_t)__builtin_popcountll(q1 ^ r0[9]) +
+          (uint32_t)__builtin_popcountll(q2 ^ r0[10]) +
+          (uint32_t)__builtin_popcountll(q3 ^ r0[11]);
+      out_distances[i + 3U] =
+          (uint32_t)__builtin_popcountll(q0 ^ r0[12]) +
+          (uint32_t)__builtin_popcountll(q1 ^ r0[13]) +
+          (uint32_t)__builtin_popcountll(q2 ^ r0[14]) +
+          (uint32_t)__builtin_popcountll(q3 ^ r0[15]);
+    }
+    for (; i < count; i++) {
       const uint64_t *row = codes + (size_t)i * 4U;
       out_distances[i] =
           (uint32_t)__builtin_popcountll(q0 ^ row[0]) +

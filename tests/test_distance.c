@@ -169,9 +169,59 @@ static void test_distance_batch_unrolled_edges(void) {
   free(query);
 }
 
+static void test_hamming_avx2_and_signed_zero_edges(void) {
+  static const uint32_t dims[] = {1U, 7U, 8U, 15U, 16U, 17U, 31U, 32U, 33U, 64U, 128U, 131U};
+  static const uint32_t counts[] = {1U, 2U, 3U, 4U, 5U, 17U};
+  const uint32_t max_dim = 131U;
+  const uint32_t max_cnt = 17U;
+
+  float *q = malloc((size_t)max_dim * sizeof(float));
+  float *vecs = malloc((size_t)max_cnt * (size_t)max_dim * sizeof(float));
+  float *dists = malloc((size_t)max_cnt * sizeof(float));
+  ASSERT_TRUE(q != NULL && vecs != NULL && dists != NULL);
+
+  test_fill_vectors(q, 1U, max_dim, 9101ULL);
+  test_fill_vectors(vecs, max_cnt, max_dim, 9202ULL);
+  for (uint32_t d = 0U; d < max_dim; d++) {
+    if ((d % 3U) == 0U) {
+      q[d] = 0.0f;
+    }
+  }
+  for (uint32_t n = 0U; n < max_cnt; n++) {
+    for (uint32_t d = 0U; d < max_dim; d++) {
+      if ((d % 3U) == 0U) {
+        /* IEEE +0.0f == -0.0f must count as equal in Hamming. */
+        vecs[(size_t)n * max_dim + d] = (n % 2U == 0U) ? -0.0f : 0.0f;
+      } else if (((n + d) % 5U) == 0U) {
+        vecs[(size_t)n * max_dim + d] = q[d];
+      }
+    }
+  }
+
+  for (size_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++) {
+    uint32_t dim = dims[di];
+    for (size_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++) {
+      uint32_t cnt = counts[ci];
+      ASSERT_STATUS(nbase_distance_batch(NBASE_METRIC_HAMMING, q, vecs, cnt, dim, dists), NBASE_OK);
+      for (uint32_t n = 0U; n < cnt; n++) {
+        const float *row = vecs + (size_t)n * (size_t)dim;
+        float scalar = nbase_distance_scalar(NBASE_METRIC_HAMMING, q, row, dim);
+        float single = nbase_distance(NBASE_METRIC_HAMMING, q, row, dim);
+        ASSERT_NEAR(single, scalar, 1e-6, 0.0);
+        ASSERT_NEAR(dists[n], scalar, 1e-6, 0.0);
+      }
+    }
+  }
+
+  free(dists);
+  free(vecs);
+  free(q);
+}
+
 void test_distance_run(void) {
   RUN_TEST(test_all_metrics_across_dims);
   RUN_TEST(test_distance_edge_cases);
   RUN_TEST(test_distance_batch_all_metrics_and_dims);
   RUN_TEST(test_distance_batch_unrolled_edges);
+  RUN_TEST(test_hamming_avx2_and_signed_zero_edges);
 }
