@@ -441,10 +441,135 @@ static void test_bm25_stats_get_batch_and_search_scratch_tsan(void) {
   nbase_bm25_destroy(bm25);
 }
 
+typedef struct bm25_flt_batch_tsan_ctx {
+  nbase_bm25_t *bm25;
+  atomic_bool stop;
+  atomic_int errors;
+} bm25_flt_batch_tsan_ctx_t;
+
+static void *bm25_flt_batch_reader_fn(void *raw) {
+  bm25_flt_batch_tsan_ctx_t *ctx = (bm25_flt_batch_tsan_ctx_t *)raw;
+  static const char *const qs[4] = {"vector simd", "c11 bm25", "hybrid graph", "avx2 search"};
+  nbase_scored_id_t res[16];
+  uint32_t cnts[4];
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    if (nbase_bm25_search_batch_filtered(ctx->bm25, qs, 4U, 4U, 2U, filter_even_ids, NULL, res, cnts) !=
+        NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t q = 0U; q < 4U; q++) {
+      for (uint32_t j = 0U; j < cnts[q]; j++) {
+        if ((res[(size_t)q * 4U + j].id % 2ULL) != 0ULL) {
+          atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+          return NULL;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_bm25_search_batch_filtered_and_tsan(void) {
+  nbase_bm25_t *bm25 = NULL;
+  ASSERT_STATUS(nbase_bm25_create(1.5f, 0.75f, &bm25), NBASE_OK);
+
+  static const char *const corpus[4] = {
+      "pure c11 vector simd engine",
+      "hybrid bm25 full text search",
+      "avx2 vector distance batch kernel",
+      "graph rerank community bm25 vector",
+  };
+  for (uint64_t i = 1ULL; i <= 24ULL; i++) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s doc%llu", corpus[(size_t)((i - 1ULL) % 4ULL)], (unsigned long long)i);
+    ASSERT_STATUS(nbase_bm25_index(bm25, i, buf), NBASE_OK);
+  }
+
+  static const char *const queries[6] = {
+      "vector simd",
+      "bm25 search",
+      "c11 kernel",
+      "graph vector",
+      "avx2 distance",
+      "unmatchedtoken",
+  };
+
+  nbase_scored_id_t bres[36];
+  uint32_t bcnts[6];
+  const uint32_t threads[2] = {1U, 4U};
+  for (size_t ti = 0; ti < 2; ti++) {
+    ASSERT_STATUS(
+        nbase_bm25_search_batch_filtered(
+            bm25, queries, 6U, 6U, threads[ti], filter_even_ids, NULL, bres, bcnts),
+        NBASE_OK);
+    for (uint32_t q = 0U; q < 6U; q++) {
+      nbase_scored_id_t sres[6];
+      uint32_t scnt = 0U;
+      ASSERT_STATUS(
+          nbase_bm25_search_filtered(bm25, queries[q], 6U, filter_even_ids, NULL, sres, &scnt),
+          NBASE_OK);
+      ASSERT_EQ_U64(bcnts[q], scnt);
+      for (uint32_t j = 0U; j < scnt; j++) {
+        ASSERT_EQ_U64(bres[(size_t)q * 6U + j].id, sres[j].id);
+        ASSERT_TRUE((sres[j].id % 2ULL) == 0ULL);
+        ASSERT_NEAR((double)bres[(size_t)q * 6U + j].score, (double)sres[j].score, 1e-6, 0.0);
+      }
+    }
+  }
+
+  /* Validation & NULL filter parity */
+  ASSERT_STATUS(
+      nbase_bm25_search_batch_filtered(NULL, queries, 2U, 4U, 2U, filter_even_ids, NULL, bres, bcnts),
+      NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(
+      nbase_bm25_search_batch_filtered(bm25, NULL, 0U, 4U, 2U, filter_even_ids, NULL, NULL, NULL),
+      NBASE_OK);
+  bcnts[0] = 99U;
+  ASSERT_STATUS(
+      nbase_bm25_search_batch_filtered(bm25, queries, 2U, 0U, 2U, filter_even_ids, NULL, NULL, bcnts),
+      NBASE_OK);
+  ASSERT_EQ_U64(bcnts[0], 0ULL);
+
+  nbase_scored_id_t ref_res[36];
+  uint32_t ref_cnts[6];
+  ASSERT_STATUS(
+      nbase_bm25_search_batch_filtered(bm25, queries, 6U, 6U, 2U, NULL, NULL, bres, bcnts),
+      NBASE_OK);
+  ASSERT_STATUS(nbase_bm25_search_batch(bm25, queries, 6U, 6U, 2U, ref_res, ref_cnts), NBASE_OK);
+  for (uint32_t q = 0U; q < 6U; q++) {
+    ASSERT_EQ_U64(bcnts[q], ref_cnts[q]);
+    for (uint32_t j = 0U; j < bcnts[q]; j++) {
+      ASSERT_EQ_U64(bres[(size_t)q * 6U + j].id, ref_res[(size_t)q * 6U + j].id);
+    }
+  }
+
+  /* TSan concurrent writer vs filtered batch readers */
+  bm25_flt_batch_tsan_ctx_t ctx = {bm25, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, bm25_flt_batch_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, bm25_flt_batch_reader_fn, &ctx) == 0);
+  for (uint32_t step = 0U; step < 12U; step++) {
+    uint64_t tid = 500ULL + (step % 4ULL);
+    ASSERT_STATUS(nbase_bm25_index(bm25, tid, "concurrent c11 vector simd graph"), NBASE_OK);
+    if ((step % 3U) == 2U) {
+      nbase_status_t dst = nbase_bm25_delete(bm25, tid);
+      ASSERT_TRUE(dst == NBASE_OK || dst == NBASE_ERR_NOT_FOUND);
+    }
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  nbase_bm25_destroy(bm25);
+}
+
 void test_bm25_run(void) {
   RUN_TEST(test_bm25_index_search_delete_and_persistence);
   RUN_TEST(test_hybrid_rrf_fusion);
   RUN_TEST(test_bm25_crud_batch_compact_and_tsan);
   RUN_TEST(test_bm25_delete_batch_and_errors);
   RUN_TEST(test_bm25_stats_get_batch_and_search_scratch_tsan);
+  RUN_TEST(test_bm25_search_batch_filtered_and_tsan);
 }

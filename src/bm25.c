@@ -1246,6 +1246,8 @@ typedef struct bm25_batch_ctx {
   const char *const *queries;
   uint32_t query_count;
   uint32_t k;
+  nbase_filter_fn filter;
+  void *filter_ctx;
   nbase_scored_id_t *out_results;
   uint32_t *out_counts;
   _Atomic uint32_t next_q;
@@ -1266,8 +1268,8 @@ static void *bm25_batch_worker(void *raw) {
         ctx->bm25,
         ctx->queries[q],
         ctx->k,
-        NULL,
-        NULL,
+        ctx->filter,
+        ctx->filter_ctx,
         &scratch,
         ctx->out_results + (size_t)q * (size_t)ctx->k,
         &cnt);
@@ -1284,12 +1286,14 @@ static void *bm25_batch_worker(void *raw) {
   return NULL;
 }
 
-nbase_status_t nbase_bm25_search_batch(
+nbase_status_t nbase_bm25_search_batch_filtered(
     const nbase_bm25_t *bm25,
     const char *const *queries,
     uint32_t query_count,
     uint32_t k,
     uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_scored_id_t *out_results,
     uint32_t *out_counts) {
   if (!bm25 || (query_count > 0U && (!queries || !out_counts || (k > 0U && !out_results)))) {
@@ -1329,8 +1333,8 @@ nbase_status_t nbase_bm25_search_batch(
           bm25,
           queries[q],
           k,
-          NULL,
-          NULL,
+          filter,
+          filter_ctx,
           &scratch,
           out_results + (size_t)q * (size_t)k,
           &out_counts[q]);
@@ -1346,6 +1350,8 @@ nbase_status_t nbase_bm25_search_batch(
   ctx.queries = queries;
   ctx.query_count = query_count;
   ctx.k = k;
+  ctx.filter = filter;
+  ctx.filter_ctx = filter_ctx;
   ctx.out_results = out_results;
   ctx.out_counts = out_counts;
   atomic_init(&ctx.next_q, 0U);
@@ -1369,6 +1375,18 @@ nbase_status_t nbase_bm25_search_batch(
   }
   pthread_rwlock_unlock(&mutable_bm->rwlock);
   return (nbase_status_t)atomic_load_explicit(&ctx.err, memory_order_relaxed);
+}
+
+nbase_status_t nbase_bm25_search_batch(
+    const nbase_bm25_t *bm25,
+    const char *const *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t num_threads,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts) {
+  return nbase_bm25_search_batch_filtered(
+      bm25, queries, query_count, k, num_threads, NULL, NULL, out_results, out_counts);
 }
 
 nbase_status_t nbase_hybrid_rrf(

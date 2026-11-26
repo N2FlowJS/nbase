@@ -1118,6 +1118,15 @@ class Bm25 {
       const std::vector<std::string> &queries,
       uint32_t k,
       uint32_t num_threads = 0U) const {
+    return search_batch_filtered(queries, k, nullptr, nullptr, num_threads);
+  }
+
+  std::vector<std::vector<nbase_scored_id_t>> search_batch_filtered(
+      const std::vector<std::string> &queries,
+      uint32_t k,
+      nbase_filter_fn filter,
+      void *filter_ctx = nullptr,
+      uint32_t num_threads = 0U) const {
     if (queries.empty()) {
       return {};
     }
@@ -1130,12 +1139,14 @@ class Bm25 {
     std::vector<nbase_scored_id_t> flat(
         static_cast<size_t>(qcnt) * static_cast<size_t>(k));
     std::vector<uint32_t> counts(qcnt, 0U);
-    detail::check(nbase_bm25_search_batch(
+    detail::check(nbase_bm25_search_batch_filtered(
         ptr_,
         ptrs.data(),
         qcnt,
         k,
         num_threads,
+        filter,
+        filter_ctx,
         k > 0U ? flat.data() : nullptr,
         counts.data()));
     std::vector<std::vector<nbase_scored_id_t>> res(qcnt);
@@ -1389,12 +1400,26 @@ class Lsh {
       uint32_t multi_probe = 2U,
       uint32_t num_threads = 0U,
       std::vector<uint32_t> *out_counts = nullptr) const {
+    return search_batch_filtered(
+        queries, query_count, dim, k, multi_probe, nullptr, nullptr, num_threads, out_counts);
+  }
+
+  std::vector<std::vector<nbase_result_t>> search_batch_filtered(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      uint32_t k,
+      uint32_t multi_probe,
+      nbase_filter_fn filter,
+      void *filter_ctx = nullptr,
+      uint32_t num_threads = 0U,
+      std::vector<uint32_t> *out_counts = nullptr) const {
     if (dim == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
       throw Error(dim == 0U ? NBASE_ERR_INVALID_ARG : NBASE_ERR_DIM_MISMATCH);
     }
     if (query_count == 0U) {
-      detail::check(nbase_lsh_search_batch(
-          ptr_, nullptr, 0U, dim, k, multi_probe, num_threads, nullptr, nullptr));
+      detail::check(nbase_lsh_search_batch_filtered(
+          ptr_, nullptr, 0U, dim, k, multi_probe, num_threads, filter, filter_ctx, nullptr, nullptr));
       if (out_counts != nullptr) {
         out_counts->clear();
       }
@@ -1402,7 +1427,7 @@ class Lsh {
     }
     std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(k));
     std::vector<uint32_t> counts(query_count, 0U);
-    detail::check(nbase_lsh_search_batch(
+    detail::check(nbase_lsh_search_batch_filtered(
         ptr_,
         queries.data(),
         query_count,
@@ -1410,6 +1435,8 @@ class Lsh {
         k,
         multi_probe,
         num_threads,
+        filter,
+        filter_ctx,
         k > 0U ? flat.data() : nullptr,
         counts.data()));
     std::vector<std::vector<nbase_result_t>> res(query_count);
@@ -2094,6 +2121,17 @@ class IvfPq {
       uint32_t k,
       uint32_t nprobe = 8U,
       uint32_t num_threads = 0U) const {
+    return search_batch_filtered(queries, query_count, k, nprobe, nullptr, nullptr, num_threads);
+  }
+
+  std::vector<std::vector<nbase_result_t>> search_batch_filtered(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t k,
+      uint32_t nprobe,
+      nbase_filter_fn filter,
+      void *filter_ctx = nullptr,
+      uint32_t num_threads = 0U) const {
     if (query_count == 0U) {
       return {};
     }
@@ -2103,13 +2141,15 @@ class IvfPq {
     }
     std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(k));
     std::vector<uint32_t> counts(query_count, 0U);
-    detail::check(nbase_ivfpq_search_batch(
+    detail::check(nbase_ivfpq_search_batch_filtered(
         ptr_,
         queries.data(),
         query_count,
         k,
         nprobe,
         num_threads,
+        filter,
+        filter_ctx,
         k > 0U ? flat.data() : nullptr,
         counts.data()));
     std::vector<std::vector<nbase_result_t>> res(query_count);
@@ -2421,12 +2461,26 @@ class ClusteredDatabase {
       uint32_t nprobe = 0U,
       uint32_t num_threads = 0U,
       std::vector<uint32_t> *out_counts = nullptr) const {
+    return search_batch_filtered(
+        queries, query_count, dim, k, nprobe, nullptr, nullptr, num_threads, out_counts);
+  }
+
+  std::vector<std::vector<nbase_result_t>> search_batch_filtered(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      uint32_t k,
+      uint32_t nprobe,
+      nbase_filter_fn filter,
+      void *filter_ctx = nullptr,
+      uint32_t num_threads = 0U,
+      std::vector<uint32_t> *out_counts = nullptr) const {
     if (dim == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
       throw Error(dim == 0U ? NBASE_ERR_INVALID_ARG : NBASE_ERR_DIM_MISMATCH);
     }
     if (query_count == 0U) {
-      detail::check(nbase_clustered_search_batch(
-          ptr_, nullptr, 0U, dim, k, nprobe, num_threads, nullptr, nullptr));
+      detail::check(nbase_clustered_search_batch_filtered(
+          ptr_, nullptr, 0U, dim, k, nprobe, num_threads, filter, filter_ctx, nullptr, nullptr));
       if (out_counts != nullptr) {
         out_counts->clear();
       }
@@ -2434,7 +2488,7 @@ class ClusteredDatabase {
     }
     std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(k));
     std::vector<uint32_t> counts(query_count, 0U);
-    detail::check(nbase_clustered_search_batch(
+    detail::check(nbase_clustered_search_batch_filtered(
         ptr_,
         queries.data(),
         query_count,
@@ -2442,6 +2496,8 @@ class ClusteredDatabase {
         k,
         nprobe,
         num_threads,
+        filter,
+        filter_ctx,
         k > 0U ? flat.data() : nullptr,
         counts.data()));
     std::vector<std::vector<nbase_result_t>> res(query_count);

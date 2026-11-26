@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 18
+#define NBASE_VERSION_MINOR 19
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -451,6 +451,18 @@ nbase_status_t nbase_clustered_search_batch(
     uint32_t num_threads,
     nbase_result_t *out_results,
     uint32_t *out_counts);
+nbase_status_t nbase_clustered_search_batch_filtered(
+    const nbase_clustered_t *cl,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_clustered_stats(const nbase_clustered_t *cl, nbase_clustered_stats_t *out_stats);
 nbase_status_t nbase_clustered_save(const nbase_clustered_t *cl, const char *file_path);
 nbase_status_t nbase_clustered_load(const char *file_path, nbase_clustered_t **out_cl);
@@ -513,6 +525,17 @@ nbase_status_t nbase_ivfpq_search_batch(
     uint32_t k,
     uint32_t nprobe,
     uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
+nbase_status_t nbase_ivfpq_search_batch_filtered(
+    const nbase_ivfpq_t *index,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_counts);
 nbase_status_t nbase_ivfpq_save(const nbase_ivfpq_t *index, const char *file_path);
@@ -624,6 +647,18 @@ nbase_status_t nbase_lsh_search_batch(
     uint32_t num_threads,
     nbase_result_t *out_results,
     uint32_t *out_counts);
+nbase_status_t nbase_lsh_search_batch_filtered(
+    const nbase_lsh_t *lsh,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t multi_probe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_lsh_stats(const nbase_lsh_t *lsh, nbase_lsh_stats_t *out_stats);
 nbase_status_t nbase_lsh_save(const nbase_lsh_t *lsh, const char *file_path);
 nbase_status_t nbase_lsh_load(const char *file_path, nbase_lsh_t **out_lsh);
@@ -695,6 +730,16 @@ nbase_status_t nbase_bm25_search_batch(
     uint32_t query_count,
     uint32_t k,
     uint32_t num_threads,
+    nbase_scored_id_t *out_results,
+    uint32_t *out_counts);
+nbase_status_t nbase_bm25_search_batch_filtered(
+    const nbase_bm25_t *bm25,
+    const char *const *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_scored_id_t *out_results,
     uint32_t *out_counts);
 nbase_status_t nbase_bm25_save(const nbase_bm25_t *bm25, const char *file_path);

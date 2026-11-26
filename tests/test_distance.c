@@ -1,4 +1,5 @@
 #include "test_common.h"
+#include "nbase_internal.h"
 
 #include <string.h>
 
@@ -218,10 +219,75 @@ static void test_hamming_avx2_and_signed_zero_edges(void) {
   free(q);
 }
 
+static void test_distance_indexed_batch_all_metrics_and_dims(void) {
+  static const uint32_t dims[] = {1U, 7U, 8U, 15U, 16U, 33U, 64U, 128U};
+  static const uint32_t counts[] = {0U, 1U, 3U, 4U, 5U, 17U, 64U};
+  static const nbase_metric_t metrics[] = {
+      NBASE_METRIC_EUCLIDEAN,
+      NBASE_METRIC_SQUARED_EUCLIDEAN,
+      NBASE_METRIC_COSINE,
+      NBASE_METRIC_INNER_PRODUCT,
+      NBASE_METRIC_MANHATTAN,
+      NBASE_METRIC_CHEBYSHEV,
+      NBASE_METRIC_HAMMING,
+  };
+  const uint32_t pool_n = 80U;
+  const uint32_t max_dim = 128U;
+  const uint32_t max_cnt = 64U;
+
+  float *q = malloc((size_t)max_dim * sizeof(float));
+  float *zero_q = calloc((size_t)max_dim, sizeof(float));
+  float *pool = malloc((size_t)pool_n * (size_t)max_dim * sizeof(float));
+  float *dists = malloc((size_t)max_cnt * sizeof(float));
+  uint32_t *slots = malloc((size_t)max_cnt * sizeof(uint32_t));
+  ASSERT_TRUE(q && zero_q && pool && dists && slots);
+
+  test_fill_vectors(q, 1U, max_dim, 7101ULL);
+  test_fill_vectors(pool, pool_n, max_dim, 7202ULL);
+  for (uint32_t n = 0U; n < pool_n; n++) {
+    for (uint32_t d = 0U; d < max_dim; d++) {
+      if (((n + d) % 4U) == 0U) {
+        pool[(size_t)n * max_dim + d] = q[d];
+      }
+    }
+  }
+  for (uint32_t i = 0U; i < max_cnt; i++) {
+    /* Mix strided, reversed, and duplicate slot indices across pool. */
+    slots[i] = (i % 7U == 0U) ? 13U : ((pool_n - 1U) - ((i * 5U) % pool_n));
+  }
+
+  for (size_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++) {
+    uint32_t dim = dims[di];
+    for (size_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++) {
+      uint32_t cnt = counts[ci];
+      for (size_t mi = 0; mi < sizeof(metrics) / sizeof(metrics[0]); mi++) {
+        nbase_metric_t metric = metrics[mi];
+        nbase_distance_indexed_batch(metric, q, pool, slots, cnt, dim, dists);
+        for (uint32_t i = 0U; i < cnt; i++) {
+          double ref = test_ref_distance(metric, q, pool + (size_t)slots[i] * (size_t)dim, dim);
+          ASSERT_NEAR((double)dists[i], ref, 1e-5, 1e-5);
+        }
+      }
+      /* Zero-norm cosine query edge must return 1.0f for every indexed slot. */
+      nbase_distance_indexed_batch(NBASE_METRIC_COSINE, zero_q, pool, slots, cnt, dim, dists);
+      for (uint32_t i = 0U; i < cnt; i++) {
+        ASSERT_NEAR((double)dists[i], 1.0, 1e-6, 0.0);
+      }
+    }
+  }
+
+  free(slots);
+  free(dists);
+  free(pool);
+  free(zero_q);
+  free(q);
+}
+
 void test_distance_run(void) {
   RUN_TEST(test_all_metrics_across_dims);
   RUN_TEST(test_distance_edge_cases);
   RUN_TEST(test_distance_batch_all_metrics_and_dims);
   RUN_TEST(test_distance_batch_unrolled_edges);
   RUN_TEST(test_hamming_avx2_and_signed_zero_edges);
+  RUN_TEST(test_distance_indexed_batch_all_metrics_and_dims);
 }

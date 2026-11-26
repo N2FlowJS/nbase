@@ -51,9 +51,9 @@ static void print_usage(const char *prog) {
       "  relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]\n"
-      "  search-text <dir> <query> [--k <K>] [--filter <json>]\n"
+      "  search-text <dir> <query> [--k <K>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
       "  search-text-batch <dir> <file.ndjson|-> [--k <K>] [--threads <T>] [--filter <json>]\n"
-      "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>]\n"
+      "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
       "  search-hybrid-batch <dir> <file.ndjson|-> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--threads <T>] [--filter <json>]\n"
       "  rebuild <dir> [--threads <T>]\n"
       "  compact <dir>\n"
@@ -737,6 +737,7 @@ static bool cli_append_enriched_id_array(
     uint32_t dim,
     const uint64_t *ids,
     const nbase_result_t *opt_res,
+    const nbase_scored_id_t *opt_scored,
     uint32_t got,
     bool inc_vecs,
     bool inc_meta,
@@ -750,13 +751,13 @@ static bool cli_append_enriched_id_array(
   nbase_status_t st = NBASE_OK;
 
   if (got > 0U && (inc_vecs || inc_text)) {
-    if (lookup_ids == NULL && opt_res != NULL) {
+    if (lookup_ids == NULL && (opt_res != NULL || opt_scored != NULL)) {
       id_buf = malloc((size_t)got * sizeof(uint64_t));
       if (!id_buf) {
         st = NBASE_ERR_NOMEM;
       } else {
         for (uint32_t i = 0U; i < got; i++) {
-          id_buf[i] = opt_res[i].id;
+          id_buf[i] = (opt_res != NULL) ? opt_res[i].id : opt_scored[i].id;
         }
         lookup_ids = id_buf;
       }
@@ -782,13 +783,20 @@ static bool cli_append_enriched_id_array(
   }
 
   for (uint32_t i = 0U; i < got && st == NBASE_OK && !sb->oom; i++) {
-    uint64_t eid = (opt_res != NULL) ? opt_res[i].id : ids[i];
+    uint64_t eid = (opt_res != NULL) ? opt_res[i].id
+                                     : ((opt_scored != NULL) ? opt_scored[i].id : ids[i]);
     if (opt_res != NULL) {
       nbase_sbuf_appendf(
           sb,
           i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
           (unsigned long long)eid,
           (double)opt_res[i].distance);
+    } else if (opt_scored != NULL) {
+      nbase_sbuf_appendf(
+          sb,
+          i == 0U ? "{\"id\":%llu,\"score\":%.7g" : ",{\"id\":%llu,\"score\":%.7g",
+          (unsigned long long)eid,
+          (double)opt_scored[i].score);
     } else {
       nbase_sbuf_appendf(sb, i == 0U ? "{\"id\":%llu" : ",{\"id\":%llu", (unsigned long long)eid);
     }
@@ -849,7 +857,32 @@ static bool cli_print_search_results_json(
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
   nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
-  bool ok = cli_append_enriched_id_array(&sb, db, dim, NULL, res, got, inc_vecs, inc_meta, inc_text);
+  bool ok = cli_append_enriched_id_array(&sb, db, dim, NULL, res, NULL, got, inc_vecs, inc_meta, inc_text);
+  if (ok) {
+    nbase_sbuf_append(&sb, "]}");
+    ok = !sb.oom && (sb.data != NULL);
+  }
+  if (!ok) {
+    nbase_sbuf_free(&sb);
+    return false;
+  }
+  printf("%s\n", sb.data);
+  nbase_sbuf_free(&sb);
+  return true;
+}
+
+static bool cli_print_scored_results_json(
+    const nbase_db_t *db,
+    uint32_t dim,
+    const nbase_scored_id_t *res,
+    uint32_t got,
+    bool inc_vecs,
+    bool inc_meta,
+    bool inc_text) {
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
+  bool ok = cli_append_enriched_id_array(&sb, db, dim, NULL, NULL, res, got, inc_vecs, inc_meta, inc_text);
   if (ok) {
     nbase_sbuf_append(&sb, "]}");
     ok = !sb.oom && (sb.data != NULL);
@@ -1732,6 +1765,10 @@ int main(int argc, char **argv) {
     }
     uint32_t k = 10U;
     const char *flt_json = NULL;
+    bool json_out = false;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
@@ -1740,6 +1777,17 @@ int main(int argc, char **argv) {
         }
       } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
+      } else if (strcmp(argv[i], "--json") == 0) {
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
+        json_out = true;
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
@@ -1774,14 +1822,33 @@ int main(int argc, char **argv) {
     }
     uint32_t got = 0U;
     st = nbase_search_text(db, argv[3], k, flt.count > 0U ? &flt : NULL, res, &got);
-    nbase_close(db);
     free(conds);
     nbase_json_free(flt_root);
     if (st != NBASE_OK) {
+      nbase_close(db);
       free(res);
       fprintf(stderr, "search-text failed: %s\n", nbase_strerror(st));
       return 1;
     }
+    if (json_out) {
+      uint32_t dim = 0U;
+      if (inc_vecs) {
+        nbase_stats_t s;
+        st = nbase_stats(db, &s);
+        if (st != NBASE_OK) {
+          nbase_close(db);
+          free(res);
+          fprintf(stderr, "stats failed: %s\n", nbase_strerror(st));
+          return 1;
+        }
+        dim = s.dim;
+      }
+      bool ok = cli_print_scored_results_json(db, dim, res, got, inc_vecs, inc_meta, inc_text);
+      nbase_close(db);
+      free(res);
+      return ok ? 0 : 1;
+    }
+    nbase_close(db);
     for (uint32_t i = 0U; i < got; i++) {
       printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].score);
     }
@@ -1972,6 +2039,10 @@ int main(int argc, char **argv) {
     float rrf_k = 60.0f;
     nbase_search_opts_t opts = nbase_search_opts_default();
     const char *flt_json = NULL;
+    bool json_out = false;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     for (int i = 5; i < argc; i++) {
       if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
@@ -1996,6 +2067,17 @@ int main(int argc, char **argv) {
         opts.use_metric_override = true;
       } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
+      } else if (strcmp(argv[i], "--json") == 0) {
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+        json_out = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
+        json_out = true;
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
@@ -2053,14 +2135,21 @@ int main(int argc, char **argv) {
     uint32_t got = 0U;
     st = nbase_search_hybrid(db, q, qdim, qtext, k, alpha, rrf_k, &opts, res, &got);
     free(q);
-    nbase_close(db);
     free(conds);
     nbase_json_free(flt_root);
     if (st != NBASE_OK) {
+      nbase_close(db);
       free(res);
       fprintf(stderr, "search-hybrid failed: %s\n", nbase_strerror(st));
       return 1;
     }
+    if (json_out) {
+      bool ok = cli_print_scored_results_json(db, s.dim, res, got, inc_vecs, inc_meta, inc_text);
+      nbase_close(db);
+      free(res);
+      return ok ? 0 : 1;
+    }
+    nbase_close(db);
     for (uint32_t i = 0U; i < got; i++) {
       printf("%llu %.7g\n", (unsigned long long)res[i].id, (double)res[i].score);
     }
@@ -2452,7 +2541,7 @@ int main(int argc, char **argv) {
     bool ok = true;
     if (inc_vecs || inc_meta || inc_text) {
       nbase_sbuf_append(&sb, ",\"results\":[");
-      ok = cli_append_enriched_id_array(&sb, db, dim, ids, NULL, got, inc_vecs, inc_meta, inc_text);
+      ok = cli_append_enriched_id_array(&sb, db, dim, ids, NULL, NULL, got, inc_vecs, inc_meta, inc_text);
       if (ok) {
         nbase_sbuf_append_n(&sb, "]", 1U);
       }
@@ -3521,7 +3610,7 @@ int main(int argc, char **argv) {
     nbase_sbuf_init(&sb);
     nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
     bool ok = cli_append_enriched_id_array(
-        &sb, db, db_st.dim, ids, NULL, got, inc_vecs, inc_meta, inc_text);
+        &sb, db, db_st.dim, ids, NULL, NULL, got, inc_vecs, inc_meta, inc_text);
     if (ok) {
       nbase_sbuf_append(&sb, "]}");
       ok = !sb.oom && (sb.data != NULL);

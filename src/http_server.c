@@ -1338,6 +1338,33 @@ static void handle_get_vectors_batch(const http_conn_t *c, const char *body, siz
     return;
   }
 
+  char **texts = NULL;
+  bool *tfound = NULL;
+  if (inc_text) {
+    texts = calloc(cnt, sizeof(char *));
+    tfound = calloc(cnt, sizeof(bool));
+    if (!texts || !tfound) {
+      free(texts);
+      free(tfound);
+      free(ids);
+      free(vecs);
+      free(found);
+      send_error_json(c, 500, "out of memory");
+      return;
+    }
+    st = nbase_get_text_batch(srv->db, ids, cnt, texts, tfound);
+    if (st != NBASE_OK) {
+      nbase_free_texts(texts, cnt);
+      free(texts);
+      free(tfound);
+      free(ids);
+      free(vecs);
+      free(found);
+      send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+      return;
+    }
+  }
+
   uint32_t found_cnt = 0U;
   for (uint32_t i = 0U; i < cnt; i++) {
     if (found[i]) {
@@ -1372,14 +1399,21 @@ static void handle_get_vectors_batch(const http_conn_t *c, const char *body, siz
         append_meta_json(&sb, srv->db, ids[i]);
       }
       if (inc_text) {
-        nbase_sbuf_append(&sb, ",\"text\":");
-        append_text_json(&sb, srv->db, ids[i]);
+        if (tfound[i] && texts[i] != NULL) {
+          nbase_sbuf_append(&sb, ",\"text\":");
+          nbase_sbuf_append_json_str(&sb, texts[i]);
+        } else {
+          nbase_sbuf_append(&sb, ",\"text\":null");
+        }
       }
     }
     nbase_sbuf_append_n(&sb, "}", 1U);
   }
   nbase_sbuf_append(&sb, "]}");
 
+  nbase_free_texts(texts, cnt);
+  free(texts);
+  free(tfound);
   free(ids);
   free(vecs);
   free(found);
@@ -1462,6 +1496,24 @@ static nbase_status_t append_ndjson_batch(
       return st;
     }
   }
+  char **texts = NULL;
+  bool *tfound = NULL;
+  if (inc_text) {
+    texts = calloc(got, sizeof(char *));
+    tfound = calloc(got, sizeof(bool));
+    if (!texts || !tfound) {
+      free(texts);
+      free(tfound);
+      return NBASE_ERR_NOMEM;
+    }
+    nbase_status_t st = nbase_get_text_batch(db, ids, got, texts, tfound);
+    if (st != NBASE_OK) {
+      nbase_free_texts(texts, got);
+      free(texts);
+      free(tfound);
+      return st;
+    }
+  }
   for (uint32_t i = 0U; i < got; i++) {
     nbase_sbuf_appendf(sb, "{\"id\":%llu", (unsigned long long)ids[i]);
     if (inc_vec && found[i]) {
@@ -1476,15 +1528,15 @@ static nbase_status_t append_ndjson_batch(
       nbase_sbuf_append(sb, ",\"metadata\":");
       append_meta_json(sb, db, ids[i]);
     }
-    if (inc_text) {
-      size_t tlen = 0U;
-      if (nbase_get_text(db, ids[i], NULL, 0U, &tlen) == NBASE_OK) {
-        nbase_sbuf_append(sb, ",\"text\":");
-        append_text_json(sb, db, ids[i]);
-      }
+    if (inc_text && tfound[i] && texts[i] != NULL) {
+      nbase_sbuf_append(sb, ",\"text\":");
+      nbase_sbuf_append_json_str(sb, texts[i]);
     }
     nbase_sbuf_append(sb, "}\n");
   }
+  nbase_free_texts(texts, got);
+  free(texts);
+  free(tfound);
   return sb->oom ? NBASE_ERR_NOMEM : NBASE_OK;
 }
 
@@ -4983,6 +5035,26 @@ static void handle_rerank(const http_conn_t *c, const char *body, size_t body_le
     vec_dim = db_st.dim;
   }
 
+  http_batch_enrich_t enrich;
+  memset(&enrich, 0, sizeof(enrich));
+  if (out_n > 0U && (inc_vec || inc_text)) {
+    uint64_t *out_ids = malloc((size_t)out_n * sizeof(uint64_t));
+    bool loaded = false;
+    if (out_ids != NULL) {
+      for (uint32_t i = 0U; i < out_n; i++) {
+        out_ids[i] = out_res[i].id;
+      }
+      loaded = http_batch_enrich_load(srv->db, out_ids, out_n, vec_dim, inc_vec, inc_text, &enrich);
+      free(out_ids);
+    }
+    if (!loaded) {
+      http_batch_enrich_free(&enrich);
+      free(out_res);
+      send_error_json(c, 500, "out of memory");
+      return;
+    }
+  }
+
   const char *method_str =
       (rerank_method == 2) ? "weighted" : ((rerank_method == 3) ? "standard" : "diversity");
   nbase_sbuf_t sb;
@@ -4996,21 +5068,12 @@ static void handle_rerank(const http_conn_t *c, const char *body, size_t body_le
         i == 0U ? "{\"id\":%llu,\"distance\":%.7g" : ",{\"id\":%llu,\"distance\":%.7g",
         (unsigned long long)out_res[i].id,
         (double)out_res[i].distance);
-    if (inc_meta) {
-      nbase_sbuf_append(&sb, ",\"metadata\":");
-      append_meta_json(&sb, srv->db, out_res[i].id);
-    }
-    if (inc_vec) {
-      nbase_sbuf_append(&sb, ",\"vector\":");
-      append_vector_json(&sb, srv->db, out_res[i].id, vec_dim);
-    }
-    if (inc_text) {
-      nbase_sbuf_append(&sb, ",\"text\":");
-      append_text_json(&sb, srv->db, out_res[i].id);
-    }
+    append_enriched_fields_json(
+        &sb, srv->db, out_res[i].id, i, inc_meta, inc_vec, inc_text, true, &enrich);
     nbase_sbuf_append_n(&sb, "}", 1U);
   }
   nbase_sbuf_append(&sb, "]}");
+  http_batch_enrich_free(&enrich);
   free(out_res);
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);

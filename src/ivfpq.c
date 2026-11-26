@@ -1153,6 +1153,8 @@ typedef struct ivfpq_batch_ctx {
   uint32_t query_count;
   uint32_t k;
   uint32_t nprobe;
+  nbase_filter_fn filter;
+  void *filter_ctx;
   nbase_result_t *out_results;
   uint32_t *out_counts;
   atomic_uint next_q;
@@ -1177,8 +1179,8 @@ static void *ivfpq_search_batch_worker(void *raw) {
         false,
         0.0f,
         ctx->nprobe,
-        NULL,
-        NULL,
+        ctx->filter,
+        ctx->filter_ctx,
         ctx->out_results + (size_t)q * (size_t)ctx->k,
         &got);
     ctx->out_counts[q] = got;
@@ -1191,13 +1193,15 @@ static void *ivfpq_search_batch_worker(void *raw) {
   return NULL;
 }
 
-nbase_status_t nbase_ivfpq_search_batch(
+nbase_status_t nbase_ivfpq_search_batch_filtered(
     const nbase_ivfpq_t *index,
     const float *queries,
     uint32_t query_count,
     uint32_t k,
     uint32_t nprobe,
     uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_counts) {
   if (!index) {
@@ -1240,6 +1244,8 @@ nbase_status_t nbase_ivfpq_search_batch(
   ctx.query_count = query_count;
   ctx.k = k;
   ctx.nprobe = nprobe;
+  ctx.filter = filter;
+  ctx.filter_ctx = filter_ctx;
   ctx.out_results = out_results;
   ctx.out_counts = out_counts;
   atomic_init(&ctx.next_q, 0U);
@@ -1260,6 +1266,19 @@ nbase_status_t nbase_ivfpq_search_batch(
   nbase_status_t st = (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
   pthread_rwlock_unlock(&mutable_idx->rwlock);
   return st;
+}
+
+nbase_status_t nbase_ivfpq_search_batch(
+    const nbase_ivfpq_t *index,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return nbase_ivfpq_search_batch_filtered(
+      index, queries, query_count, k, nprobe, num_threads, NULL, NULL, out_results, out_counts);
 }
 
 static nbase_status_t ivfpq_save_unlocked(const nbase_ivfpq_t *index, const char *file_path) {

@@ -477,6 +477,14 @@ uint32_t nbase_crc32(const void *data, size_t len);
 
 /* distance.c */
 nbase_dist_fn nbase_get_distance_fn(nbase_metric_t metric);
+void nbase_distance_indexed_batch(
+    nbase_metric_t metric,
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances);
 bool nbase_cpu_has_avx2_fma(void);
 
 /* store.c */

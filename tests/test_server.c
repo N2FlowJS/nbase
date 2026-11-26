@@ -2413,6 +2413,97 @@ static void test_http_server_search_similar_batch_and_enrich(void) {
   nbase_close(db);
 }
 
+static void test_http_server_batch_text_get_export_and_rerank_enrich(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v1[3] = {1.0f, 0.0f, 0.0f};
+  float v2[3] = {0.0f, 1.0f, 0.0f};
+  float v3[3] = {0.0f, 0.0f, 1.0f};
+  ASSERT_STATUS(nbase_add(db, 10ULL, v1, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 20ULL, v2, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 30ULL, v3, 3U), NBASE_OK);
+
+  nbase_meta_field_t m10 = {"tag", {.type = NBASE_META_STRING, .as = {.str = "alpha"}}};
+  nbase_meta_field_t m20 = {"tag", {.type = NBASE_META_STRING, .as = {.str = "beta"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, &m10, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 20ULL, &m20, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 10ULL, "batch text ten"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 30ULL, "batch text thirty"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. POST /api/vectors/get with includeText:true across present text, missing text, and missing id */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/get",
+      NULL,
+      "{\"ids\":[10,20,999,30],\"includeVectors\":true,\"includeMetadata\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"foundCount\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10,\"found\":true") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"batch text ten\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"batch text thirty\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":null") != NULL);
+  ASSERT_TRUE(strstr(r.body, "{\"id\":999,\"found\":false}") != NULL);
+  free(r.body);
+
+  /* 2. GET /api/vectors/export?includeText=true omits text field on id 20 (no text), includes on 10 & 30 */
+  ASSERT_TRUE(http_req(
+      port,
+      "GET",
+      "/api/vectors/export?includeVectors=false&includeMetadata=false&includeText=true",
+      NULL,
+      NULL,
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10,\"text\":\"batch text ten\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "{\"id\":20}\n") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":30,\"text\":\"batch text thirty\"") != NULL);
+  free(r.body);
+
+  /* 3. POST /api/rerank with batch enrichment (present & absent text/meta) + 404 on unknown id */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/rerank",
+      NULL,
+      "{\"method\":\"standard\",\"k\":4,\"includeVectors\":true,\"includeMetadata\":true,\"includeText\":true,"
+      "\"candidates\":[{\"id\":10,\"distance\":0.1},{\"id\":20,\"distance\":0.2},{\"id\":30,\"distance\":0.3}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"batch text ten\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"batch text thirty\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":null") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/rerank",
+      NULL,
+      "{\"method\":\"standard\",\"k\":2,\"includeVectors\":true,\"candidates\":[{\"id\":10,\"distance\":0.1},{\"id\":999,\"distance\":0.3}]}",
+      &r));
+  ASSERT_EQ_I64(r.status, 404);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -2434,4 +2525,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_attr_batch_get_and_include_defaults);
   RUN_TEST(test_http_server_patch_batch_and_text_get_edges);
   RUN_TEST(test_http_server_search_similar_batch_and_enrich);
+  RUN_TEST(test_http_server_batch_text_get_export_and_rerank_enrich);
 }

@@ -623,6 +623,138 @@ static void test_clustered_find_similar_and_tsan(void) {
   nbase_clustered_destroy(cl);
 }
 
+typedef struct cl_flt_batch_tsan_ctx {
+  nbase_clustered_t *cl;
+  const float *qs;
+  uint32_t dim;
+  atomic_bool stop;
+  atomic_int errors;
+} cl_flt_batch_tsan_ctx_t;
+
+static void *cl_flt_batch_reader_fn(void *raw) {
+  cl_flt_batch_tsan_ctx_t *ctx = (cl_flt_batch_tsan_ctx_t *)raw;
+  nbase_result_t res[20];
+  uint32_t cnts[4];
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    if (nbase_clustered_search_batch_filtered(
+            ctx->cl, ctx->qs, 4U, ctx->dim, 5U, 4U, 2U, cl_even_filter, NULL, res, cnts) !=
+        NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t q = 0U; q < 4U; q++) {
+      for (uint32_t i = 0U; i < cnts[q]; i++) {
+        if ((res[(size_t)q * 5U + i].id % 2ULL) != 0ULL) {
+          atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+          return NULL;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_clustered_search_batch_filtered_and_tsan(void) {
+  const uint32_t dim = 16U;
+  const uint32_t n = 160U;
+  const uint32_t nq = 6U;
+  const uint32_t k = 5U;
+  static const nbase_metric_t metrics[2] = {NBASE_METRIC_COSINE, NBASE_METRIC_EUCLIDEAN};
+
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  float *vecs = malloc((size_t)n * (size_t)dim * sizeof(float));
+  float *qs = malloc((size_t)nq * (size_t)dim * sizeof(float));
+  nbase_result_t *bres = malloc((size_t)nq * k * sizeof(nbase_result_t));
+  uint32_t *bcnts = malloc((size_t)nq * sizeof(uint32_t));
+  ASSERT_TRUE(ids && vecs && qs && bres && bcnts);
+
+  test_fill_vectors(vecs, n, dim, 5101ULL);
+  test_fill_vectors(qs, nq, dim, 5202ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 100ULL + i;
+  }
+
+  for (size_t mi = 0; mi < 2; mi++) {
+    nbase_clustered_config_t cfg = nbase_clustered_config_default(dim);
+    cfg.metric = metrics[mi];
+    cfg.target_cluster_size = 24U;
+    cfg.max_clusters = 16U;
+    cfg.distance_threshold = 2.0f;
+    cfg.seed = 4040ULL + (uint64_t)mi;
+
+    nbase_clustered_t *cl = NULL;
+    ASSERT_STATUS(nbase_clustered_create(&cfg, &cl), NBASE_OK);
+    ASSERT_STATUS(nbase_clustered_add_batch(cl, ids, vecs, n, dim), NBASE_OK);
+    ASSERT_STATUS(nbase_clustered_recluster(cl, 4U), NBASE_OK);
+
+    const uint32_t threads[2] = {1U, 4U};
+    for (size_t ti = 0; ti < 2; ti++) {
+      ASSERT_STATUS(
+          nbase_clustered_search_batch_filtered(
+              cl, qs, nq, dim, k, 4U, threads[ti], cl_even_filter, NULL, bres, bcnts),
+          NBASE_OK);
+      for (uint32_t q = 0U; q < nq; q++) {
+        nbase_result_t sres[5];
+        uint32_t scnt = 0U;
+        ASSERT_STATUS(
+            nbase_clustered_search_filtered(
+                cl, qs + (size_t)q * dim, dim, k, 4U, cl_even_filter, NULL, sres, &scnt),
+            NBASE_OK);
+        ASSERT_EQ_U64(bcnts[q], scnt);
+        for (uint32_t r = 0U; r < scnt; r++) {
+          ASSERT_EQ_U64(bres[(size_t)q * k + r].id, sres[r].id);
+          ASSERT_TRUE((sres[r].id % 2ULL) == 0ULL);
+          ASSERT_NEAR((double)bres[(size_t)q * k + r].distance, (double)sres[r].distance, 1e-5, 1e-5);
+        }
+      }
+    }
+
+    if (mi == 0U) {
+      ASSERT_STATUS(
+          nbase_clustered_search_batch_filtered(
+              NULL, qs, nq, dim, k, 4U, 2U, cl_even_filter, NULL, bres, bcnts),
+          NBASE_ERR_INVALID_ARG);
+      ASSERT_STATUS(
+          nbase_clustered_search_batch_filtered(
+              cl, NULL, 0U, dim, k, 4U, 2U, cl_even_filter, NULL, NULL, NULL),
+          NBASE_OK);
+      bcnts[0] = 55U;
+      ASSERT_STATUS(
+          nbase_clustered_search_batch_filtered(
+              cl, qs, 2U, dim, 0U, 4U, 2U, cl_even_filter, NULL, NULL, bcnts),
+          NBASE_OK);
+      ASSERT_EQ_U64(bcnts[0], 0ULL);
+      ASSERT_STATUS(
+          nbase_clustered_search_batch_filtered(
+              cl, qs, 2U, dim + 1U, k, 4U, 2U, cl_even_filter, NULL, bres, bcnts),
+          NBASE_ERR_DIM_MISMATCH);
+
+      cl_flt_batch_tsan_ctx_t ctx = {cl, qs, dim, false, 0};
+      pthread_t r1, r2;
+      ASSERT_TRUE(pthread_create(&r1, NULL, cl_flt_batch_reader_fn, &ctx) == 0);
+      ASSERT_TRUE(pthread_create(&r2, NULL, cl_flt_batch_reader_fn, &ctx) == 0);
+      for (uint32_t step = 0U; step < 10U; step++) {
+        uint64_t tid = 2000ULL + (step % 4ULL);
+        ASSERT_STATUS(
+            nbase_clustered_upsert(cl, tid, vecs + (size_t)(step * 3U) * dim, dim),
+            NBASE_OK);
+      }
+      atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+      pthread_join(r1, NULL);
+      pthread_join(r2, NULL);
+      ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+    }
+
+    nbase_clustered_destroy(cl);
+  }
+
+  free(bcnts);
+  free(bres);
+  free(qs);
+  free(vecs);
+  free(ids);
+}
+
 void test_clustered_run(void) {
   RUN_TEST(test_clustered_online_assign_search_and_recluster);
   RUN_TEST(test_clustered_batch_filtered_and_concurrent);
@@ -630,4 +762,5 @@ void test_clustered_run(void) {
   RUN_TEST(test_clustered_get_batch_and_search_radius);
   RUN_TEST(test_clustered_compact_and_search_batch_mt);
   RUN_TEST(test_clustered_find_similar_and_tsan);
+  RUN_TEST(test_clustered_search_batch_filtered_and_tsan);
 }

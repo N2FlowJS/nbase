@@ -814,6 +814,317 @@ static __attribute__((target("avx2,fma"))) void distance_batch_avx2(
   }
 }
 
+static __attribute__((target("avx2,fma"))) void squared_euclidean_indexed_batch_avx2(
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  uint32_t n = 0U;
+  for (; n + 4U <= count; n += 4U) {
+    if (n + 8U <= count) {
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 4U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 5U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 6U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 7U] * (size_t)dim), _MM_HINT_T0);
+    }
+    const float *v0 = vectors + (size_t)slots[n] * (size_t)dim;
+    const float *v1 = vectors + (size_t)slots[n + 1U] * (size_t)dim;
+    const float *v2 = vectors + (size_t)slots[n + 2U] * (size_t)dim;
+    const float *v3 = vectors + (size_t)slots[n + 3U] * (size_t)dim;
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      __m256 d0 = _mm256_sub_ps(vq, _mm256_loadu_ps(v0 + i));
+      __m256 d1 = _mm256_sub_ps(vq, _mm256_loadu_ps(v1 + i));
+      __m256 d2 = _mm256_sub_ps(vq, _mm256_loadu_ps(v2 + i));
+      __m256 d3 = _mm256_sub_ps(vq, _mm256_loadu_ps(v3 + i));
+      a0 = _mm256_fmadd_ps(d0, d0, a0);
+      a1 = _mm256_fmadd_ps(d1, d1, a1);
+      a2 = _mm256_fmadd_ps(d2, d2, a2);
+      a3 = _mm256_fmadd_ps(d3, d3, a3);
+    }
+    float s0 = hsum256_ps(a0);
+    float s1 = hsum256_ps(a1);
+    float s2 = hsum256_ps(a2);
+    float s3 = hsum256_ps(a3);
+    for (; i < dim; i++) {
+      float q = query[i];
+      float d0 = q - v0[i];
+      float d1 = q - v1[i];
+      float d2 = q - v2[i];
+      float d3 = q - v3[i];
+      s0 += d0 * d0;
+      s1 += d1 * d1;
+      s2 += d2 * d2;
+      s3 += d3 * d3;
+    }
+    out_distances[n] = s0;
+    out_distances[n + 1U] = s1;
+    out_distances[n + 2U] = s2;
+    out_distances[n + 3U] = s3;
+  }
+  for (; n < count; n++) {
+    const float *v = vectors + (size_t)slots[n] * (size_t)dim;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 16U <= dim; i += 16U) {
+      __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(query + i), _mm256_loadu_ps(v + i));
+      __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(query + i + 8U), _mm256_loadu_ps(v + i + 8U));
+      acc0 = _mm256_fmadd_ps(d0, d0, acc0);
+      acc1 = _mm256_fmadd_ps(d1, d1, acc1);
+    }
+    __m256 acc = _mm256_add_ps(acc0, acc1);
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 d = _mm256_sub_ps(_mm256_loadu_ps(query + i), _mm256_loadu_ps(v + i));
+      acc = _mm256_fmadd_ps(d, d, acc);
+    }
+    float sum = hsum256_ps(acc);
+    for (; i < dim; i++) {
+      float d = query[i] - v[i];
+      sum += d * d;
+    }
+    out_distances[n] = sum;
+  }
+}
+
+static __attribute__((target("avx2,fma"))) void euclidean_indexed_batch_avx2(
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  squared_euclidean_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
+  for (uint32_t n = 0U; n < count; n++) {
+    out_distances[n] = sqrtf(out_distances[n]);
+  }
+}
+
+static __attribute__((target("avx2,fma"))) void inner_product_indexed_batch_avx2(
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  uint32_t n = 0U;
+  for (; n + 4U <= count; n += 4U) {
+    if (n + 8U <= count) {
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 4U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 5U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 6U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 7U] * (size_t)dim), _MM_HINT_T0);
+    }
+    const float *v0 = vectors + (size_t)slots[n] * (size_t)dim;
+    const float *v1 = vectors + (size_t)slots[n + 1U] * (size_t)dim;
+    const float *v2 = vectors + (size_t)slots[n + 2U] * (size_t)dim;
+    const float *v3 = vectors + (size_t)slots[n + 3U] * (size_t)dim;
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      a0 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v0 + i), a0);
+      a1 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v1 + i), a1);
+      a2 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v2 + i), a2);
+      a3 = _mm256_fmadd_ps(vq, _mm256_loadu_ps(v3 + i), a3);
+    }
+    float s0 = hsum256_ps(a0);
+    float s1 = hsum256_ps(a1);
+    float s2 = hsum256_ps(a2);
+    float s3 = hsum256_ps(a3);
+    for (; i < dim; i++) {
+      float q = query[i];
+      s0 += q * v0[i];
+      s1 += q * v1[i];
+      s2 += q * v2[i];
+      s3 += q * v3[i];
+    }
+    out_distances[n] = -s0;
+    out_distances[n + 1U] = -s1;
+    out_distances[n + 2U] = -s2;
+    out_distances[n + 3U] = -s3;
+  }
+  for (; n < count; n++) {
+    const float *v = vectors + (size_t)slots[n] * (size_t)dim;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 16U <= dim; i += 16U) {
+      acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(query + i), _mm256_loadu_ps(v + i), acc0);
+      acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(query + i + 8U), _mm256_loadu_ps(v + i + 8U), acc1);
+    }
+    __m256 acc = _mm256_add_ps(acc0, acc1);
+    for (; i + 8U <= dim; i += 8U) {
+      acc = _mm256_fmadd_ps(_mm256_loadu_ps(query + i), _mm256_loadu_ps(v + i), acc);
+    }
+    float sum = hsum256_ps(acc);
+    for (; i < dim; i++) {
+      sum += query[i] * v[i];
+    }
+    out_distances[n] = -sum;
+  }
+}
+
+static __attribute__((target("avx2,fma"))) void cosine_indexed_batch_avx2(
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  float norm_a = dot_avx2(query, query, dim);
+  float norm_a_sqrt = sqrtf(norm_a);
+  if (norm_a_sqrt == 0.0f) {
+    for (uint32_t n = 0U; n < count; n++) {
+      out_distances[n] = 1.0f;
+    }
+    return;
+  }
+  uint32_t n = 0U;
+  for (; n + 4U <= count; n += 4U) {
+    if (n + 8U <= count) {
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 4U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 5U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 6U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 7U] * (size_t)dim), _MM_HINT_T0);
+    }
+    const float *v0 = vectors + (size_t)slots[n] * (size_t)dim;
+    const float *v1 = vectors + (size_t)slots[n + 1U] * (size_t)dim;
+    const float *v2 = vectors + (size_t)slots[n + 2U] * (size_t)dim;
+    const float *v3 = vectors + (size_t)slots[n + 3U] * (size_t)dim;
+    __m256 ad0 = _mm256_setzero_ps();
+    __m256 ad1 = _mm256_setzero_ps();
+    __m256 ad2 = _mm256_setzero_ps();
+    __m256 ad3 = _mm256_setzero_ps();
+    __m256 an0 = _mm256_setzero_ps();
+    __m256 an1 = _mm256_setzero_ps();
+    __m256 an2 = _mm256_setzero_ps();
+    __m256 an3 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      __m256 vv0 = _mm256_loadu_ps(v0 + i);
+      __m256 vv1 = _mm256_loadu_ps(v1 + i);
+      __m256 vv2 = _mm256_loadu_ps(v2 + i);
+      __m256 vv3 = _mm256_loadu_ps(v3 + i);
+      ad0 = _mm256_fmadd_ps(vq, vv0, ad0);
+      ad1 = _mm256_fmadd_ps(vq, vv1, ad1);
+      ad2 = _mm256_fmadd_ps(vq, vv2, ad2);
+      ad3 = _mm256_fmadd_ps(vq, vv3, ad3);
+      an0 = _mm256_fmadd_ps(vv0, vv0, an0);
+      an1 = _mm256_fmadd_ps(vv1, vv1, an1);
+      an2 = _mm256_fmadd_ps(vv2, vv2, an2);
+      an3 = _mm256_fmadd_ps(vv3, vv3, an3);
+    }
+    float d0 = hsum256_ps(ad0);
+    float d1 = hsum256_ps(ad1);
+    float d2 = hsum256_ps(ad2);
+    float d3 = hsum256_ps(ad3);
+    float nb0 = hsum256_ps(an0);
+    float nb1 = hsum256_ps(an1);
+    float nb2 = hsum256_ps(an2);
+    float nb3 = hsum256_ps(an3);
+    for (; i < dim; i++) {
+      float q = query[i];
+      float x0 = v0[i];
+      float x1 = v1[i];
+      float x2 = v2[i];
+      float x3 = v3[i];
+      d0 += q * x0;
+      d1 += q * x1;
+      d2 += q * x2;
+      d3 += q * x3;
+      nb0 += x0 * x0;
+      nb1 += x1 * x1;
+      nb2 += x2 * x2;
+      nb3 += x3 * x3;
+    }
+    out_distances[n] = cosine_finish_val(d0, norm_a_sqrt, nb0);
+    out_distances[n + 1U] = cosine_finish_val(d1, norm_a_sqrt, nb1);
+    out_distances[n + 2U] = cosine_finish_val(d2, norm_a_sqrt, nb2);
+    out_distances[n + 3U] = cosine_finish_val(d3, norm_a_sqrt, nb3);
+  }
+  for (; n < count; n++) {
+    const float *v = vectors + (size_t)slots[n] * (size_t)dim;
+    __m256 acc_dot0 = _mm256_setzero_ps();
+    __m256 acc_dot1 = _mm256_setzero_ps();
+    __m256 acc_nb0 = _mm256_setzero_ps();
+    __m256 acc_nb1 = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 16U <= dim; i += 16U) {
+      __m256 vq0 = _mm256_loadu_ps(query + i);
+      __m256 vv0 = _mm256_loadu_ps(v + i);
+      __m256 vq1 = _mm256_loadu_ps(query + i + 8U);
+      __m256 vv1 = _mm256_loadu_ps(v + i + 8U);
+      acc_dot0 = _mm256_fmadd_ps(vq0, vv0, acc_dot0);
+      acc_dot1 = _mm256_fmadd_ps(vq1, vv1, acc_dot1);
+      acc_nb0 = _mm256_fmadd_ps(vv0, vv0, acc_nb0);
+      acc_nb1 = _mm256_fmadd_ps(vv1, vv1, acc_nb1);
+    }
+    __m256 acc_dot = _mm256_add_ps(acc_dot0, acc_dot1);
+    __m256 acc_nb = _mm256_add_ps(acc_nb0, acc_nb1);
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      __m256 vv = _mm256_loadu_ps(v + i);
+      acc_dot = _mm256_fmadd_ps(vq, vv, acc_dot);
+      acc_nb = _mm256_fmadd_ps(vv, vv, acc_nb);
+    }
+    float dot = hsum256_ps(acc_dot);
+    float norm_b = hsum256_ps(acc_nb);
+    for (; i < dim; i++) {
+      float bi = v[i];
+      dot += query[i] * bi;
+      norm_b += bi * bi;
+    }
+    out_distances[n] = cosine_finish_val(dot, norm_a_sqrt, norm_b);
+  }
+}
+
+static __attribute__((target("avx2,fma"))) void distance_indexed_batch_avx2(
+    nbase_metric_t metric,
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  switch (metric) {
+    case NBASE_METRIC_EUCLIDEAN:
+      euclidean_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
+      return;
+    case NBASE_METRIC_SQUARED_EUCLIDEAN:
+      squared_euclidean_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
+      return;
+    case NBASE_METRIC_COSINE:
+      cosine_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
+      return;
+    case NBASE_METRIC_INNER_PRODUCT:
+      inner_product_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
+      return;
+    default:
+      break;
+  }
+  nbase_dist_fn fn = (metric == NBASE_METRIC_MANHATTAN)
+                         ? manhattan_avx2
+                         : ((metric == NBASE_METRIC_CHEBYSHEV) ? chebyshev_avx2 : hamming_avx2);
+  for (uint32_t n = 0U; n < count; n++) {
+    if (n + 1U < count) {
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 1U] * (size_t)dim), _MM_HINT_T0);
+    }
+    out_distances[n] = fn(query, vectors + (size_t)slots[n] * (size_t)dim, dim);
+  }
+}
+
 static int detect_avx2_fma(void) {
   static atomic_int cached = -1;
   int val = atomic_load_explicit(&cached, memory_order_acquire);
@@ -1156,6 +1467,48 @@ static void cosine_batch_scalar(
     }
   }
 }
+
+static void cosine_indexed_batch_scalar(
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  float norm_a = 0.0f;
+  for (uint32_t i = 0U; i < dim; i++) {
+    norm_a += query[i] * query[i];
+  }
+  float norm_a_sqrt = sqrtf(norm_a);
+  if (norm_a_sqrt == 0.0f) {
+    for (uint32_t n = 0U; n < count; n++) {
+      out_distances[n] = 1.0f;
+    }
+    return;
+  }
+  for (uint32_t n = 0U; n < count; n++) {
+    const float *v = vectors + (size_t)slots[n] * (size_t)dim;
+    float dot = 0.0f;
+    float norm_b = 0.0f;
+    for (uint32_t i = 0U; i < dim; i++) {
+      float bi = v[i];
+      dot += query[i] * bi;
+      norm_b += bi * bi;
+    }
+    float denom = norm_a_sqrt * sqrtf(norm_b);
+    if (denom == 0.0f) {
+      out_distances[n] = 1.0f;
+    } else {
+      float sim = dot / denom;
+      if (sim > 1.0f) {
+        sim = 1.0f;
+      } else if (sim < -1.0f) {
+        sim = -1.0f;
+      }
+      out_distances[n] = 1.0f - sim;
+    }
+  }
+}
 #endif
 
 nbase_status_t nbase_distance_batch(
@@ -1197,4 +1550,35 @@ nbase_status_t nbase_distance_batch(
     out_distances[n] = fn(query, vectors + (size_t)n * (size_t)dim, dim);
   }
   return NBASE_OK;
+}
+
+void nbase_distance_indexed_batch(
+    nbase_metric_t metric,
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  if (count == 0U || dim == 0U || !query || !vectors || !slots || !out_distances ||
+      !nbase_metric_is_valid(metric)) {
+    return;
+  }
+
+#if NBASE_HAS_X86_AVX2
+  if (detect_avx2_fma() != 0) {
+    distance_indexed_batch_avx2(metric, query, vectors, slots, count, dim, out_distances);
+    return;
+  }
+#endif
+#if !NBASE_HAS_ARM_NEON
+  if (metric == NBASE_METRIC_COSINE) {
+    cosine_indexed_batch_scalar(query, vectors, slots, count, dim, out_distances);
+    return;
+  }
+#endif
+  nbase_dist_fn fn = nbase_get_distance_fn(metric);
+  for (uint32_t n = 0U; n < count; n++) {
+    out_distances[n] = fn(query, vectors + (size_t)slots[n] * (size_t)dim, dim);
+  }
 }

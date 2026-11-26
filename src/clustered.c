@@ -884,6 +884,31 @@ nbase_status_t nbase_clustered_recluster(nbase_clustered_t *cl, uint32_t num_clu
   return NBASE_OK;
 }
 
+static void cl_flush_candidates(
+    const nbase_clustered_t *cl,
+    const float *query,
+    uint32_t dim,
+    bool use_radius,
+    float max_distance,
+    const uint64_t *cand_ids,
+    const uint32_t *cand_slots,
+    uint32_t cand_n,
+    cl_maxheap_t *heap) {
+  if (cand_n == 0U) {
+    return;
+  }
+  float cand_dists[64];
+  nbase_distance_indexed_batch(
+      cl->cfg.metric, query, cl->store->vectors, cand_slots, cand_n, dim, cand_dists);
+  for (uint32_t ci = 0U; ci < cand_n; ci++) {
+    float dist = cand_dists[ci];
+    if (use_radius && dist > max_distance) {
+      continue;
+    }
+    cl_heap_push_bounded(heap, cand_ids[ci], dist);
+  }
+}
+
 static nbase_status_t cl_search_unlocked(
     const nbase_clustered_t *cl,
     const float *query,
@@ -908,9 +933,15 @@ static nbase_status_t cl_search_unlocked(
   }
 
   nbase_dist_fn dfn = nbase_get_distance_fn(cl->cfg.metric);
-  cl_probe_t *probes = malloc((size_t)cl->cluster_count * sizeof(cl_probe_t));
-  if (!probes) {
-    return NBASE_ERR_NOMEM;
+  cl_probe_t stack_probes[256];
+  cl_probe_t *heap_probes = NULL;
+  cl_probe_t *probes = stack_probes;
+  if (cl->cluster_count > 256U) {
+    heap_probes = malloc((size_t)cl->cluster_count * sizeof(cl_probe_t));
+    if (!heap_probes) {
+      return NBASE_ERR_NOMEM;
+    }
+    probes = heap_probes;
   }
   uint32_t non_empty = 0U;
   for (uint32_t c = 0U; c < cl->cluster_count; c++) {
@@ -922,19 +953,49 @@ static nbase_status_t cl_search_unlocked(
     non_empty++;
   }
   if (non_empty == 0U) {
-    free(probes);
+    free(heap_probes);
     return NBASE_OK;
   }
 
-  qsort(probes, non_empty, sizeof(cl_probe_t), cmp_cl_probe_asc);
   uint32_t to_probe = (nprobe == 0U || nprobe > non_empty) ? non_empty : nprobe;
+  if (to_probe < non_empty && to_probe <= 8U) {
+    for (uint32_t i = 0U; i < to_probe; i++) {
+      uint32_t best = i;
+      for (uint32_t j = i + 1U; j < non_empty; j++) {
+        if (probes[j].dist < probes[best].dist ||
+            (probes[j].dist == probes[best].dist &&
+             probes[j].cluster_idx < probes[best].cluster_idx)) {
+          best = j;
+        }
+      }
+      if (best != i) {
+        cl_probe_t tmp = probes[i];
+        probes[i] = probes[best];
+        probes[best] = tmp;
+      }
+    }
+  } else if (non_empty > 1U) {
+    qsort(probes, non_empty, sizeof(cl_probe_t), cmp_cl_probe_asc);
+  }
 
-  nbase_result_t *heap_buf = malloc((size_t)max_results * sizeof(nbase_result_t));
-  if (!heap_buf) {
-    free(probes);
-    return NBASE_ERR_NOMEM;
+  nbase_result_t stack_heap[64];
+  nbase_result_t *heap_alloc = NULL;
+  nbase_result_t *heap_buf = stack_heap;
+  if (max_results > 64U) {
+    heap_alloc = malloc((size_t)max_results * sizeof(nbase_result_t));
+    if (!heap_alloc) {
+      free(heap_probes);
+      return NBASE_ERR_NOMEM;
+    }
+    heap_buf = heap_alloc;
   }
   cl_maxheap_t heap = {heap_buf, 0U, max_results};
+
+  const uint8_t *slot_flags = cl->store->slot_flags;
+  uint32_t slot_count = cl->store->slot_count;
+  uint64_t cand_ids[64];
+  uint32_t cand_slots[64];
+  uint32_t cand_n = 0U;
 
   for (uint32_t pi = 0U; pi < to_probe; pi++) {
     const cl_cluster_t *c = &cl->clusters[probes[pi].cluster_idx];
@@ -944,18 +1005,22 @@ static nbase_status_t cl_search_unlocked(
         continue;
       }
       uint32_t mslot = NBASE_INVALID_SLOT;
-      if (!nbase_store_find_slot(cl->store, mid, &mslot)) {
+      if (!nbase_store_find_slot(cl->store, mid, &mslot) ||
+          mslot >= slot_count ||
+          slot_flags[mslot] != NBASE_SLOT_ACTIVE) {
         continue;
       }
-      const float *mv = nbase_store_get_vector(cl->store, mslot);
-      float dist = dfn(query, mv, dim);
-      if (use_radius && dist > max_distance) {
-        continue;
+      cand_ids[cand_n] = mid;
+      cand_slots[cand_n] = mslot;
+      cand_n++;
+      if (cand_n == 64U) {
+        cl_flush_candidates(cl, query, dim, use_radius, max_distance, cand_ids, cand_slots, cand_n, &heap);
+        cand_n = 0U;
       }
-      cl_heap_push_bounded(&heap, mid, dist);
     }
   }
-  free(probes);
+  cl_flush_candidates(cl, query, dim, use_radius, max_distance, cand_ids, cand_slots, cand_n, &heap);
+  free(heap_probes);
 
   if (heap.len > 1U) {
     qsort(heap.data, heap.len, sizeof(nbase_result_t), nbase_cmp_result_asc);
@@ -964,7 +1029,7 @@ static nbase_status_t cl_search_unlocked(
     memcpy(out_results, heap.data, (size_t)heap.len * sizeof(nbase_result_t));
   }
   *out_count = heap.len;
-  free(heap_buf);
+  free(heap_alloc);
   return NBASE_OK;
 }
 
@@ -1100,6 +1165,8 @@ typedef struct cl_batch_ctx {
   uint32_t query_count;
   uint32_t k;
   uint32_t nprobe;
+  nbase_filter_fn filter;
+  void *filter_ctx;
   nbase_result_t *out_results;
   uint32_t *out_counts;
   atomic_uint next_q;
@@ -1125,8 +1192,8 @@ static void *cl_search_batch_worker(void *raw) {
         false,
         0.0f,
         ctx->nprobe,
-        NULL,
-        NULL,
+        ctx->filter,
+        ctx->filter_ctx,
         ctx->out_results + (size_t)q * (size_t)ctx->k,
         &got);
     ctx->out_counts[q] = got;
@@ -1139,7 +1206,7 @@ static void *cl_search_batch_worker(void *raw) {
   return NULL;
 }
 
-nbase_status_t nbase_clustered_search_batch(
+nbase_status_t nbase_clustered_search_batch_filtered(
     const nbase_clustered_t *cl,
     const float *queries,
     uint32_t query_count,
@@ -1147,6 +1214,8 @@ nbase_status_t nbase_clustered_search_batch(
     uint32_t k,
     uint32_t nprobe,
     uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_counts) {
   if (!cl) {
@@ -1192,6 +1261,8 @@ nbase_status_t nbase_clustered_search_batch(
   ctx.query_count = query_count;
   ctx.k = k;
   ctx.nprobe = nprobe;
+  ctx.filter = filter;
+  ctx.filter_ctx = filter_ctx;
   ctx.out_results = out_results;
   ctx.out_counts = out_counts;
   atomic_init(&ctx.next_q, 0U);
@@ -1217,6 +1288,20 @@ nbase_status_t nbase_clustered_search_batch(
 
   pthread_rwlock_unlock(&mcl->rwlock);
   return (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
+}
+
+nbase_status_t nbase_clustered_search_batch(
+    const nbase_clustered_t *cl,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return nbase_clustered_search_batch_filtered(
+      cl, queries, query_count, dim, k, nprobe, num_threads, NULL, NULL, out_results, out_counts);
 }
 
 nbase_status_t nbase_clustered_search_filtered(

@@ -23,7 +23,7 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 
 ### Endpoints
 
-- **`GET /health` & `HEAD /health`**: `GET` returns `{"status":"ok","version":"1.18.0","simd":"..."}`; `HEAD` returns status `200` with empty body.
+- **`GET /health` & `HEAD /health`**: `GET` returns `{"status":"ok","version":"1.19.0","simd":"..."}`; `HEAD` returns status `200` with empty body.
 - **`GET /stats`**: returns DB stats (`dim`, `metric`, `active_vectors`, `total_slots`, `tombstones`, `mmap_backed`, `hnsw_*`, `text_docs`, `memory_bytes`, `cache_capacity`, `cache_entries`, `cache_hits`, `cache_misses`, `search_p50_us`, `search_p95_us`, `search_p99_us`).
 - **`GET /metrics`**: Prometheus exposition format (`nbase_requests_total`, `nbase_errors_total`, `nbase_search_queries_total`, `nbase_search_latency_microseconds_sum`, `nbase_search_latency_p50_microseconds`, `nbase_search_latency_p95_microseconds`, `nbase_search_latency_p99_microseconds`, `nbase_keepalive_requests_total`, `nbase_vectors_active`, `nbase_vectors_tombstones`, `nbase_hnsw_nodes_active`, `nbase_text_docs_active`, `nbase_memory_bytes`, `nbase_cache_entries`, `nbase_cache_hits_total`, `nbase_cache_misses_total`).
 - **`GET /api/vectors`**: paginated sorted vector listing (`?offset=0&limit=50&includeVectors=false&includeMetadata=false&includeText=false`).
@@ -68,6 +68,6 @@ Authentication uses constant-time `Authorization: Bearer <key>` comparison on al
 - `nbase-cli relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]`
 - `nbase-cli communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]`
 - `nbase-cli distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]`
-- `nbase-cli search-text <dir> <query> [--k <K>] [--filter <json>]` / `search-text-batch <dir> <file.ndjson|-> [--k <K>] [--threads <T>] [--filter <json>]` / `search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>]` / `search-hybrid-batch <dir> <file.ndjson|-> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--threads <T>] [--filter <json>]`
+- `nbase-cli search-text <dir> <query> [--k <K>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]` / `search-text-batch <dir> <file.ndjson|-> [--k <K>] [--threads <T>] [--filter <json>]` / `search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]` / `search-hybrid-batch <dir> <file.ndjson|-> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--threads <T>] [--filter <json>]`
 - `nbase-cli rebuild <dir> [--threads <T>]` / `compact <dir>` / `checkpoint <dir>`
 - `nbase-cli import <dir> <file.ndjson|-> [--upsert] [--threads <T>]` / `export <dir> [file.ndjson|-] [--ids <id1,id2,...>] [--filter <json>]`

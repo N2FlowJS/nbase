@@ -48,24 +48,6 @@ typedef struct lsh_bit_margin {
   float margin;
 } lsh_bit_margin_t;
 
-static int cmp_margin_asc(const void *pa, const void *pb) {
-  const lsh_bit_margin_t *a = (const lsh_bit_margin_t *)pa;
-  const lsh_bit_margin_t *b = (const lsh_bit_margin_t *)pb;
-  if (a->margin < b->margin) {
-    return -1;
-  }
-  if (a->margin > b->margin) {
-    return 1;
-  }
-  if (a->bit < b->bit) {
-    return -1;
-  }
-  if (a->bit > b->bit) {
-    return 1;
-  }
-  return 0;
-}
-
 static bool lsh_metric_supported(nbase_metric_t metric) {
   return metric == NBASE_METRIC_COSINE || metric == NBASE_METRIC_EUCLIDEAN;
 }
@@ -705,11 +687,45 @@ nbase_status_t nbase_lsh_compact(nbase_lsh_t *lsh) {
 }
 
 typedef struct lsh_search_scratch {
-  uint32_t *seen_gen;
+  uint16_t *seen_gen;
   uint32_t seen_cap;
-  uint32_t gen;
+  uint16_t gen;
   nbase_heap_t topk;
 } lsh_search_scratch_t;
+
+static bool lsh_flush_candidates(
+    const float *query,
+    const float *store_vecs,
+    uint32_t dim,
+    nbase_metric_t metric,
+    uint32_t k,
+    bool use_radius,
+    float max_distance,
+    const uint32_t *cand_slots,
+    uint32_t cand_n,
+    nbase_heap_t *topk) {
+  if (cand_n == 0U) {
+    return true;
+  }
+  float cand_dists[64];
+  nbase_distance_indexed_batch(metric, query, store_vecs, cand_slots, cand_n, dim, cand_dists);
+  for (uint32_t c = 0U; c < cand_n; c++) {
+    float d = cand_dists[c];
+    if (use_radius && d > max_distance) {
+      continue;
+    }
+    nbase_heap_item_t item = {cand_slots[c], d};
+    if (topk->len < k) {
+      if (!nbase_heap_push(topk, item)) {
+        return false;
+      }
+    } else if (topk->len > 0U && nbase_heap_higher(true, topk->data[0], item)) {
+      (void)nbase_heap_pop(topk);
+      (void)nbase_heap_push(topk, item);
+    }
+  }
+  return true;
+}
 
 static nbase_status_t lsh_search_core_unlocked(
     const nbase_lsh_t *lsh,
@@ -741,36 +757,51 @@ static nbase_status_t lsh_search_core_unlocked(
   }
 
   uint32_t slot_count = lsh->store->slot_count;
-  uint32_t *local_seen = NULL;
-  uint32_t *seen_gen = NULL;
-  uint32_t gen = 1U;
+  uint16_t *seen_gen = NULL;
+  uint16_t gen = 1U;
+  uint64_t stack_bits[512];
+  uint64_t *heap_bits = NULL;
+  uint64_t *seen_bits = NULL;
   nbase_heap_t local_topk;
   nbase_heap_t *topk = NULL;
   bool use_scratch = (scratch != NULL && scratch->seen_gen != NULL && scratch->seen_cap >= slot_count);
 
   if (use_scratch) {
-    scratch->gen++;
-    if (scratch->gen == 0U) {
-      memset(scratch->seen_gen, 0, (size_t)scratch->seen_cap * sizeof(uint32_t));
+    if (scratch->gen == UINT16_MAX) {
+      memset(scratch->seen_gen, 0, (size_t)scratch->seen_cap * sizeof(uint16_t));
       scratch->gen = 1U;
+    } else {
+      scratch->gen = (uint16_t)(scratch->gen + 1U);
     }
     scratch->topk.len = 0U;
     seen_gen = scratch->seen_gen;
     gen = scratch->gen;
     topk = &scratch->topk;
   } else {
-    local_seen = calloc((size_t)slot_count, sizeof(uint32_t));
-    if (!local_seen) {
-      return NBASE_ERR_NOMEM;
+    size_t words = ((size_t)slot_count + 63U) / 64U;
+    if (words <= 512U) {
+      seen_bits = stack_bits;
+      if (words > 0U) {
+        memset(seen_bits, 0, words * sizeof(uint64_t));
+      }
+    } else {
+      heap_bits = calloc(words, sizeof(uint64_t));
+      if (!heap_bits) {
+        return NBASE_ERR_NOMEM;
+      }
+      seen_bits = heap_bits;
     }
     nbase_heap_init(&local_topk, true);
-    seen_gen = local_seen;
     topk = &local_topk;
   }
 
   lsh_bit_margin_t margins[NBASE_LSH_MAX_BITS];
-  nbase_dist_fn dist_fn = nbase_get_distance_fn(lsh->metric);
+  const uint8_t *slot_flags = lsh->store->slot_flags;
+  const uint64_t *store_ids = lsh->store->ids;
+  const float *store_vecs = lsh->store->vectors;
   uint32_t max_flips = (multi_probe > lsh->num_bits) ? lsh->num_bits : multi_probe;
+  uint32_t cand_slots[64];
+  uint32_t cand_n = 0U;
 
   for (uint32_t t = 0U; t < lsh->num_tables; t++) {
     uint32_t base_h = lsh_hash_from_ip_dists(
@@ -778,51 +809,81 @@ static nbase_status_t lsh_search_core_unlocked(
         t,
         ip_dists + (size_t)t * (size_t)lsh->num_bits,
         max_flips > 0U ? margins : NULL);
-    if (max_flips > 0U) {
-      qsort(margins, lsh->num_bits, sizeof(lsh_bit_margin_t), cmp_margin_asc);
+    for (uint32_t f = 0U; f < max_flips; f++) {
+      uint32_t best_idx = f;
+      for (uint32_t m = f + 1U; m < lsh->num_bits; m++) {
+        if (margins[m].margin < margins[best_idx].margin ||
+            (margins[m].margin == margins[best_idx].margin &&
+             margins[m].bit < margins[best_idx].bit)) {
+          best_idx = m;
+        }
+      }
+      if (best_idx != f) {
+        lsh_bit_margin_t tmp = margins[f];
+        margins[f] = margins[best_idx];
+        margins[best_idx] = tmp;
+      }
     }
 
+    const lsh_bucket_t *t_buckets = lsh->buckets + (size_t)t * (size_t)lsh->num_buckets;
     for (uint32_t p = 0U; p <= max_flips; p++) {
       uint32_t h = (p == 0U) ? base_h : (base_h ^ (1U << margins[p - 1U].bit));
-      const lsh_bucket_t *b = &lsh->buckets[(size_t)t * (size_t)lsh->num_buckets + h];
-      for (uint32_t i = 0U; i < b->len; i++) {
-        uint32_t slot = b->slots[i];
-        if (slot >= slot_count || seen_gen[slot] == gen) {
+      const lsh_bucket_t *b = &t_buckets[h];
+      const uint32_t *b_slots = b->slots;
+      uint32_t b_len = b->len;
+      for (uint32_t i = 0U; i < b_len; i++) {
+        uint32_t slot = b_slots[i];
+        if (slot >= slot_count) {
           continue;
         }
-        seen_gen[slot] = gen;
-        if (lsh->store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
+        if (use_scratch) {
+          if (seen_gen[slot] == gen) {
+            continue;
+          }
+          seen_gen[slot] = gen;
+        } else {
+          uint64_t mask = 1ULL << (slot & 63U);
+          size_t w = (size_t)(slot >> 6U);
+          if ((seen_bits[w] & mask) != 0ULL) {
+            continue;
+          }
+          seen_bits[w] |= mask;
+        }
+        if (slot_flags[slot] != NBASE_SLOT_ACTIVE) {
           continue;
         }
-        if (filter && !filter(lsh->store->ids[slot], filter_ctx)) {
+        if (filter && !filter(store_ids[slot], filter_ctx)) {
           continue;
         }
-
-        float d = dist_fn(query, nbase_store_get_vector(lsh->store, slot), dim);
-        if (use_radius && d > max_distance) {
-          continue;
-        }
-        nbase_heap_item_t item = {slot, d};
-        if (topk->len < k) {
-          if (!nbase_heap_push(topk, item)) {
+        cand_slots[cand_n++] = slot;
+        if (cand_n == 64U) {
+          if (!lsh_flush_candidates(
+                  query, store_vecs, dim, lsh->metric, k, use_radius, max_distance, cand_slots, cand_n, topk)) {
             if (!use_scratch) {
               nbase_heap_free(&local_topk);
-              free(local_seen);
+              free(heap_bits);
             }
             return NBASE_ERR_NOMEM;
           }
-        } else if (topk->len > 0U && nbase_heap_higher(true, topk->data[0], item)) {
-          (void)nbase_heap_pop(topk);
-          (void)nbase_heap_push(topk, item);
+          cand_n = 0U;
         }
       }
     }
   }
 
+  if (!lsh_flush_candidates(
+          query, store_vecs, dim, lsh->metric, k, use_radius, max_distance, cand_slots, cand_n, topk)) {
+    if (!use_scratch) {
+      nbase_heap_free(&local_topk);
+      free(heap_bits);
+    }
+    return NBASE_ERR_NOMEM;
+  }
+
   uint32_t nres = (uint32_t)topk->len;
   for (uint32_t i = 0U; i < nres; i++) {
     nbase_heap_item_t item = nbase_heap_pop(topk);
-    out_results[nres - 1U - i].id = lsh->store->ids[item.slot];
+    out_results[nres - 1U - i].id = store_ids[item.slot];
     out_results[nres - 1U - i].distance = item.dist;
   }
   qsort(out_results, nres, sizeof(nbase_result_t), nbase_cmp_result_asc);
@@ -830,7 +891,7 @@ static nbase_status_t lsh_search_core_unlocked(
 
   if (!use_scratch) {
     nbase_heap_free(&local_topk);
-    free(local_seen);
+    free(heap_bits);
   }
   return NBASE_OK;
 }
@@ -960,6 +1021,8 @@ typedef struct lsh_batch_ctx {
   uint32_t query_count;
   uint32_t k;
   uint32_t multi_probe;
+  nbase_filter_fn filter;
+  void *filter_ctx;
   nbase_result_t *out_results;
   uint32_t *out_counts;
   atomic_uint next_q;
@@ -970,7 +1033,7 @@ static void *lsh_search_batch_worker(void *raw) {
   lsh_batch_ctx_t *ctx = (lsh_batch_ctx_t *)raw;
   lsh_search_scratch_t scratch;
   scratch.seen_cap = ctx->lsh->store->slot_count;
-  scratch.seen_gen = (scratch.seen_cap > 0U) ? calloc((size_t)scratch.seen_cap, sizeof(uint32_t)) : NULL;
+  scratch.seen_gen = (scratch.seen_cap > 0U) ? calloc((size_t)scratch.seen_cap, sizeof(uint16_t)) : NULL;
   scratch.gen = 0U;
   nbase_heap_init(&scratch.topk, true);
 
@@ -991,8 +1054,8 @@ static void *lsh_search_batch_worker(void *raw) {
         false,
         0.0f,
         ctx->multi_probe,
-        NULL,
-        NULL,
+        ctx->filter,
+        ctx->filter_ctx,
         &scratch,
         ctx->out_results + (size_t)q * (size_t)ctx->k,
         &got);
@@ -1009,7 +1072,7 @@ static void *lsh_search_batch_worker(void *raw) {
   return NULL;
 }
 
-nbase_status_t nbase_lsh_search_batch(
+nbase_status_t nbase_lsh_search_batch_filtered(
     const nbase_lsh_t *lsh,
     const float *queries,
     uint32_t query_count,
@@ -1017,6 +1080,8 @@ nbase_status_t nbase_lsh_search_batch(
     uint32_t k,
     uint32_t multi_probe,
     uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_counts) {
   if (!lsh) {
@@ -1062,6 +1127,8 @@ nbase_status_t nbase_lsh_search_batch(
   ctx.query_count = query_count;
   ctx.k = k;
   ctx.multi_probe = multi_probe;
+  ctx.filter = filter;
+  ctx.filter_ctx = filter_ctx;
   ctx.out_results = out_results;
   ctx.out_counts = out_counts;
   atomic_init(&ctx.next_q, 0U);
@@ -1087,6 +1154,20 @@ nbase_status_t nbase_lsh_search_batch(
 
   pthread_rwlock_unlock(&mutable_lsh->rwlock);
   return (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
+}
+
+nbase_status_t nbase_lsh_search_batch(
+    const nbase_lsh_t *lsh,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t multi_probe,
+    uint32_t num_threads,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return nbase_lsh_search_batch_filtered(
+      lsh, queries, query_count, dim, k, multi_probe, num_threads, NULL, NULL, out_results, out_counts);
 }
 
 nbase_status_t nbase_lsh_stats(const nbase_lsh_t *lsh, nbase_lsh_stats_t *out_stats) {

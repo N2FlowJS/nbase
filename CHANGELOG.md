@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-11-27
+
+Filtered parallel `search_batch_filtered` across Clustered, IVF-PQ, LSH & BM25 (C11 & C++17), AVX2+FMA 4-row `nbase_distance_indexed_batch` kernel with software prefetching & LSH/Clustered hot-path optimization, HTTP batch text/enrichment on `/api/vectors/get`, `/api/vectors/export`, and `/api/rerank`, and CLI `search-text` / `search-hybrid` `--json` & `--include-*` flags.
+
+### Added & Changed
+- **Filtered Batch Search Parity (`include/nbase.h`, `include/nbase.hpp`, `src/clustered.c`, `src/ivfpq.c`, `src/lsh.c`, `src/bm25.c`)**:
+  - Added `nbase_clustered_search_batch_filtered`, `nbase_ivfpq_search_batch_filtered`, `nbase_lsh_search_batch_filtered`, and `nbase_bm25_search_batch_filtered` (with unfiltered `*_search_batch` delegating cleanly to `NULL, NULL` predicates), plus matching C++17 `search_batch_filtered` RAII methods on `nbase::ClusteredDatabase`, `nbase::IvfPq`, `nbase::Lsh`, and `nbase::Bm25`.
+- **SIMD Indexed Distance & LSH/Clustered Hot-Path Optimization (`src/nbase_internal.h`, `src/distance.c`, `src/lsh.c`, `src/clustered.c`)**:
+  - Added `nbase_distance_indexed_batch` with 4-row unrolled AVX2+FMA + `_mm_prefetch` kernels for Euclidean, Squared Euclidean, Cosine (single query norm computation), and Inner Product over scattered slot indices, plus non-NEON scalar cosine fallback.
+  - Optimized `lsh_search_core_unlocked` with partial selection of the smallest `max_flips` margins (replacing per-table `qsort`), 16-bit batch scratch generation stamps (`uint16_t`), stack bitsets (`stack_bits[512]`) replacing per-query heap `calloc`, hoisted store arrays, and 64-slot batched indexed distance evaluation (`lsh_flush_candidates`).
+  - Optimized `cl_search_unlocked` with stack probe/heap buffers, partial probe selection for `nprobe <= 8`, and 64-slot batched indexed distance evaluation (`cl_flush_candidates`).
+- **HTTP/1.1 Server & CLI Parity (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Upgraded `POST /api/vectors/get` (`handle_get_vectors_batch`) and `GET/POST /api/vectors/export` (`append_ndjson_batch`) to fetch texts in a single `nbase_get_text_batch` call, and switched `POST /api/rerank` onto `http_batch_enrich_load` + `append_enriched_fields_json`.
+  - Extended `cli_append_enriched_id_array` for scored IDs and added `--json`, `--include-vectors`, `--include-meta`, and `--include-text` support to `nbase-cli search-text` and `nbase-cli search-hybrid`.
+- **Tests (`tests/test_db.c`, `tests/test_distance.c`, `tests/test_bm25.c`, `tests/test_clustered.c`, `tests/test_lsh.c`, `tests/test_ivfpq.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.19.0"` and added `test_distance_indexed_batch_all_metrics_and_dims`, `test_bm25_search_batch_filtered_and_tsan`, `test_clustered_search_batch_filtered_and_tsan`, `test_lsh_search_batch_filtered_and_tsan`, `test_ivfpq_search_batch_filtered_and_tsan`, and `test_http_server_batch_text_get_export_and_rerank_enrich`.
+
 ## [1.18.0] - 2026-11-27
 
 By-ID `find_similar` parity for `nbase_clustered_t` & `nbase_lsh_t` (C11 & C++17), 2-way 16-dim AVX2 SQ8 single-vector & 2-row 2-way symmetric batch kernels, HTTP/1.1 batch enrichment (`http_batch_enrich_load`) & `POST /api/search/similar`, and CLI `list --include-*` + shared `cli_append_enriched_id_array` formatting.
