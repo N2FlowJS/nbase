@@ -22,6 +22,7 @@ static void print_usage(const char *prog) {
       "  add <dir> <id> <v0,v1,...>\n"
       "  upsert <dir> <id> <v0,v1,...>\n"
       "  patch <dir> <id> [--vector <v0,v1,...>] [--meta <json>] [--text <str>|--clear-text]\n"
+      "  patch-batch <dir> <file.ndjson|->\n"
       "  get <dir> <id>\n"
       "  get-batch <dir> <id1,id2,...>\n"
       "  exists <dir> <id1,id2,...>\n"
@@ -2408,6 +2409,145 @@ int main(int argc, char **argv) {
     }
     printf("{\"id\":%llu,\"patched\":true}\n", (unsigned long long)id);
     return 0;
+  }
+
+  if (strcmp(cmd, "patch-batch") == 0) {
+    if (argc != 4) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint64_t *ids = NULL;
+    nbase_json_t **roots = NULL;
+    uint32_t cnt = 0U;
+    if (!cli_read_ndjson_id_records(argv[3], &ids, &roots, &cnt)) {
+      return 1;
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      cli_free_ndjson_id_records(ids, roots, cnt);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    nbase_stats_t s;
+    (void)nbase_stats(db, &s);
+
+    float **vecs = calloc(cnt, sizeof(float *));
+    nbase_meta_field_t **field_bufs = calloc(cnt, sizeof(*field_bufs));
+    uint32_t *fcnts = calloc(cnt, sizeof(uint32_t));
+    const char **texts = calloc(cnt, sizeof(const char *));
+    bool *clear_texts = calloc(cnt, sizeof(bool));
+    bool parse_ok = (vecs && field_bufs && fcnts && texts && clear_texts);
+
+    for (uint32_t i = 0U; i < cnt && parse_ok; i++) {
+      if (!nbase_contains(db, ids[i])) {
+        fprintf(stderr, "vector id %llu not found\n", (unsigned long long)ids[i]);
+        parse_ok = false;
+        break;
+      }
+      const nbase_json_t *jv = nbase_json_obj_get(roots[i], "vector");
+      const nbase_json_t *jm = nbase_json_obj_get(roots[i], "metadata");
+      const nbase_json_t *jt = nbase_json_obj_get(roots[i], "text");
+      if (jv == NULL && jm == NULL && jt == NULL) {
+        fprintf(stderr, "NDJSON patch record requires vector, metadata, or text\n");
+        parse_ok = false;
+        break;
+      }
+      if (jv != NULL) {
+        if (jv->type != NBASE_JSON_ARRAY || jv->len != (size_t)s.dim) {
+          fprintf(stderr, "NDJSON record vector must be array of length %u\n", s.dim);
+          parse_ok = false;
+          break;
+        }
+        vecs[i] = malloc((size_t)s.dim * sizeof(float));
+        if (!vecs[i]) {
+          parse_ok = false;
+          break;
+        }
+        for (uint32_t d = 0U; d < s.dim; d++) {
+          const nbase_json_t *it = jv->items[d];
+          if (!it || it->type != NBASE_JSON_NUMBER || !isfinite(it->num)) {
+            fprintf(stderr, "NDJSON record vector contains non-finite value\n");
+            parse_ok = false;
+            break;
+          }
+          vecs[i][d] = (float)it->num;
+        }
+        if (!parse_ok) {
+          break;
+        }
+      }
+      if (jm != NULL) {
+        if (jm->type != NBASE_JSON_OBJECT ||
+            cli_parse_meta_obj(jm, &field_bufs[i], &fcnts[i]) != NBASE_OK) {
+          fprintf(stderr, "Invalid metadata object in NDJSON patch record\n");
+          parse_ok = false;
+          break;
+        }
+      }
+      if (jt != NULL) {
+        if (jt->type == NBASE_JSON_NULL) {
+          clear_texts[i] = true;
+        } else if (jt->type == NBASE_JSON_STRING) {
+          texts[i] = jt->str;
+        } else {
+          fprintf(stderr, "NDJSON patch record text must be string or null\n");
+          parse_ok = false;
+          break;
+        }
+      }
+    }
+
+    int rc = 1;
+    if (parse_ok) {
+      for (uint32_t i = 0U; i < cnt && st == NBASE_OK; i++) {
+        if (vecs[i] != NULL) {
+          st = nbase_upsert(db, ids[i], vecs[i], s.dim);
+        }
+        if (st == NBASE_OK && field_bufs[i] != NULL && fcnts[i] > 0U) {
+          st = nbase_update_meta(db, ids[i], field_bufs[i], fcnts[i]);
+        }
+        if (st == NBASE_OK) {
+          if (clear_texts[i]) {
+            st = nbase_delete_text(db, ids[i]);
+            if (st == NBASE_ERR_NOT_FOUND) {
+              st = NBASE_OK;
+            }
+          } else if (texts[i] != NULL) {
+            st = nbase_set_text(db, ids[i], texts[i]);
+          }
+        }
+      }
+      if (st == NBASE_OK) {
+        st = nbase_save(db, argv[2]);
+      }
+      if (st != NBASE_OK) {
+        fprintf(stderr, "patch-batch failed: %s\n", nbase_strerror(st));
+      } else {
+        printf("{\"patched\":%u}\n", cnt);
+        rc = 0;
+      }
+    }
+
+    if (vecs != NULL) {
+      for (uint32_t i = 0U; i < cnt; i++) {
+        free(vecs[i]);
+      }
+    }
+    if (field_bufs != NULL) {
+      for (uint32_t i = 0U; i < cnt; i++) {
+        free(field_bufs[i]);
+      }
+    }
+    free(vecs);
+    free(field_bufs);
+    free(fcnts);
+    free((void *)texts);
+    free(clear_texts);
+    cli_free_ndjson_id_records(ids, roots, cnt);
+    nbase_close(db);
+    return rc;
   }
 
   if (strcmp(cmd, "search-batch") == 0) {

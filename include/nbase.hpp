@@ -967,6 +967,12 @@ class Bm25 {
 
   uint64_t doc_count() const noexcept { return nbase_bm25_doc_count(ptr_); }
 
+  nbase_bm25_stats_t stats() const {
+    nbase_bm25_stats_t s{};
+    detail::check(nbase_bm25_stats(ptr_, &s));
+    return s;
+  }
+
   void index(uint64_t id, const std::string &text) {
     detail::check(nbase_bm25_index(ptr_, id, text.c_str()));
   }
@@ -994,6 +1000,40 @@ class Bm25 {
     std::string out(len, '\0');
     detail::check(nbase_bm25_get(ptr_, id, &out[0], len + 1U, &len));
     return out;
+  }
+
+  void get_batch(
+      const std::vector<uint64_t> &ids,
+      std::vector<std::string> &out_texts,
+      std::vector<bool> &out_found) const {
+    const size_t n = ids.size();
+    out_texts.assign(n, std::string());
+    out_found.assign(n, false);
+    if (n == 0U) {
+      return;
+    }
+    struct TextsGuard {
+      std::vector<char *> ptrs;
+      explicit TextsGuard(size_t cnt) : ptrs(cnt, nullptr) {}
+      ~TextsGuard() {
+        if (!ptrs.empty()) {
+          nbase_free_texts(ptrs.data(), static_cast<uint32_t>(ptrs.size()));
+        }
+      }
+    } guard(n);
+    std::unique_ptr<bool[]> found_buf(new bool[n]);
+    detail::check(nbase_bm25_get_batch(
+        ptr_,
+        ids.data(),
+        static_cast<uint32_t>(n),
+        guard.ptrs.data(),
+        found_buf.get()));
+    for (size_t i = 0U; i < n; ++i) {
+      out_found[i] = found_buf[i];
+      if (found_buf[i] && guard.ptrs[i] != nullptr) {
+        out_texts[i] = guard.ptrs[i];
+      }
+    }
   }
 
   bool contains(uint64_t id) const { return nbase_bm25_contains(ptr_, id); }

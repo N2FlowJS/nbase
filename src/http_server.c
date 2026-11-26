@@ -1176,6 +1176,13 @@ static void handle_upsert_vectors(const http_conn_t *c, const char *body, size_t
   handle_write_vectors(c, body, body_len, true);
 }
 
+static bool parse_include_flags(
+    const http_conn_t *c,
+    const nbase_json_t *root,
+    bool *inc_meta,
+    bool *inc_vec,
+    bool *inc_text);
+
 static void handle_get_vectors_batch(const http_conn_t *c, const char *body, size_t body_len) {
   nbase_http_server_t *srv = c->srv;
   nbase_json_t *root = NULL;
@@ -1195,32 +1202,9 @@ static void handle_get_vectors_batch(const http_conn_t *c, const char *body, siz
   bool inc_vec = true;
   bool inc_meta = true;
   bool inc_text = false;
-  const nbase_json_t *jincv = nbase_json_obj_get(root, "includeVectors");
-  if (jincv != NULL) {
-    if (jincv->type != NBASE_JSON_BOOL) {
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeVectors must be boolean");
-      return;
-    }
-    inc_vec = jincv->b;
-  }
-  const nbase_json_t *jincm = nbase_json_obj_get(root, "includeMetadata");
-  if (jincm != NULL) {
-    if (jincm->type != NBASE_JSON_BOOL) {
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeMetadata must be boolean");
-      return;
-    }
-    inc_meta = jincm->b;
-  }
-  const nbase_json_t *jinct = nbase_json_obj_get(root, "includeText");
-  if (jinct != NULL) {
-    if (jinct->type != NBASE_JSON_BOOL) {
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeText must be boolean");
-      return;
-    }
-    inc_text = jinct->b;
+  if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
+    nbase_json_free(root);
+    return;
   }
 
   nbase_stats_t db_st;
@@ -2856,38 +2840,11 @@ static void handle_search(const http_conn_t *c, const char *body, size_t body_le
   bool inc_meta = false;
   bool inc_vec = false;
   bool inc_text = false;
-  const nbase_json_t *jincm = nbase_json_obj_get(root, "includeMetadata");
-  if (jincm != NULL) {
-    if (jincm->type != NBASE_JSON_BOOL) {
-      free(weights);
-      free(query);
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeMetadata must be boolean");
-      return;
-    }
-    inc_meta = jincm->b;
-  }
-  const nbase_json_t *jincv = nbase_json_obj_get(root, "includeVectors");
-  if (jincv != NULL) {
-    if (jincv->type != NBASE_JSON_BOOL) {
-      free(weights);
-      free(query);
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeVectors must be boolean");
-      return;
-    }
-    inc_vec = jincv->b;
-  }
-  const nbase_json_t *jinct = nbase_json_obj_get(root, "includeText");
-  if (jinct != NULL) {
-    if (jinct->type != NBASE_JSON_BOOL) {
-      free(weights);
-      free(query);
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeText must be boolean");
-      return;
-    }
-    inc_text = jinct->b;
+  if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
+    free(weights);
+    free(query);
+    nbase_json_free(root);
+    return;
   }
 
   nbase_search_opts_t opts;
@@ -3239,32 +3196,9 @@ static void handle_search_metadata(const http_conn_t *c, const char *body, size_
   bool inc_meta = true;
   bool inc_vec = false;
   bool inc_text = false;
-  const nbase_json_t *jincm = nbase_json_obj_get(root, "includeMetadata");
-  if (jincm != NULL) {
-    if (jincm->type != NBASE_JSON_BOOL) {
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeMetadata must be boolean");
-      return;
-    }
-    inc_meta = jincm->b;
-  }
-  const nbase_json_t *jincv = nbase_json_obj_get(root, "includeVectors");
-  if (jincv != NULL) {
-    if (jincv->type != NBASE_JSON_BOOL) {
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeVectors must be boolean");
-      return;
-    }
-    inc_vec = jincv->b;
-  }
-  const nbase_json_t *jinct = nbase_json_obj_get(root, "includeText");
-  if (jinct != NULL) {
-    if (jinct->type != NBASE_JSON_BOOL) {
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeText must be boolean");
-      return;
-    }
-    inc_text = jinct->b;
+  if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
+    nbase_json_free(root);
+    return;
   }
 
   nbase_meta_cond_t *conds = NULL;
@@ -4308,6 +4242,90 @@ static void handle_delete_meta_batch(const http_conn_t *c, const char *body, siz
   handle_delete_ids_attr_batch(c, body, body_len, nbase_delete_meta_batch);
 }
 
+static void handle_get_ids_attr_batch(
+    const http_conn_t *c,
+    const char *body,
+    size_t body_len,
+    bool is_meta) {
+  nbase_http_server_t *srv = c->srv;
+  nbase_json_t *root = NULL;
+  if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
+    nbase_json_free(root);
+    send_error_json(c, 400, "invalid JSON request body");
+    return;
+  }
+
+  const nbase_json_t *jids = nbase_json_obj_get(root, "ids");
+  uint64_t *ids = NULL;
+  uint32_t cnt = 0U;
+  if (!parse_json_u64_id_array(c, jids, &ids, &cnt)) {
+    nbase_json_free(root);
+    return;
+  }
+  nbase_json_free(root);
+
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_append(&sb, "{\"success\":true,\"results\":[");
+
+  char *tbuf = NULL;
+  size_t tcap = 0U;
+  nbase_status_t st = NBASE_OK;
+
+  for (uint32_t i = 0U; i < cnt && st == NBASE_OK && !sb.oom; i++) {
+    nbase_sbuf_appendf(&sb, i == 0U ? "{\"id\":%llu," : ",{\"id\":%llu,", (unsigned long long)ids[i]);
+    if (is_meta) {
+      if (!nbase_contains(srv->db, ids[i])) {
+        nbase_sbuf_append(&sb, "\"found\":false,\"metadata\":null}");
+      } else {
+        nbase_sbuf_append(&sb, "\"found\":true,\"metadata\":");
+        append_meta_json(&sb, srv->db, ids[i]);
+        nbase_sbuf_append_n(&sb, "}", 1U);
+      }
+    } else {
+      size_t tlen = 0U;
+      nbase_status_t gst = nbase_get_text(srv->db, ids[i], NULL, 0U, &tlen);
+      if (gst == NBASE_ERR_NOT_FOUND) {
+        nbase_sbuf_append(&sb, "\"found\":false,\"text\":null}");
+      } else if (gst != NBASE_OK) {
+        st = gst;
+      } else {
+        if (tlen + 1U > tcap) {
+          size_t new_cap = tlen + 64U;
+          char *grown = realloc(tbuf, new_cap);
+          if (!grown) {
+            st = NBASE_ERR_NOMEM;
+            break;
+          }
+          tbuf = grown;
+          tcap = new_cap;
+        }
+        gst = nbase_get_text(srv->db, ids[i], tbuf, tcap, &tlen);
+        if (gst == NBASE_ERR_NOT_FOUND) {
+          nbase_sbuf_append(&sb, "\"found\":false,\"text\":null}");
+        } else if (gst != NBASE_OK) {
+          st = gst;
+        } else {
+          nbase_sbuf_append(&sb, "\"found\":true,\"text\":");
+          nbase_sbuf_append_json_str(&sb, tbuf);
+          nbase_sbuf_append_n(&sb, "}", 1U);
+        }
+      }
+    }
+  }
+
+  free(tbuf);
+  free(ids);
+  if (st != NBASE_OK || sb.oom) {
+    nbase_sbuf_free(&sb);
+    send_error_json(c, http_code_for_status(st != NBASE_OK ? st : NBASE_ERR_NOMEM), nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
+    return;
+  }
+  nbase_sbuf_append(&sb, "]}");
+  send_sbuf_json(c, 200, &sb);
+  nbase_sbuf_free(&sb);
+}
+
 static void handle_distance(const http_conn_t *c, const char *body, size_t body_len) {
   nbase_json_t *root = NULL;
   if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
@@ -4531,35 +4549,10 @@ static void handle_rerank(const http_conn_t *c, const char *body, size_t body_le
   bool inc_meta = false;
   bool inc_vec = false;
   bool inc_text = false;
-  const nbase_json_t *jincm = nbase_json_obj_get(root, "includeMetadata");
-  if (jincm != NULL) {
-    if (jincm->type != NBASE_JSON_BOOL) {
-      free(weights);
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeMetadata must be boolean");
-      return;
-    }
-    inc_meta = jincm->b;
-  }
-  const nbase_json_t *jincv = nbase_json_obj_get(root, "includeVectors");
-  if (jincv != NULL) {
-    if (jincv->type != NBASE_JSON_BOOL) {
-      free(weights);
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeVectors must be boolean");
-      return;
-    }
-    inc_vec = jincv->b;
-  }
-  const nbase_json_t *jinct = nbase_json_obj_get(root, "includeText");
-  if (jinct != NULL) {
-    if (jinct->type != NBASE_JSON_BOOL) {
-      free(weights);
-      nbase_json_free(root);
-      send_error_json(c, 400, "includeText must be boolean");
-      return;
-    }
-    inc_text = jinct->b;
+  if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
+    free(weights);
+    nbase_json_free(root);
+    return;
   }
 
   nbase_result_t *cands = (cand_cnt > 0U) ? malloc((size_t)cand_cnt * sizeof(nbase_result_t)) : NULL;
@@ -4829,6 +4822,14 @@ static void dispatch_request(
     send_error_json(c, 405, "method not allowed");
     return;
   }
+  if (strcmp(path, "/api/vectors/metadata/get") == 0) {
+    if (strcmp(method, "POST") == 0) {
+      handle_get_ids_attr_batch(c, body, body_len, true);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
   if (strcmp(path, "/api/vectors/metadata/delete") == 0) {
     if (strcmp(method, "POST") == 0) {
       handle_delete_meta_batch(c, body, body_len);
@@ -4844,6 +4845,14 @@ static void dispatch_request(
     }
     if (strcmp(method, "DELETE") == 0) {
       handle_delete_text_batch(c, body, body_len);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
+  if (strcmp(path, "/api/vectors/text/get") == 0) {
+    if (strcmp(method, "POST") == 0) {
+      handle_get_ids_attr_batch(c, body, body_len, false);
       return;
     }
     send_error_json(c, 405, "method not allowed");

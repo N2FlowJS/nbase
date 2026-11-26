@@ -121,7 +121,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.15.0";
+  return "1.16.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {

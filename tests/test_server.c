@@ -2116,6 +2116,85 @@ static void test_http_server_text_and_hybrid_batch_search(void) {
   nbase_close(db);
 }
 
+static void test_http_server_attr_batch_get_and_include_defaults(void) {
+  nbase_config_t cfg = nbase_config_default(3U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v1[3] = {1.0f, 0.0f, 0.0f};
+  float v2[3] = {0.0f, 1.0f, 0.0f};
+  ASSERT_STATUS(nbase_add(db, 10ULL, v1, 3U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 20ULL, v2, 3U), NBASE_OK);
+
+  nbase_meta_field_t m1 = {"grp", {.type = NBASE_META_STRING, .as = {.str = "alpha"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 10ULL, &m1, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 10ULL, "batch attr text"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* POST /api/vectors/metadata/get */
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/metadata/get", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/metadata/get", NULL, "{\"ids\":[]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"results\":[]") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/metadata/get", NULL, "{\"ids\":\"bad\"}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port, "POST", "/api/vectors/metadata/get", NULL, "{\"ids\":[10,999,20]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10,\"found\":true,\"metadata\":{\"grp\":\"alpha\"}") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":999,\"found\":false,\"metadata\":null") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20,\"found\":true,\"metadata\":{}") != NULL);
+  free(r.body);
+
+  /* POST /api/vectors/text/get */
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/text/get", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 405);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/text/get", NULL, "{\"ids\":\"bad\"}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port, "POST", "/api/vectors/text/get", NULL, "{\"ids\":[10,20,999]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":10,\"found\":true,\"text\":\"batch attr text\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":20,\"found\":false,\"text\":null") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":999,\"found\":false,\"text\":null") != NULL);
+  free(r.body);
+
+  /* Verify refactored parse_include_flags preserves defaults on /api/vectors/get */
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/get", NULL, "{\"ids\":[10]}", &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"metadata\":{") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":") == NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port, "POST", "/api/vectors/get", NULL, "{\"ids\":[10],\"includeText\":\"bad\"}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -2134,4 +2213,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_head_and_filtered_export);
   RUN_TEST(test_http_server_patch_vector_head_subresources_and_export_ids);
   RUN_TEST(test_http_server_text_and_hybrid_batch_search);
+  RUN_TEST(test_http_server_attr_batch_get_and_include_defaults);
 }

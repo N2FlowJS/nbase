@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-11-26
+
+BM25 telemetry (`nbase_bm25_stats`), `nbase_bm25_get_batch` / `nbase_free_texts`, per-worker generation-stamped `score_map_t` scratch & single-term search fast path, C++17 `Bm25::{stats, get_batch}`, 2-row AVX2 Manhattan batch (`manhattan_batch_avx2`), HTTP `POST /api/vectors/{metadata,text}/get` & `parse_include_flags` deduplication, and CLI `patch-batch`.
+
+### Added & Changed
+- **BM25 Telemetry, Batch Retrieval & Search Scratch (`include/nbase.h`, `src/bm25.c`, `include/nbase.hpp`)**:
+  - Added `nbase_bm25_stats_t` (`k1`, `b`, `doc_count`, `total_slots`, `tombstones`, `unique_terms`, `total_postings`, `avg_doc_len`, `memory_bytes`) and `nbase_bm25_stats(const nbase_bm25_t *, nbase_bm25_stats_t *)`.
+  - Added `nbase_bm25_get_batch` and `nbase_free_texts`, plus C++17 `nbase::Bm25::{stats, get_batch}`.
+  - Upgraded `score_map_t` with generation stamping (`bm25_search_scratch_t`) reused across queries per thread inside `nbase_bm25_search_batch`, eliminated duplicate `term_map_find` lookups, and added a direct single-term fast path bypassing `score_map_t`.
+- **SIMD Distance, HTTP/1.1 Server & CLI Parity (`src/distance.c`, `src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Updated `manhattan_batch_avx2` to a cache-friendly 2-row 2-way (`i += 16`) `_mm256_andnot_ps` kernel matching `chebyshev_batch_avx2`.
+  - Refactored `handle_get_vectors_batch`, `handle_search`, `handle_search_metadata`, and `handle_rerank` in `src/http_server.c` to reuse `parse_include_flags` while preserving handler defaults.
+  - Added `POST /api/vectors/metadata/get` and `POST /api/vectors/text/get` sharing `handle_get_ids_attr_batch`.
+  - Added `nbase-cli patch-batch <dir> <file.ndjson|->` with upfront NDJSON & ID existence validation.
+- **Tests (`tests/test_db.c`, `tests/test_bm25.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.16.0"`, added `test_bm25_stats_get_batch_and_search_scratch_tsan`, and added `test_http_server_attr_batch_get_and_include_defaults`.
+
 ## [1.15.0] - 2026-11-25
 
 IVF-PQ atomic `nbase_ivfpq_upsert_batch` & `nbase_ivfpq_search_radius`, LSH `nbase_lsh_search_radius` & per-worker generation-stamped `search_batch` scratch, C++17 `IvfPq::{upsert_batch, search_radius}` & `Lsh::search_radius`, 2-row AVX2 Chebyshev batch optimization (`chebyshev_batch_avx2`), HTTP `handle_post_similar` `parse_include_flags` cleanup, and CLI `get-meta-batch` / `get-text-batch`.

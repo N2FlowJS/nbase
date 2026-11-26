@@ -489,6 +489,110 @@ nbase_status_t nbase_bm25_get(
   return NBASE_OK;
 }
 
+void nbase_free_texts(char **texts, uint32_t count) {
+  if (!texts) {
+    return;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    free(texts[i]);
+    texts[i] = NULL;
+  }
+}
+
+nbase_status_t nbase_bm25_get_batch(
+    const nbase_bm25_t *bm25,
+    const uint64_t *ids,
+    uint32_t count,
+    char **out_texts,
+    bool *out_found) {
+  if (!bm25 || (count > 0U && (!ids || !out_texts || !out_found))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  for (uint32_t i = 0U; i < count; i++) {
+    out_texts[i] = NULL;
+    out_found[i] = false;
+  }
+  if (count == 0U) {
+    return NBASE_OK;
+  }
+
+  nbase_bm25_t *mutable_bm = (nbase_bm25_t *)(uintptr_t)bm25;
+  pthread_rwlock_rdlock(&mutable_bm->rwlock);
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = 0U; i < count; i++) {
+    ssize_t idx = doc_map_find(bm25, ids[i]);
+    if (idx < 0) {
+      continue;
+    }
+    size_t tlen = (size_t)bm25->doc_vals[idx].text_len;
+    char *copy = malloc(tlen + 1U);
+    if (!copy) {
+      st = NBASE_ERR_NOMEM;
+      break;
+    }
+    if (tlen > 0U) {
+      memcpy(copy, bm25->doc_vals[idx].text, tlen);
+    }
+    copy[tlen] = '\0';
+    out_texts[i] = copy;
+    out_found[i] = true;
+  }
+  pthread_rwlock_unlock(&mutable_bm->rwlock);
+
+  if (st != NBASE_OK) {
+    nbase_free_texts(out_texts, count);
+    for (uint32_t i = 0U; i < count; i++) {
+      out_found[i] = false;
+    }
+  }
+  return st;
+}
+
+nbase_status_t nbase_bm25_stats(const nbase_bm25_t *bm25, nbase_bm25_stats_t *out_stats) {
+  if (!bm25 || !out_stats) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  memset(out_stats, 0, sizeof(*out_stats));
+
+  nbase_bm25_t *mutable_bm = (nbase_bm25_t *)(uintptr_t)bm25;
+  pthread_rwlock_rdlock(&mutable_bm->rwlock);
+  out_stats->k1 = bm25->k1;
+  out_stats->b = bm25->b;
+  out_stats->doc_count = bm25->doc_count;
+  out_stats->total_slots = (uint64_t)bm25->doc_cap;
+  out_stats->tombstones = (uint64_t)bm25->doc_tombstones;
+  out_stats->avg_doc_len =
+      (bm25->doc_count > 0ULL) ? ((double)bm25->total_doc_len / (double)bm25->doc_count) : 0.0;
+
+  uint64_t mem = (uint64_t)sizeof(*bm25);
+  mem += (uint64_t)bm25->doc_cap *
+         (uint64_t)(sizeof(uint64_t) + sizeof(bm25_doc_t) + sizeof(uint8_t));
+  for (size_t i = 0U; i < bm25->doc_cap; i++) {
+    if (bm25->doc_states[i] == BM25_OCCUPIED) {
+      mem += (uint64_t)bm25->doc_vals[i].text_len + 1ULL;
+    }
+  }
+  mem += (uint64_t)bm25->term_cap * (uint64_t)(sizeof(char *) + sizeof(bm25_postings_t));
+
+  uint64_t uniq_terms = 0ULL;
+  uint64_t tot_postings = 0ULL;
+  for (size_t i = 0U; i < bm25->term_cap; i++) {
+    if (bm25->term_keys[i] != NULL) {
+      mem += (uint64_t)strlen(bm25->term_keys[i]) + 1ULL;
+      mem += (uint64_t)bm25->term_vals[i].cap * (uint64_t)sizeof(bm25_posting_t);
+      if (bm25->term_vals[i].len > 0U) {
+        uniq_terms++;
+        tot_postings += (uint64_t)bm25->term_vals[i].len;
+      }
+    }
+  }
+  out_stats->unique_terms = uniq_terms;
+  out_stats->total_postings = tot_postings;
+  out_stats->memory_bytes = mem;
+  pthread_rwlock_unlock(&mutable_bm->rwlock);
+  return NBASE_OK;
+}
+
 bool nbase_bm25_contains(const nbase_bm25_t *bm25, uint64_t id) {
   if (!bm25) {
     return false;
@@ -827,32 +931,49 @@ typedef struct score_map {
   size_t count;
   uint64_t *keys;
   double *vals;
-  uint8_t *used;
+  uint32_t *used_gen;
+  uint32_t gen;
 } score_map_t;
 
-static bool score_map_init(score_map_t *m, size_t init_cap) {
-  size_t cap = 16U;
-  while (cap < init_cap) {
-    cap *= 2U;
-  }
-  m->keys = malloc(cap * sizeof(uint64_t));
-  m->vals = malloc(cap * sizeof(double));
-  m->used = calloc(cap, sizeof(uint8_t));
-  if (!m->keys || !m->vals || !m->used) {
-    free(m->keys);
-    free(m->vals);
-    free(m->used);
-    return false;
-  }
-  m->cap = cap;
-  m->count = 0U;
-  return true;
-}
+typedef struct bm25_search_scratch {
+  score_map_t scores;
+  nbase_scored_id_t *heap;
+  uint32_t heap_cap;
+} bm25_search_scratch_t;
 
 static void score_map_free(score_map_t *m) {
   free(m->keys);
   free(m->vals);
-  free(m->used);
+  free(m->used_gen);
+  memset(m, 0, sizeof(*m));
+}
+
+static bool score_map_reset(score_map_t *m, size_t init_cap) {
+  size_t cap = 16U;
+  while (cap < init_cap) {
+    cap *= 2U;
+  }
+  if (m->cap == 0U || m->cap < cap) {
+    score_map_free(m);
+    m->keys = malloc(cap * sizeof(uint64_t));
+    m->vals = malloc(cap * sizeof(double));
+    m->used_gen = calloc(cap, sizeof(uint32_t));
+    if (!m->keys || !m->vals || !m->used_gen) {
+      score_map_free(m);
+      return false;
+    }
+    m->cap = cap;
+    m->gen = 1U;
+    m->count = 0U;
+    return true;
+  }
+  m->count = 0U;
+  m->gen++;
+  if (m->gen == 0U) {
+    memset(m->used_gen, 0, m->cap * sizeof(uint32_t));
+    m->gen = 1U;
+  }
+  return true;
 }
 
 static bool score_map_add(score_map_t *m, uint64_t key, double delta) {
@@ -860,7 +981,7 @@ static bool score_map_add(score_map_t *m, uint64_t key, double delta) {
     size_t ncap = m->cap * 2U;
     uint64_t *nkeys = malloc(ncap * sizeof(uint64_t));
     double *nvals = malloc(ncap * sizeof(double));
-    uint8_t *nused = calloc(ncap, sizeof(uint8_t));
+    uint32_t *nused = calloc(ncap, sizeof(uint32_t));
     if (!nkeys || !nvals || !nused) {
       free(nkeys);
       free(nvals);
@@ -869,48 +990,69 @@ static bool score_map_add(score_map_t *m, uint64_t key, double delta) {
     }
     size_t nmask = ncap - 1U;
     for (size_t i = 0U; i < m->cap; i++) {
-      if (m->used[i] == 0U) {
+      if (m->used_gen[i] != m->gen) {
         continue;
       }
       size_t pos = (size_t)hash_u64(m->keys[i]) & nmask;
-      while (nused[pos] != 0U) {
+      while (nused[pos] == m->gen) {
         pos = (pos + 1U) & nmask;
       }
-      nused[pos] = 1U;
+      nused[pos] = m->gen;
       nkeys[pos] = m->keys[i];
       nvals[pos] = m->vals[i];
     }
     free(m->keys);
     free(m->vals);
-    free(m->used);
+    free(m->used_gen);
     m->keys = nkeys;
     m->vals = nvals;
-    m->used = nused;
+    m->used_gen = nused;
     m->cap = ncap;
   }
 
   size_t mask = m->cap - 1U;
   size_t pos = (size_t)hash_u64(key) & mask;
-  while (m->used[pos] != 0U) {
+  while (m->used_gen[pos] == m->gen) {
     if (m->keys[pos] == key) {
       m->vals[pos] += delta;
       return true;
     }
     pos = (pos + 1U) & mask;
   }
-  m->used[pos] = 1U;
+  m->used_gen[pos] = m->gen;
   m->keys[pos] = key;
   m->vals[pos] = delta;
   m->count++;
   return true;
 }
 
-static nbase_status_t bm25_search_filtered_unlocked(
+static nbase_scored_id_t *bm25_ensure_heap(
+    bm25_search_scratch_t *scratch,
+    uint32_t k,
+    nbase_scored_id_t **out_local_heap) {
+  if (scratch != NULL) {
+    if (scratch->heap_cap < k) {
+      nbase_scored_id_t *grown = realloc(scratch->heap, (size_t)k * sizeof(*grown));
+      if (!grown) {
+        return NULL;
+      }
+      scratch->heap = grown;
+      scratch->heap_cap = k;
+    }
+    return scratch->heap;
+  }
+  nbase_scored_id_t *heap = malloc((size_t)k * sizeof(*heap));
+  *out_local_heap = heap;
+  return heap;
+}
+
+static nbase_status_t bm25_search_core_unlocked(
     const nbase_bm25_t *bm25,
     const char *query,
     uint32_t k,
     nbase_filter_fn filter,
     void *filter_ctx,
+    bm25_search_scratch_t *scratch,
     nbase_scored_id_t *out_results,
     uint32_t *out_count) {
   *out_count = 0U;
@@ -930,32 +1072,44 @@ static nbase_status_t bm25_search_filtered_unlocked(
     return NBASE_OK;
   }
 
+  const bm25_postings_t *stack_posts[32];
+  const bm25_postings_t **posts = stack_posts;
+  if (q_uniq > 32U) {
+    posts = malloc((size_t)q_uniq * sizeof(*posts));
+    if (!posts) {
+      free(qterms);
+      return NBASE_ERR_NOMEM;
+    }
+  }
+
+  uint32_t matched_cnt = 0U;
   size_t max_df = 0U;
   for (uint32_t qi = 0U; qi < q_uniq; qi++) {
     const bm25_postings_t *p = term_map_find(bm25, qterms[qi].term);
-    if (p && (size_t)p->len > max_df) {
-      max_df = (size_t)p->len;
+    if (p != NULL && p->len > 0U) {
+      posts[matched_cnt++] = p;
+      if ((size_t)p->len > max_df) {
+        max_df = (size_t)p->len;
+      }
     }
   }
-  if (max_df == 0U) {
-    free(qterms);
+  free(qterms);
+  if (matched_cnt == 0U) {
+    if (posts != stack_posts) {
+      free((void *)posts);
+    }
     return NBASE_OK;
   }
 
-  size_t init_cap = 64U;
-  if (max_df * 2U > init_cap) {
-    init_cap = max_df * 2U;
-  }
-  size_t doc_cap_hint = (size_t)bm25->doc_count * 2U;
-  if (doc_cap_hint >= 64U && init_cap > doc_cap_hint) {
-    init_cap = doc_cap_hint;
-  }
-
-  score_map_t scores;
-  if (!score_map_init(&scores, init_cap)) {
-    free(qterms);
+  nbase_scored_id_t *local_heap = NULL;
+  nbase_scored_id_t *heap = bm25_ensure_heap(scratch, k, &local_heap);
+  if (!heap) {
+    if (posts != stack_posts) {
+      free((void *)posts);
+    }
     return NBASE_ERR_NOMEM;
   }
+  uint32_t heap_len = 0U;
 
   double avgdl = (bm25->total_doc_len > 0ULL)
                      ? ((double)bm25->total_doc_len / (double)bm25->doc_count)
@@ -967,11 +1121,8 @@ static nbase_status_t bm25_search_filtered_unlocked(
   double k1_one_minus_b = k1 * (1.0 - b);
   double k1_b_inv_avgdl = (avgdl > 0.0) ? (k1 * b / avgdl) : 0.0;
 
-  for (uint32_t qi = 0U; qi < q_uniq; qi++) {
-    const bm25_postings_t *p = term_map_find(bm25, qterms[qi].term);
-    if (!p || p->len == 0U) {
-      continue;
-    }
+  if (matched_cnt == 1U) {
+    const bm25_postings_t *p = posts[0];
     double df = (double)p->len;
     double idf = log(1.0 + (n_docs - df + 0.5) / (df + 0.5));
     double idf_k1_p1 = idf * k1_plus_1;
@@ -984,40 +1135,81 @@ static nbase_status_t bm25_search_filtered_unlocked(
       double tf = (double)p->items[pi].tf;
       double denom = tf + k1_one_minus_b + k1_b_inv_avgdl * dl;
       double contrib = (denom > 0.0) ? (idf_k1_p1 * tf / denom) : 0.0;
-      if (!score_map_add(&scores, did, contrib)) {
-        score_map_free(&scores);
-        free(qterms);
-        return NBASE_ERR_NOMEM;
-      }
-    }
-  }
-  free(qterms);
-
-  if (scores.count == 0U) {
-    score_map_free(&scores);
-    return NBASE_OK;
-  }
-
-  nbase_scored_id_t *heap = malloc((size_t)k * sizeof(nbase_scored_id_t));
-  if (!heap) {
-    score_map_free(&scores);
-    return NBASE_ERR_NOMEM;
-  }
-  uint32_t heap_len = 0U;
-  for (size_t i = 0U; i < scores.cap; i++) {
-    if (scores.used[i] != 0U) {
-      nbase_scored_id_t cand = {scores.keys[i], (float)scores.vals[i]};
+      nbase_scored_id_t cand = {did, (float)contrib};
       scored_heap_push(heap, &heap_len, k, cand);
     }
-  }
-  score_map_free(&scores);
+  } else {
+    size_t init_cap = 64U;
+    if (max_df * 2U > init_cap) {
+      init_cap = max_df * 2U;
+    }
+    size_t doc_cap_hint = (size_t)bm25->doc_count * 2U;
+    if (doc_cap_hint >= 64U && init_cap > doc_cap_hint) {
+      init_cap = doc_cap_hint;
+    }
 
+    score_map_t local_scores;
+    memset(&local_scores, 0, sizeof(local_scores));
+    score_map_t *scores = scratch ? &scratch->scores : &local_scores;
+    if (!score_map_reset(scores, init_cap)) {
+      if (posts != stack_posts) {
+        free((void *)posts);
+      }
+      free(local_heap);
+      return NBASE_ERR_NOMEM;
+    }
+
+    for (uint32_t mi = 0U; mi < matched_cnt; mi++) {
+      const bm25_postings_t *p = posts[mi];
+      double df = (double)p->len;
+      double idf = log(1.0 + (n_docs - df + 0.5) / (df + 0.5));
+      double idf_k1_p1 = idf * k1_plus_1;
+      for (uint32_t pi = 0U; pi < p->len; pi++) {
+        uint64_t did = p->items[pi].id;
+        if (filter != NULL && !filter(did, filter_ctx)) {
+          continue;
+        }
+        double dl = (double)p->items[pi].doc_len;
+        double tf = (double)p->items[pi].tf;
+        double denom = tf + k1_one_minus_b + k1_b_inv_avgdl * dl;
+        double contrib = (denom > 0.0) ? (idf_k1_p1 * tf / denom) : 0.0;
+        if (!score_map_add(scores, did, contrib)) {
+          if (!scratch) {
+            score_map_free(&local_scores);
+          }
+          if (posts != stack_posts) {
+            free((void *)posts);
+          }
+          free(local_heap);
+          return NBASE_ERR_NOMEM;
+        }
+      }
+    }
+
+    if (scores->count > 0U) {
+      for (size_t i = 0U; i < scores->cap; i++) {
+        if (scores->used_gen[i] == scores->gen) {
+          nbase_scored_id_t cand = {scores->keys[i], (float)scores->vals[i]};
+          scored_heap_push(heap, &heap_len, k, cand);
+        }
+      }
+    }
+    if (!scratch) {
+      score_map_free(&local_scores);
+    }
+  }
+
+  if (posts != stack_posts) {
+    free((void *)posts);
+  }
   if (heap_len > 1U) {
     qsort(heap, heap_len, sizeof(nbase_scored_id_t), cmp_scored_desc);
   }
-  memcpy(out_results, heap, (size_t)heap_len * sizeof(nbase_scored_id_t));
+  if (heap_len > 0U) {
+    memcpy(out_results, heap, (size_t)heap_len * sizeof(nbase_scored_id_t));
+  }
   *out_count = heap_len;
-  free(heap);
+  free(local_heap);
   return NBASE_OK;
 }
 
@@ -1034,8 +1226,8 @@ nbase_status_t nbase_bm25_search_filtered(
   }
   nbase_bm25_t *mutable_bm = (nbase_bm25_t *)(uintptr_t)bm25;
   pthread_rwlock_rdlock(&mutable_bm->rwlock);
-  nbase_status_t st = bm25_search_filtered_unlocked(
-      bm25, query, k, filter, filter_ctx, out_results, out_count);
+  nbase_status_t st = bm25_search_core_unlocked(
+      bm25, query, k, filter, filter_ctx, NULL, out_results, out_count);
   pthread_rwlock_unlock(&mutable_bm->rwlock);
   return st;
 }
@@ -1062,18 +1254,21 @@ typedef struct bm25_batch_ctx {
 
 static void *bm25_batch_worker(void *raw) {
   bm25_batch_ctx_t *ctx = (bm25_batch_ctx_t *)raw;
+  bm25_search_scratch_t scratch;
+  memset(&scratch, 0, sizeof(scratch));
   while (true) {
     uint32_t q = atomic_fetch_add_explicit(&ctx->next_q, 1U, memory_order_relaxed);
     if (q >= ctx->query_count) {
       break;
     }
     uint32_t cnt = 0U;
-    nbase_status_t st = bm25_search_filtered_unlocked(
+    nbase_status_t st = bm25_search_core_unlocked(
         ctx->bm25,
         ctx->queries[q],
         ctx->k,
         NULL,
         NULL,
+        &scratch,
         ctx->out_results + (size_t)q * (size_t)ctx->k,
         &cnt);
     if (st != NBASE_OK) {
@@ -1084,6 +1279,8 @@ static void *bm25_batch_worker(void *raw) {
       ctx->out_counts[q] = cnt;
     }
   }
+  score_map_free(&scratch.scores);
+  free(scratch.heap);
   return NULL;
 }
 
@@ -1124,17 +1321,22 @@ nbase_status_t nbase_bm25_search_batch(
   }
 
   if (eff_threads <= 1U) {
+    bm25_search_scratch_t scratch;
+    memset(&scratch, 0, sizeof(scratch));
     nbase_status_t st = NBASE_OK;
     for (uint32_t q = 0U; q < query_count && st == NBASE_OK; q++) {
-      st = bm25_search_filtered_unlocked(
+      st = bm25_search_core_unlocked(
           bm25,
           queries[q],
           k,
           NULL,
           NULL,
+          &scratch,
           out_results + (size_t)q * (size_t)k,
           &out_counts[q]);
     }
+    score_map_free(&scratch.scores);
+    free(scratch.heap);
     pthread_rwlock_unlock(&mutable_bm->rwlock);
     return st;
   }
@@ -1190,7 +1392,8 @@ nbase_status_t nbase_hybrid_rrf(
   }
 
   score_map_t map;
-  if (!score_map_init(&map, (size_t)vec_count + (size_t)text_count + 8U)) {
+  memset(&map, 0, sizeof(map));
+  if (!score_map_reset(&map, (size_t)vec_count + (size_t)text_count + 8U)) {
     return NBASE_ERR_NOMEM;
   }
 
@@ -1216,7 +1419,7 @@ nbase_status_t nbase_hybrid_rrf(
   }
   size_t pos = 0U;
   for (size_t i = 0U; i < map.cap; i++) {
-    if (map.used[i] != 0U) {
+    if (map.used_gen[i] == map.gen) {
       all[pos].id = map.keys[i];
       all[pos].score = (float)map.vals[i];
       pos++;

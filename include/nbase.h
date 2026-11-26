@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 15
+#define NBASE_VERSION_MINOR 16
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -615,9 +615,22 @@ nbase_status_t nbase_bq_load(const char *file_path, nbase_bq_t **out_bq);
 
 typedef struct nbase_bm25 nbase_bm25_t;
 
+typedef struct nbase_bm25_stats {
+  float k1;
+  float b;
+  uint64_t doc_count;
+  uint64_t total_slots;
+  uint64_t tombstones;
+  uint64_t unique_terms;
+  uint64_t total_postings;
+  double avg_doc_len;
+  uint64_t memory_bytes;
+} nbase_bm25_stats_t;
+
 nbase_status_t nbase_bm25_create(float k1, float b, nbase_bm25_t **out_bm25);
 void nbase_bm25_destroy(nbase_bm25_t *bm25);
 uint64_t nbase_bm25_doc_count(const nbase_bm25_t *bm25);
+nbase_status_t nbase_bm25_stats(const nbase_bm25_t *bm25, nbase_bm25_stats_t *out_stats);
 nbase_status_t nbase_bm25_index(nbase_bm25_t *bm25, uint64_t id, const char *text);
 nbase_status_t nbase_bm25_index_batch(
     nbase_bm25_t *bm25,
@@ -625,6 +638,13 @@ nbase_status_t nbase_bm25_index_batch(
     const char *const *texts,
     uint32_t count);
 nbase_status_t nbase_bm25_get(const nbase_bm25_t *bm25, uint64_t id, char *out_buf, size_t buf_len, size_t *out_len);
+nbase_status_t nbase_bm25_get_batch(
+    const nbase_bm25_t *bm25,
+    const uint64_t *ids,
+    uint32_t count,
+    char **out_texts,
+    bool *out_found);
+void nbase_free_texts(char **texts, uint32_t count);
 bool nbase_bm25_contains(const nbase_bm25_t *bm25, uint64_t id);
 nbase_status_t nbase_bm25_delete(nbase_bm25_t *bm25, uint64_t id);
 nbase_status_t nbase_bm25_delete_batch(nbase_bm25_t *bm25, const uint64_t *ids, uint32_t count, uint32_t *out_deleted);
