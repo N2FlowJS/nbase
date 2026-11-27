@@ -2450,6 +2450,30 @@ static void append_result_entries_json(
     bool inc_vec,
     bool inc_text);
 
+static void append_result_batch_json(
+    nbase_sbuf_t *sb,
+    nbase_db_t *db,
+    const nbase_result_t *res,
+    const uint32_t *counts,
+    uint32_t qcnt,
+    uint32_t stride,
+    uint32_t dim,
+    bool inc_meta,
+    bool inc_vec,
+    bool inc_text);
+
+static void append_scored_batch_json(
+    nbase_sbuf_t *sb,
+    nbase_db_t *db,
+    const nbase_scored_id_t *res,
+    const uint32_t *counts,
+    uint32_t qcnt,
+    uint32_t stride,
+    uint32_t dim,
+    bool inc_meta,
+    bool inc_vec,
+    bool inc_text);
+
 static void send_similar_results(
     const http_conn_t *c,
     const nbase_result_t *res,
@@ -2516,6 +2540,8 @@ static bool parse_search_common_opts(
     nbase_search_opts_t *opts,
     nbase_meta_cond_t **out_conds,
     nbase_meta_filter_t *out_filter);
+
+static bool parse_threads_field(const nbase_json_t *root, uint32_t *out_threads);
 
 static void handle_post_similar(
     const http_conn_t *c,
@@ -2641,6 +2667,12 @@ static void handle_search_similar_batch(const http_conn_t *c, const char *body, 
     send_error_json(c, 400, "invalid search options");
     return;
   }
+  if (!parse_threads_field(root, &opts.num_threads)) {
+    free(conds);
+    nbase_json_free(root);
+    send_error_json(c, 400, "threads must be an integer in 0..64");
+    return;
+  }
 
   uint32_t cnt = (uint32_t)jids->len;
   uint64_t *ids = malloc((size_t)cnt * sizeof(uint64_t));
@@ -2692,11 +2724,7 @@ static void handle_search_similar_batch(const http_conn_t *c, const char *body, 
   }
 
   uint64_t t0 = monotonic_us();
-  nbase_status_t st = NBASE_OK;
-  for (uint32_t q = 0U; q < cnt && st == NBASE_OK; q++) {
-    st = nbase_find_similar(
-        srv->db, ids[q], k, &opts, res_buf + (size_t)q * (size_t)k, &res_cnts[q]);
-  }
+  nbase_status_t st = nbase_find_similar_batch(srv->db, ids, cnt, k, &opts, res_buf, res_cnts);
   uint64_t t1 = monotonic_us();
   record_search_latency(srv, cnt, t1 - t0);
 
@@ -2714,19 +2742,8 @@ static void handle_search_similar_batch(const http_conn_t *c, const char *body, 
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
   nbase_sbuf_appendf(&sb, "{\"success\":true,\"count\":%u,\"results\":[", cnt);
-  for (uint32_t q = 0U; q < cnt && !sb.oom; q++) {
-    nbase_sbuf_append_n(&sb, q == 0U ? "[" : ",[", q == 0U ? 1U : 2U);
-    append_result_entries_json(
-        &sb,
-        srv->db,
-        res_buf + (size_t)q * (size_t)k,
-        res_cnts[q],
-        db_st.dim,
-        inc_meta,
-        inc_vec,
-        inc_text);
-    nbase_sbuf_append_n(&sb, "]", 1U);
-  }
+  append_result_batch_json(
+      &sb, srv->db, res_buf, res_cnts, cnt, k, db_st.dim, inc_meta, inc_vec, inc_text);
   nbase_sbuf_append(&sb, "]}");
   free(res_buf);
   free(res_cnts);
@@ -3126,6 +3143,104 @@ static void append_result_entries_json(
     nbase_sbuf_append_n(sb, "}", 1U);
   }
   http_batch_enrich_free(&enrich);
+}
+
+static void append_batch_results_common_json(
+    nbase_sbuf_t *sb,
+    const nbase_db_t *db,
+    const nbase_result_t *opt_res,
+    const nbase_scored_id_t *opt_scored,
+    const uint32_t *counts,
+    uint32_t qcnt,
+    uint32_t stride,
+    uint32_t dim,
+    bool inc_meta,
+    bool inc_vec,
+    bool inc_text) {
+  size_t total = 0U;
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    total += (size_t)counts[q];
+  }
+  http_batch_enrich_t enrich;
+  memset(&enrich, 0, sizeof(enrich));
+  if (total > 0U && (inc_vec || inc_text)) {
+    if (total > (size_t)UINT32_MAX) {
+      sb->oom = true;
+      return;
+    }
+    uint64_t stack_ids[128];
+    uint64_t *ids = (total <= 128U) ? stack_ids : malloc(total * sizeof(uint64_t));
+    if (!ids) {
+      sb->oom = true;
+      return;
+    }
+    size_t fill = 0U;
+    for (uint32_t q = 0U; q < qcnt; q++) {
+      for (uint32_t i = 0U; i < counts[q]; i++) {
+        size_t slot = (size_t)q * (size_t)stride + (size_t)i;
+        ids[fill++] = (opt_res != NULL) ? opt_res[slot].id : opt_scored[slot].id;
+      }
+    }
+    bool ok = http_batch_enrich_load(db, ids, (uint32_t)total, dim, inc_vec, inc_text, &enrich);
+    if (ids != stack_ids) {
+      free(ids);
+    }
+    if (!ok) {
+      sb->oom = true;
+      return;
+    }
+  }
+  uint32_t eidx = 0U;
+  for (uint32_t q = 0U; q < qcnt && !sb->oom; q++) {
+    nbase_sbuf_append_n(sb, q == 0U ? "[" : ",[", q == 0U ? 1U : 2U);
+    for (uint32_t i = 0U; i < counts[q] && !sb->oom; i++) {
+      size_t slot = (size_t)q * (size_t)stride + (size_t)i;
+      uint64_t id = (opt_res != NULL) ? opt_res[slot].id : opt_scored[slot].id;
+      double val = (opt_res != NULL) ? (double)opt_res[slot].distance : (double)opt_scored[slot].score;
+      const char *key = (opt_res != NULL) ? "distance" : "score";
+      nbase_sbuf_appendf(
+          sb,
+          i == 0U ? "{\"id\":%llu,\"%s\":%.7g" : ",{\"id\":%llu,\"%s\":%.7g",
+          (unsigned long long)id,
+          key,
+          val);
+      append_enriched_fields_json(sb, db, id, eidx, inc_meta, inc_vec, inc_text, true, &enrich);
+      nbase_sbuf_append_n(sb, "}", 1U);
+      eidx++;
+    }
+    nbase_sbuf_append_n(sb, "]", 1U);
+  }
+  http_batch_enrich_free(&enrich);
+}
+
+static void append_result_batch_json(
+    nbase_sbuf_t *sb,
+    nbase_db_t *db,
+    const nbase_result_t *res,
+    const uint32_t *counts,
+    uint32_t qcnt,
+    uint32_t stride,
+    uint32_t dim,
+    bool inc_meta,
+    bool inc_vec,
+    bool inc_text) {
+  append_batch_results_common_json(
+      sb, db, res, NULL, counts, qcnt, stride, dim, inc_meta, inc_vec, inc_text);
+}
+
+static void append_scored_batch_json(
+    nbase_sbuf_t *sb,
+    nbase_db_t *db,
+    const nbase_scored_id_t *res,
+    const uint32_t *counts,
+    uint32_t qcnt,
+    uint32_t stride,
+    uint32_t dim,
+    bool inc_meta,
+    bool inc_vec,
+    bool inc_text) {
+  append_batch_results_common_json(
+      sb, db, NULL, res, counts, qcnt, stride, dim, inc_meta, inc_vec, inc_text);
 }
 
 static void handle_search(const http_conn_t *c, const char *body, size_t body_len) {
@@ -3548,16 +3663,15 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
   nbase_sbuf_append(&sb, "{\"success\":true,\"results\":[");
-  for (uint32_t qi = 0U; qi < qcnt; qi++) {
-    nbase_sbuf_append(&sb, qi == 0U ? "[" : ",[");
-    uint32_t got = counts[qi];
-    const nbase_result_t *row = results + (size_t)qi * (size_t)k;
-    append_result_entries_json(&sb, srv->db, row, got, dim, inc_meta, inc_vec, inc_text);
-    nbase_sbuf_append(&sb, "]");
-  }
+  append_result_batch_json(&sb, srv->db, results, counts, qcnt, k, dim, inc_meta, inc_vec, inc_text);
   nbase_sbuf_append(&sb, "]}");
   free(results);
   free(counts);
+  if (sb.oom) {
+    nbase_sbuf_free(&sb);
+    send_error_json(c, 500, "out of memory");
+    return;
+  }
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
 }
@@ -3876,12 +3990,7 @@ static void handle_search_text_batch(const http_conn_t *c, const char *body, siz
   nbase_sbuf_init(&sb);
   if (st == NBASE_OK) {
     nbase_sbuf_appendf(&sb, "{\"success\":true,\"queryCount\":%u,\"results\":[", qcnt);
-    for (uint32_t q = 0U; q < qcnt; q++) {
-      nbase_sbuf_append(&sb, q == 0U ? "[" : ",[");
-      append_scored_entries_json(
-          &sb, srv->db, res + (size_t)q * (size_t)k, counts[q], db_st.dim, inc_meta, inc_vec, inc_text);
-      nbase_sbuf_append_n(&sb, "]", 1U);
-    }
+    append_scored_batch_json(&sb, srv->db, res, counts, qcnt, k, db_st.dim, inc_meta, inc_vec, inc_text);
     nbase_sbuf_append(&sb, "]}");
   }
   free((void *)qptrs);
@@ -3893,6 +4002,11 @@ static void handle_search_text_batch(const http_conn_t *c, const char *body, siz
   if (st != NBASE_OK) {
     nbase_sbuf_free(&sb);
     send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+  if (sb.oom) {
+    nbase_sbuf_free(&sb);
+    send_error_json(c, 500, "out of memory");
     return;
   }
   send_sbuf_json(c, 200, &sb);
@@ -4228,12 +4342,8 @@ static void handle_search_hybrid_batch(const http_conn_t *c, const char *body, s
       uint64_t t1 = monotonic_us();
       record_search_latency(srv, (uint64_t)qcnt, t1 - t0);
       if (st == NBASE_OK) {
-        for (uint32_t q = 0U; q < qcnt; q++) {
-          nbase_sbuf_append(&sb, q == 0U ? "[" : ",[");
-          append_scored_entries_json(
-              &sb, srv->db, res_all + (size_t)q * (size_t)k, counts[q], db_st.dim, inc_meta, inc_vec, inc_text);
-          nbase_sbuf_append_n(&sb, "]", 1U);
-        }
+        append_scored_batch_json(
+            &sb, srv->db, res_all, counts, qcnt, k, db_st.dim, inc_meta, inc_vec, inc_text);
       }
     }
     free(packed_vecs);
@@ -4270,6 +4380,11 @@ static void handle_search_hybrid_batch(const http_conn_t *c, const char *body, s
   if (st != NBASE_OK) {
     nbase_sbuf_free(&sb);
     send_error_json(c, http_code_for_status(st), nbase_strerror(st));
+    return;
+  }
+  if (sb.oom) {
+    nbase_sbuf_free(&sb);
+    send_error_json(c, 500, "out of memory");
     return;
   }
   send_sbuf_json(c, 200, &sb);

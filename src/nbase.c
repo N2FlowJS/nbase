@@ -92,6 +92,20 @@ typedef struct hybrid_batch_worker_ctx {
   atomic_int first_err;
 } hybrid_batch_worker_ctx_t;
 
+typedef struct similar_batch_worker_ctx {
+  const nbase_db_t *db;
+  const uint64_t *ids;
+  const uint32_t *slots;
+  uint32_t id_count;
+  uint32_t k;
+  uint32_t fetch_k;
+  nbase_search_opts_t opts;
+  nbase_result_t *out_results;
+  uint32_t *out_counts;
+  atomic_uint next_idx;
+  atomic_int first_err;
+} similar_batch_worker_ctx_t;
+
 static bool combined_filter_cb(uint64_t id, void *raw_ctx) {
   const combined_filter_ctx_t *ctx = (const combined_filter_ctx_t *)raw_ctx;
   if (!nbase_meta_matches(ctx->meta, id, ctx->meta_filter)) {
@@ -121,7 +135,7 @@ static char *join_path(const char *dir, const char *file) {
 }
 
 const char *nbase_version(void) {
-  return "1.19.0";
+  return "1.20.0";
 }
 
 const char *nbase_strerror(nbase_status_t status) {
@@ -2091,6 +2105,81 @@ nbase_status_t nbase_search_radius(
   return st;
 }
 
+static nbase_status_t db_find_similar_slot_unlocked(
+    const nbase_db_t *db,
+    uint64_t id,
+    uint32_t slot,
+    uint32_t k,
+    uint32_t fetch_k,
+    const nbase_search_opts_t *eff,
+    nbase_result_t *tmp,
+    nbase_result_t *out_row,
+    uint32_t *out_cnt) {
+  *out_cnt = 0U;
+  const float *qvec = nbase_store_get_vector(db->store, slot);
+  uint32_t got = 0U;
+  nbase_status_t st = db_search_unlocked(db, qvec, db->store->dim, fetch_k, eff, tmp, &got);
+  if (st != NBASE_OK) {
+    return st;
+  }
+  uint32_t out_i = 0U;
+  for (uint32_t i = 0U; i < got && out_i < k; i++) {
+    if (tmp[i].id == id) {
+      continue;
+    }
+    out_row[out_i++] = tmp[i];
+  }
+  *out_cnt = out_i;
+  return NBASE_OK;
+}
+
+static void *similar_batch_worker(void *raw) {
+  similar_batch_worker_ctx_t *ctx = (similar_batch_worker_ctx_t *)raw;
+  nbase_result_t stack_tmp[64];
+  nbase_result_t *heap_tmp = NULL;
+  nbase_result_t *tmp = stack_tmp;
+  if (ctx->fetch_k > 64U) {
+    heap_tmp = malloc((size_t)ctx->fetch_k * sizeof(nbase_result_t));
+    if (!heap_tmp) {
+      int expected = (int)NBASE_OK;
+      (void)atomic_compare_exchange_strong_explicit(
+          &ctx->first_err, &expected, (int)NBASE_ERR_NOMEM, memory_order_relaxed, memory_order_relaxed);
+      return NULL;
+    }
+    tmp = heap_tmp;
+  }
+
+  while (true) {
+    if (atomic_load_explicit(&ctx->first_err, memory_order_relaxed) != (int)NBASE_OK) {
+      break;
+    }
+    uint32_t idx = atomic_fetch_add_explicit(&ctx->next_idx, 1U, memory_order_relaxed);
+    if (idx >= ctx->id_count) {
+      break;
+    }
+    nbase_result_t *dst = ctx->out_results + (size_t)idx * (size_t)ctx->k;
+    nbase_status_t st = db_find_similar_slot_unlocked(
+        ctx->db,
+        ctx->ids[idx],
+        ctx->slots[idx],
+        ctx->k,
+        ctx->fetch_k,
+        &ctx->opts,
+        tmp,
+        dst,
+        &ctx->out_counts[idx]);
+    if (st != NBASE_OK) {
+      int expected = (int)NBASE_OK;
+      (void)atomic_compare_exchange_strong_explicit(
+          &ctx->first_err, &expected, (int)st, memory_order_relaxed, memory_order_relaxed);
+      break;
+    }
+  }
+
+  free(heap_tmp);
+  return NULL;
+}
+
 nbase_status_t nbase_find_similar(
     const nbase_db_t *db,
     uint64_t id,
@@ -2121,28 +2210,144 @@ nbase_status_t nbase_find_similar(
                             ? UINT32_MAX
                             : (uint32_t)db->store->active_count;
   uint32_t fetch_k = (k < max_active) ? (k + 1U) : max_active;
-  nbase_result_t *tmp = malloc((size_t)fetch_k * sizeof(nbase_result_t));
-  if (!tmp) {
-    pthread_rwlock_unlock(&mutable_db->rwlock);
+  nbase_result_t stack_tmp[64];
+  nbase_result_t *heap_tmp = NULL;
+  nbase_result_t *tmp = stack_tmp;
+  if (fetch_k > 64U) {
+    heap_tmp = malloc((size_t)fetch_k * sizeof(nbase_result_t));
+    if (!heap_tmp) {
+      pthread_rwlock_unlock(&mutable_db->rwlock);
+      return NBASE_ERR_NOMEM;
+    }
+    tmp = heap_tmp;
+  }
+
+  nbase_status_t st = db_find_similar_slot_unlocked(
+      db, id, slot, k, fetch_k, &eff, tmp, out_results, out_count);
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  free(heap_tmp);
+  return st;
+}
+
+nbase_status_t nbase_find_similar_batch(
+    const nbase_db_t *db,
+    const uint64_t *ids,
+    uint32_t id_count,
+    uint32_t k,
+    const nbase_search_opts_t *opts,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  if (!db || (id_count > 0U && (!ids || !out_counts || (k > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (id_count == 0U) {
+    return NBASE_OK;
+  }
+  if (k > 0U && (size_t)id_count > SIZE_MAX / (size_t)k) {
     return NBASE_ERR_NOMEM;
   }
+  memset(out_counts, 0, (size_t)id_count * sizeof(uint32_t));
 
-  const float *qvec = nbase_store_get_vector(db->store, slot);
-  uint32_t got = 0U;
-  nbase_status_t st = db_search_unlocked(db, qvec, db->store->dim, fetch_k, &eff, tmp, &got);
-  pthread_rwlock_unlock(&mutable_db->rwlock);
-
-  if (st == NBASE_OK) {
-    uint32_t out_i = 0U;
-    for (uint32_t i = 0U; i < got && out_i < k; i++) {
-      if (tmp[i].id == id) {
-        continue;
-      }
-      out_results[out_i++] = tmp[i];
+  uint32_t stack_slots[64];
+  uint32_t *heap_slots = NULL;
+  uint32_t *slots = stack_slots;
+  if (id_count > 64U) {
+    heap_slots = malloc((size_t)id_count * sizeof(uint32_t));
+    if (!heap_slots) {
+      return NBASE_ERR_NOMEM;
     }
-    *out_count = out_i;
+    slots = heap_slots;
   }
-  free(tmp);
+
+  nbase_search_opts_t eff = opts ? *opts : nbase_search_opts_default();
+  nbase_db_t *mutable_db = (nbase_db_t *)(uintptr_t)db;
+  pthread_rwlock_rdlock(&mutable_db->rwlock);
+
+  for (uint32_t i = 0U; i < id_count; i++) {
+    if (!nbase_store_find_slot(db->store, ids[i], &slots[i])) {
+      pthread_rwlock_unlock(&mutable_db->rwlock);
+      free(heap_slots);
+      return NBASE_ERR_NOT_FOUND;
+    }
+  }
+  if (k == 0U || db->store->active_count <= 1ULL) {
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    free(heap_slots);
+    return NBASE_OK;
+  }
+
+  uint32_t max_active = (db->store->active_count > (uint64_t)UINT32_MAX - 1ULL)
+                            ? UINT32_MAX
+                            : (uint32_t)db->store->active_count;
+  uint32_t fetch_k = (k < max_active) ? (k + 1U) : max_active;
+
+  if (eff.num_threads <= 1U || id_count <= 1U) {
+    nbase_result_t stack_tmp[64];
+    nbase_result_t *heap_tmp = NULL;
+    nbase_result_t *tmp = stack_tmp;
+    if (fetch_k > 64U) {
+      heap_tmp = malloc((size_t)fetch_k * sizeof(nbase_result_t));
+      if (!heap_tmp) {
+        pthread_rwlock_unlock(&mutable_db->rwlock);
+        free(heap_slots);
+        return NBASE_ERR_NOMEM;
+      }
+      tmp = heap_tmp;
+    }
+    nbase_status_t st = NBASE_OK;
+    for (uint32_t i = 0U; i < id_count && st == NBASE_OK; i++) {
+      st = db_find_similar_slot_unlocked(
+          db,
+          ids[i],
+          slots[i],
+          k,
+          fetch_k,
+          &eff,
+          tmp,
+          out_results + (size_t)i * (size_t)k,
+          &out_counts[i]);
+    }
+    pthread_rwlock_unlock(&mutable_db->rwlock);
+    free(heap_tmp);
+    free(heap_slots);
+    return st;
+  }
+
+  uint32_t workers = (eff.num_threads < id_count) ? eff.num_threads : id_count;
+  if (workers > 64U) {
+    workers = 64U;
+  }
+  similar_batch_worker_ctx_t ctx;
+  ctx.db = db;
+  ctx.ids = ids;
+  ctx.slots = slots;
+  ctx.id_count = id_count;
+  ctx.k = k;
+  ctx.fetch_k = fetch_k;
+  ctx.opts = eff;
+  ctx.out_results = out_results;
+  ctx.out_counts = out_counts;
+  atomic_init(&ctx.next_idx, 0U);
+  atomic_init(&ctx.first_err, (int)NBASE_OK);
+
+  pthread_t tids[64];
+  uint32_t spawned = 0U;
+  for (uint32_t t = 0U; t < workers; t++) {
+    if (pthread_create(&tids[t], NULL, similar_batch_worker, &ctx) != 0) {
+      break;
+    }
+    spawned++;
+  }
+  if (spawned < workers) {
+    (void)similar_batch_worker(&ctx);
+  }
+  for (uint32_t t = 0U; t < spawned; t++) {
+    pthread_join(tids[t], NULL);
+  }
+
+  nbase_status_t st = (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_relaxed);
+  pthread_rwlock_unlock(&mutable_db->rwlock);
+  free(heap_slots);
   return st;
 }
 

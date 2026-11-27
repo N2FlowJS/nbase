@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-11-27
+
+Parallel `find_similar_batch` parity for Single-DB and Partitioned DB (C11 & C++17), batched HNSW neighbor evaluation & generation-stamped traversal optimization, parallel `POST /api/search/similar` + unified 2D batch HTTP enrichment, and CLI `--include-*` flags across batch search commands.
+
+### Added & Changed
+- **By-ID `find_similar_batch` Parity (`include/nbase.h`, `include/nbase.hpp`, `src/nbase.c`, `src/partitioned.c`)**:
+  - Added parallel work-stealing `nbase_find_similar_batch` (`nbase_db_t`) and partition-grouped `nbase_pdb_find_similar_batch` (`nbase_pdb_t`) supporting `meta_filter`, metric override, `ef_search`, `mode`, and `num_threads`, plus C++17 RAII `Database::find_similar_batch` and `PartitionedDatabase::find_similar_batch` methods.
+- **HNSW Traversal & Pruning Optimization (`src/nbase_internal.h`, `src/hnsw.c`)**:
+  - Added `nbase_heap_reserve`, upgraded `hnsw_visited_t` to 16-bit generation marks (`uint16_t *marks`) with zero-alloc single-query `stack_bits[256]` (covering graphs up to 16,384 nodes), batched 32-slot neighbor distance computation (`hnsw_eval_neighbor_batch` via `nbase_distance_indexed_batch`) in `search_layer` & `search_layer_mt`, batched 64-slot pruning in `shrink_connections`, and added `stack_tmp[256]` in `nbase_hnsw_search`.
+- **HTTP/1.1 Server & CLI Batch Search Parity (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `"threads"` (`0..64`) + `nbase_find_similar_batch` execution to `POST /api/search/similar`, and unified 2D batch enrichment (`append_result_batch_json` / `append_scored_batch_json` issuing one `http_batch_enrich_load` per batch response) across `/api/search/batch`, `/api/search/similar`, `/api/search/text/batch`, and `/api/search/hybrid/batch`.
+  - Added `--include-vectors`, `--include-meta`, and `--include-text` options to `nbase-cli search-batch`, `search-text-batch`, and `search-hybrid-batch` backed by shared `cli_print_batch_results_json`.
+- **Tests (`tests/test_db.c`, `tests/test_partitioned.c`, `tests/test_hnsw.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.20.0"` and added `test_db_find_similar_batch_and_tsan`, `test_pdb_find_similar_batch_multi_partition_and_tsan`, `test_hnsw_batched_cosine_and_metric_override_recall`, and `test_http_server_similar_batch_threads_and_2d_enrich`.
+
 ## [1.19.0] - 2026-11-27
 
 Filtered parallel `search_batch_filtered` across Clustered, IVF-PQ, LSH & BM25 (C11 & C++17), AVX2+FMA 4-row `nbase_distance_indexed_batch` kernel with software prefetching & LSH/Clustered hot-path optimization, HTTP batch text/enrichment on `/api/vectors/get`, `/api/vectors/export`, and `/api/rerank`, and CLI `search-text` / `search-hybrid` `--json` & `--include-*` flags.

@@ -741,6 +741,123 @@ static void test_pdb_get_text_batch_multi_partition_and_eviction(void) {
   test_rm_rf(dir);
 }
 
+typedef struct pdb_similar_batch_ctx {
+  nbase_pdb_t *pdb;
+  const uint64_t *ids;
+  uint32_t qcnt;
+  uint32_t k;
+  uint32_t num_threads;
+} pdb_similar_batch_ctx_t;
+
+static void *pdb_find_similar_batch_worker(void *arg) {
+  const pdb_similar_batch_ctx_t *ctx = (const pdb_similar_batch_ctx_t *)arg;
+  nbase_pdb_search_opts_t opts = nbase_pdb_search_opts_default();
+  opts.search_all_partitions = true;
+  opts.search.num_threads = ctx->num_threads;
+  nbase_result_t res[16];
+  uint32_t cnts[4] = {0U, 0U, 0U, 0U};
+  for (int it = 0; it < 4; it++) {
+    if (nbase_pdb_find_similar_batch(ctx->pdb, ctx->ids, ctx->qcnt, ctx->k, &opts, res, cnts) !=
+        NBASE_OK) {
+      return (void *)1;
+    }
+    for (uint32_t q = 0U; q < ctx->qcnt; q++) {
+      if (cnts[q] != ctx->k) {
+        return (void *)1;
+      }
+      for (uint32_t j = 0U; j < cnts[q]; j++) {
+        if (res[(size_t)q * (size_t)ctx->k + (size_t)j].id == ctx->ids[q]) {
+          return (void *)1;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_pdb_find_similar_batch_multi_partition_and_tsan(void) {
+  char dir[128];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  const uint32_t dim = 8U;
+  const uint32_t nvecs = 18U;
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(dim);
+  cfg.partition_capacity = 6U;
+  cfg.max_active_partitions = 2U;
+  cfg.seed = 4321ULL;
+
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  float vecs[18U * 8U];
+  test_fill_vectors(vecs, nvecs, dim, 5150ULL);
+  for (uint32_t i = 0U; i < nvecs; i++) {
+    uint64_t id = (uint64_t)i * 10ULL;
+    ASSERT_STATUS(nbase_pdb_add(pdb, id, vecs + (size_t)i * (size_t)dim, dim), NBASE_OK);
+    nbase_meta_field_t mf = {"even", {.type = NBASE_META_BOOL, .as = {.b = ((i % 2U) == 0U)}}};
+    ASSERT_STATUS(nbase_pdb_set_meta(pdb, id, &mf, 1U), NBASE_OK);
+  }
+
+  nbase_pdb_stats_t pst;
+  ASSERT_STATUS(nbase_pdb_stats(pdb, &pst), NBASE_OK);
+  ASSERT_TRUE(pst.total_partitions >= 3ULL);
+  ASSERT_TRUE(pst.eviction_count >= 1ULL);
+
+  const uint64_t qids[4] = {0ULL, 70ULL, 130ULL, 160ULL};
+  const uint32_t qcnt = 4U;
+  const uint32_t k = 4U;
+  nbase_result_t batch_res[4U * 4U];
+  nbase_result_t single_res[4U];
+  uint32_t bcnts[4] = {0};
+
+  const uint64_t bad_qids[2] = {0ULL, 99999ULL};
+  ASSERT_STATUS(nbase_pdb_find_similar_batch(pdb, bad_qids, 2U, k, NULL, batch_res, bcnts), NBASE_ERR_NOT_FOUND);
+  ASSERT_STATUS(nbase_pdb_find_similar_batch(pdb, NULL, 0U, k, NULL, NULL, NULL), NBASE_OK);
+  uint32_t zcnt[2] = {7U, 7U};
+  ASSERT_STATUS(nbase_pdb_find_similar_batch(pdb, qids, 2U, 0U, NULL, NULL, zcnt), NBASE_OK);
+  ASSERT_EQ_U64(zcnt[0], 0ULL);
+  ASSERT_EQ_U64(zcnt[1], 0ULL);
+
+  /* Filtered + metric override across resident and evicted partitions */
+  nbase_meta_cond_t cond = {"even", NBASE_OP_EQ, {.type = NBASE_META_BOOL, .as = {.b = true}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  nbase_pdb_search_opts_t popts = nbase_pdb_search_opts_default();
+  popts.search_all_partitions = true;
+  popts.search.meta_filter = &flt;
+  popts.search.metric = NBASE_METRIC_COSINE;
+  popts.search.use_metric_override = true;
+  popts.search.num_threads = 4U;
+
+  ASSERT_STATUS(nbase_pdb_find_similar_batch(pdb, qids, qcnt, k, &popts, batch_res, bcnts), NBASE_OK);
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    uint32_t scnt = 0U;
+    ASSERT_STATUS(nbase_pdb_find_similar(pdb, qids[q], k, &popts, single_res, &scnt), NBASE_OK);
+    ASSERT_EQ_U64(bcnts[q], scnt);
+    for (uint32_t j = 0U; j < scnt; j++) {
+      size_t idx = (size_t)q * (size_t)k + (size_t)j;
+      ASSERT_TRUE(batch_res[idx].id != qids[q]);
+      ASSERT_EQ_U64(batch_res[idx].id, single_res[j].id);
+      ASSERT_NEAR(batch_res[idx].distance, single_res[j].distance, 1e-6, 1e-6);
+      ASSERT_EQ_U64((batch_res[idx].id / 10ULL) % 2ULL, 0ULL);
+    }
+  }
+
+  /* TSan concurrent multi-partition find_similar_batch reads */
+  pdb_similar_batch_ctx_t wctx = {pdb, qids, qcnt, 4U, 2U};
+  pthread_t th[3];
+  for (int t = 0; t < 3; t++) {
+    ASSERT_TRUE(pthread_create(&th[t], NULL, pdb_find_similar_batch_worker, &wctx) == 0);
+  }
+  for (int t = 0; t < 3; t++) {
+    void *ret = NULL;
+    ASSERT_TRUE(pthread_join(th[t], &ret) == 0);
+    ASSERT_TRUE(ret == NULL);
+  }
+
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
@@ -751,4 +868,5 @@ void test_partitioned_run(void) {
   RUN_TEST(test_pdb_count_filtered_and_unfiltered);
   RUN_TEST(test_pdb_batch_delete_meta_text_and_search_text_hybrid_batch);
   RUN_TEST(test_pdb_get_text_batch_multi_partition_and_eviction);
+  RUN_TEST(test_pdb_find_similar_batch_multi_partition_and_tsan);
 }

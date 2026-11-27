@@ -318,6 +318,28 @@ class Database {
     return out;
   }
 
+  std::vector<std::vector<nbase_result_t>> find_similar_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t k,
+      const nbase_search_opts_t *opts = nullptr) const {
+    if (ids.empty()) {
+      return {};
+    }
+    uint32_t cnt = static_cast<uint32_t>(ids.size());
+    std::vector<nbase_result_t> flat(
+        static_cast<size_t>(cnt) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(cnt, 0U);
+    detail::check(nbase_find_similar_batch(
+        db_,
+        ids.data(),
+        cnt,
+        k,
+        opts,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, cnt, k);
+  }
+
   std::vector<std::vector<nbase_result_t>> search_batch(
       const std::vector<float> &queries,
       uint32_t query_count,
@@ -1856,6 +1878,28 @@ class PartitionedDatabase {
         pdb_, id, k, opts, k > 0U ? out.data() : nullptr, &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_result_t>> find_similar_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t k,
+      const nbase_pdb_search_opts_t *opts = nullptr) const {
+    if (ids.empty()) {
+      return {};
+    }
+    uint32_t cnt = static_cast<uint32_t>(ids.size());
+    std::vector<nbase_result_t> flat(
+        static_cast<size_t>(cnt) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(cnt, 0U);
+    detail::check(nbase_pdb_find_similar_batch(
+        pdb_,
+        ids.data(),
+        cnt,
+        k,
+        opts,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, cnt, k);
   }
 
   std::vector<nbase_result_t> rerank_mmr(

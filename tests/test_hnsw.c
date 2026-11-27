@@ -309,10 +309,149 @@ static void test_hnsw_tombstones_rebuild_filter_and_seed(void) {
   free(deleted);
 }
 
+static void test_hnsw_batched_cosine_and_metric_override_recall(void) {
+  const uint32_t count = 800U;
+  const uint32_t dim = 64U;
+  const uint32_t k = 10U;
+  const uint32_t nqueries = 8U;
+
+  float *vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)count * sizeof(uint64_t));
+  bool *deleted = calloc(count, sizeof(bool));
+  float *live_vecs = malloc((size_t)count * (size_t)dim * sizeof(float));
+  uint64_t *live_ids = malloc((size_t)count * sizeof(uint64_t));
+  ASSERT_TRUE(vecs != NULL && ids != NULL && deleted != NULL && live_vecs != NULL && live_ids != NULL);
+
+  test_fill_vectors(vecs, count, dim, 6060ULL);
+  for (uint32_t i = 0U; i < count; i++) {
+    ids[i] = 500ULL + (uint64_t)i;
+    float scale = 0.25f + 0.5f * (float)(i % 5U);
+    for (uint32_t d = 0U; d < dim; d++) {
+      vecs[(size_t)i * (size_t)dim + (size_t)d] *= scale;
+    }
+  }
+
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.metric = NBASE_METRIC_COSINE;
+  cfg.hnsw_m = 16U;
+  cfg.hnsw_ef_construction = 120U;
+  cfg.hnsw_ef_search = 120U;
+  cfg.seed = 2027ULL;
+
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+  ASSERT_STATUS(nbase_add_batch(db, ids, vecs, count, dim, 4U), NBASE_OK);
+
+  /* Exercise tombstones and upserts over the batched HNSW graph. */
+  for (uint32_t i = 0U; i < count; i += 10U) {
+    ASSERT_STATUS(nbase_delete(db, ids[i]), NBASE_OK);
+    deleted[i] = true;
+  }
+  float up_vec[64];
+  for (uint32_t d = 0U; d < dim; d++) {
+    up_vec[d] = 0.1f + 0.01f * (float)d;
+  }
+  for (uint32_t i = 1U; i < count; i += 40U) {
+    for (uint32_t d = 0U; d < dim; d++) {
+      vecs[(size_t)i * (size_t)dim + (size_t)d] = up_vec[d] + 0.005f * (float)((i + d) % 7U);
+    }
+    ASSERT_STATUS(nbase_upsert(db, ids[i], vecs + (size_t)i * (size_t)dim, dim), NBASE_OK);
+  }
+
+  uint32_t live_cnt = 0U;
+  for (uint32_t i = 0U; i < count; i++) {
+    if (!deleted[i]) {
+      live_ids[live_cnt] = ids[i];
+      memcpy(live_vecs + (size_t)live_cnt * (size_t)dim,
+             vecs + (size_t)i * (size_t)dim,
+             (size_t)dim * sizeof(float));
+      live_cnt++;
+    }
+  }
+
+  float queries[8U * 64U];
+  test_fill_vectors(queries, nqueries, dim, 7070ULL);
+
+  nbase_result_t batch_res[8U * 10U];
+  uint32_t batch_cnts[8] = {0};
+  nbase_search_opts_t bopts = nbase_search_opts_default();
+  bopts.mode = NBASE_SEARCH_HNSW;
+  bopts.ef_search = 150U;
+  bopts.num_threads = 4U;
+  ASSERT_STATUS(
+      nbase_search_batch(db, queries, nqueries, dim, k, &bopts, batch_res, batch_cnts),
+      NBASE_OK);
+
+  double cos_recall_sum = 0.0;
+  for (uint32_t q = 0U; q < nqueries; q++) {
+    ASSERT_EQ_U64(batch_cnts[q], k);
+    nbase_result_t expected[10];
+    uint32_t exp_n = 0U;
+    test_brute_force(
+        live_ids,
+        live_vecs,
+        NULL,
+        live_cnt,
+        dim,
+        queries + (size_t)q * (size_t)dim,
+        k,
+        NBASE_METRIC_COSINE,
+        NULL,
+        NULL,
+        expected,
+        &exp_n);
+    cos_recall_sum += test_recall_at(
+        batch_res + (size_t)q * (size_t)k, batch_cnts[q], expected, exp_n, k);
+    for (uint32_t j = 0U; j < batch_cnts[q]; j++) {
+      uint32_t orig_idx = (uint32_t)(batch_res[(size_t)q * (size_t)k + (size_t)j].id - 500ULL);
+      ASSERT_TRUE(!deleted[orig_idx]);
+      double ref_d = test_ref_distance(
+          NBASE_METRIC_COSINE,
+          queries + (size_t)q * (size_t)dim,
+          vecs + (size_t)orig_idx * (size_t)dim,
+          dim);
+      ASSERT_NEAR(batch_res[(size_t)q * (size_t)k + (size_t)j].distance, ref_d, 1e-4, 1e-4);
+    }
+  }
+  ASSERT_TRUE((cos_recall_sum / (double)nqueries) >= 0.92);
+
+  /* Inner product and Euclidean per-search overrides through batched HNSW traversal */
+  nbase_metric_t overrides[2] = {NBASE_METRIC_INNER_PRODUCT, NBASE_METRIC_EUCLIDEAN};
+  for (int m = 0; m < 2; m++) {
+    nbase_search_opts_t oopts = nbase_search_opts_default();
+    oopts.mode = NBASE_SEARCH_HNSW;
+    oopts.ef_search = 160U;
+    oopts.use_metric_override = true;
+    oopts.metric = overrides[m];
+    nbase_result_t actual[10];
+    nbase_result_t expected[10];
+    uint32_t act_n = 0U;
+    uint32_t exp_n = 0U;
+    ASSERT_STATUS(nbase_search(db, queries, dim, k, &oopts, actual, &act_n), NBASE_OK);
+    test_brute_force(
+        live_ids, live_vecs, NULL, live_cnt, dim, queries, k, overrides[m], NULL, NULL, expected, &exp_n);
+    double r = test_recall_at(actual, act_n, expected, exp_n, k);
+    ASSERT_TRUE(r >= 0.90);
+    for (uint32_t j = 0U; j < act_n; j++) {
+      uint32_t orig_idx = (uint32_t)(actual[j].id - 500ULL);
+      double ref_d = test_ref_distance(overrides[m], queries, vecs + (size_t)orig_idx * (size_t)dim, dim);
+      ASSERT_NEAR(actual[j].distance, ref_d, 1e-4, 1e-4);
+    }
+  }
+
+  nbase_close(db);
+  free(vecs);
+  free(ids);
+  free(deleted);
+  free(live_vecs);
+  free(live_ids);
+}
+
 void test_hnsw_run(void) {
   RUN_TEST(test_hnsw_recall_500x16);
   RUN_TEST(test_hnsw_recall_2000x64);
   RUN_TEST(test_hnsw_ef_search_dial);
   RUN_TEST(test_hnsw_metric_override_and_id_zero);
   RUN_TEST(test_hnsw_tombstones_rebuild_filter_and_seed);
+  RUN_TEST(test_hnsw_batched_cosine_and_metric_override_recall);
 }

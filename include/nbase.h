@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 19
+#define NBASE_VERSION_MINOR 20
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -221,6 +221,7 @@ nbase_status_t nbase_query_meta(const nbase_db_t *db, const nbase_meta_filter_t 
 nbase_status_t nbase_search(const nbase_db_t *db, const float *query, uint32_t dim, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_search_radius(const nbase_db_t *db, const float *query, uint32_t dim, float max_distance, uint32_t max_results, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_find_similar(const nbase_db_t *db, uint64_t id, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_find_similar_batch(const nbase_db_t *db, const uint64_t *ids, uint32_t id_count, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_search_batch(const nbase_db_t *db, const float *queries, uint32_t query_count, uint32_t dim, uint32_t k, const nbase_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_counts);
 
 nbase_status_t nbase_set_text(nbase_db_t *db, uint64_t id, const char *text);
@@ -356,6 +357,7 @@ nbase_status_t nbase_pdb_search_text_batch(nbase_pdb_t *pdb, const char *const *
 nbase_status_t nbase_pdb_search_hybrid(nbase_pdb_t *pdb, const float *query_vec, uint32_t dim, const char *query_text, uint32_t k, float alpha, float rrf_k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_search_hybrid_batch(nbase_pdb_t *pdb, const float *query_vectors, uint32_t dim, const char *const *query_texts, uint32_t query_count, uint32_t k, float alpha, float rrf_k, const nbase_pdb_search_opts_t *opts, nbase_scored_id_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_pdb_find_similar(nbase_pdb_t *pdb, uint64_t id, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_count);
+nbase_status_t nbase_pdb_find_similar_batch(nbase_pdb_t *pdb, const uint64_t *ids, uint32_t id_count, uint32_t k, const nbase_pdb_search_opts_t *opts, nbase_result_t *out_results, uint32_t *out_counts);
 nbase_status_t nbase_pdb_rerank_mmr(nbase_pdb_t *pdb, const nbase_result_t *candidates, uint32_t candidate_count, uint32_t k, float lambda, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_rerank_weighted(nbase_pdb_t *pdb, const nbase_result_t *candidates, uint32_t candidate_count, const nbase_rerank_weight_t *weights, uint32_t weight_count, uint32_t k, nbase_result_t *out_results, uint32_t *out_count);
 nbase_status_t nbase_pdb_extract_relationships(nbase_pdb_t *pdb, uint32_t k_neighbors, float max_distance, const nbase_pdb_search_opts_t *opts, nbase_edge_t **out_edges, uint64_t *out_edge_count);

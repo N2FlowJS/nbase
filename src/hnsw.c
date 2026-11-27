@@ -11,9 +11,12 @@
 #define NBASE_HNSW_MAX_LEVEL 32
 
 typedef struct hnsw_visited {
-  uint32_t *marks;
+  uint16_t *marks;
+  uint64_t *bits;
   uint32_t cap;
-  uint32_t gen;
+  uint16_t gen;
+  bool use_bitset;
+  bool owns_bits;
 } hnsw_visited_t;
 
 static inline const float *hnsw_slot_vec(const nbase_store_t *store, uint32_t slot) {
@@ -40,7 +43,10 @@ static int cmp_heap_item_asc(const void *pa, const void *pb) {
 
 static bool visited_init(hnsw_visited_t *v, uint32_t cap) {
   v->cap = cap > 0U ? cap : 1U;
-  v->marks = calloc(v->cap, sizeof(uint32_t));
+  v->marks = calloc(v->cap, sizeof(uint16_t));
+  v->bits = NULL;
+  v->use_bitset = false;
+  v->owns_bits = false;
   if (!v->marks) {
     v->cap = 0U;
     return false;
@@ -49,23 +55,67 @@ static bool visited_init(hnsw_visited_t *v, uint32_t cap) {
   return true;
 }
 
+static bool visited_init_bitset(
+    hnsw_visited_t *v,
+    uint32_t cap,
+    uint64_t *stack_buf,
+    size_t stack_words) {
+  v->cap = cap > 0U ? cap : 1U;
+  v->marks = NULL;
+  v->gen = 1U;
+  v->use_bitset = true;
+  size_t words = ((size_t)v->cap + 63U) / 64U;
+  if (stack_buf != NULL && words <= stack_words) {
+    memset(stack_buf, 0, words * sizeof(uint64_t));
+    v->bits = stack_buf;
+    v->owns_bits = false;
+    return true;
+  }
+  v->bits = calloc(words, sizeof(uint64_t));
+  if (!v->bits) {
+    v->cap = 0U;
+    v->owns_bits = false;
+    return false;
+  }
+  v->owns_bits = true;
+  return true;
+}
+
 static void visited_free(hnsw_visited_t *v) {
   free(v->marks);
+  if (v->owns_bits) {
+    free(v->bits);
+  }
   v->marks = NULL;
+  v->bits = NULL;
   v->cap = 0U;
   v->gen = 0U;
+  v->use_bitset = false;
+  v->owns_bits = false;
 }
 
 static void visited_next_gen(hnsw_visited_t *v) {
-  if (v->gen == UINT32_MAX) {
-    memset(v->marks, 0, (size_t)v->cap * sizeof(uint32_t));
+  if (v->use_bitset) {
+    return;
+  }
+  if (v->gen == UINT16_MAX) {
+    memset(v->marks, 0, (size_t)v->cap * sizeof(uint16_t));
     v->gen = 1U;
   } else {
-    v->gen++;
+    v->gen = (uint16_t)(v->gen + 1U);
   }
 }
 
 static inline bool visited_test_and_set(hnsw_visited_t *v, uint32_t slot) {
+  if (v->use_bitset) {
+    uint64_t mask = 1ULL << (slot & 63U);
+    size_t w = (size_t)(slot >> 6U);
+    if ((v->bits[w] & mask) != 0ULL) {
+      return true;
+    }
+    v->bits[w] |= mask;
+    return false;
+  }
   if (v->marks[slot] == v->gen) {
     return true;
   }
@@ -151,6 +201,50 @@ static nbase_status_t hnsw_ensure_node_capacity(nbase_hnsw_t *hnsw, uint32_t nee
   return NBASE_OK;
 }
 
+static bool hnsw_eval_neighbor_batch(
+    const nbase_hnsw_t *hnsw,
+    const nbase_store_t *store,
+    const float *query_vec,
+    nbase_metric_t metric,
+    uint32_t ef,
+    bool for_query,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    const uint32_t *nb_slots,
+    uint32_t nb_n,
+    nbase_heap_t *candidates,
+    nbase_heap_t *results) {
+  if (nb_n == 0U) {
+    return true;
+  }
+  float nb_dists[32];
+  nbase_distance_indexed_batch(
+      metric, query_vec, store->vectors, nb_slots, nb_n, store->dim, nb_dists);
+  for (uint32_t c = 0U; c < nb_n; c++) {
+    uint32_t nb = nb_slots[c];
+    float d = nb_dists[c];
+    float worst = (results->len > 0U) ? results->data[0].dist : INFINITY;
+    if (results->len < ef || d < worst) {
+      if (!nbase_heap_push(candidates, (nbase_heap_item_t){nb, d})) {
+        return false;
+      }
+      bool nb_eligible = (hnsw->states[nb] == NBASE_SLOT_ACTIVE);
+      if (nb_eligible && for_query && filter != NULL) {
+        nb_eligible = filter(store->ids[nb], filter_ctx);
+      }
+      if (nb_eligible) {
+        if (!nbase_heap_push(results, (nbase_heap_item_t){nb, d})) {
+          return false;
+        }
+        if (results->len > ef) {
+          (void)nbase_heap_pop(results);
+        }
+      }
+    }
+  }
+  return true;
+}
+
 static nbase_status_t search_layer(
     const nbase_hnsw_t *hnsw,
     const nbase_store_t *store,
@@ -158,6 +252,7 @@ static nbase_status_t search_layer(
     uint32_t ep_slot,
     uint32_t ef,
     int32_t level,
+    nbase_metric_t metric,
     nbase_dist_fn dist_fn,
     bool for_query,
     nbase_filter_fn filter,
@@ -174,6 +269,12 @@ static nbase_status_t search_layer(
   nbase_heap_t results;
   nbase_heap_init(&candidates, false);
   nbase_heap_init(&results, true);
+  if (!nbase_heap_reserve(&results, (size_t)ef + 1U) ||
+      !nbase_heap_reserve(&candidates, (ef < 32U) ? 64U : ((size_t)ef * 2U))) {
+    nbase_heap_free(&candidates);
+    nbase_heap_free(&results);
+    return NBASE_ERR_NOMEM;
+  }
 
   float ep_dist = dist_fn(query_vec, hnsw_slot_vec(store, ep_slot), store->dim);
   (void)visited_test_and_set(vis, ep_slot);
@@ -196,6 +297,7 @@ static nbase_status_t search_layer(
     }
   }
 
+  uint32_t nb_slots[32];
   while (candidates.len > 0) {
     nbase_heap_item_t curr = nbase_heap_pop(&candidates);
     float worst = (results.len > 0) ? results.data[0].dist : INFINITY;
@@ -205,50 +307,35 @@ static nbase_status_t search_layer(
 
     if (level <= hnsw->levels[curr.slot] && hnsw->adj[curr.slot] != NULL) {
       const nbase_adj_t *list = &hnsw->adj[curr.slot][level];
-      for (uint32_t i = 0U; i < list->len; i++) {
-#if defined(__GNUC__) || defined(__clang__)
-        if (i + 1U < list->len) {
-          uint32_t next_nb = list->neighbors[i + 1U];
-          if (next_nb < hnsw->node_count && next_nb < vis->cap) {
-            __builtin_prefetch(&vis->marks[next_nb], 0, 1);
-            if (next_nb < store->slot_count && hnsw->states[next_nb] != NBASE_SLOT_EMPTY) {
-              __builtin_prefetch(store->vectors + (size_t)next_nb * (size_t)store->dim, 0, 1);
-            }
-          }
-        }
-#endif
-        uint32_t nb = list->neighbors[i];
+      const uint32_t *nbs = list->neighbors;
+      uint32_t list_len = list->len;
+      uint32_t nb_n = 0U;
+      for (uint32_t i = 0U; i < list_len; i++) {
+        uint32_t nb = nbs[i];
         if (nb >= hnsw->node_count || visited_test_and_set(vis, nb)) {
           continue;
         }
         if (hnsw->states[nb] == NBASE_SLOT_EMPTY) {
           continue;
         }
-
-        float d = dist_fn(query_vec, hnsw_slot_vec(store, nb), store->dim);
-        worst = (results.len > 0) ? results.data[0].dist : INFINITY;
-        if (results.len < ef || d < worst) {
-          if (!nbase_heap_push(&candidates, (nbase_heap_item_t){nb, d})) {
+        nb_slots[nb_n++] = nb;
+        if (nb_n == 32U) {
+          if (!hnsw_eval_neighbor_batch(
+                  hnsw, store, query_vec, metric, ef, for_query, filter, filter_ctx,
+                  nb_slots, nb_n, &candidates, &results)) {
             nbase_heap_free(&candidates);
             nbase_heap_free(&results);
             return NBASE_ERR_NOMEM;
           }
-
-          bool nb_eligible = (hnsw->states[nb] == NBASE_SLOT_ACTIVE);
-          if (nb_eligible && for_query && filter != NULL) {
-            nb_eligible = filter(store->ids[nb], filter_ctx);
-          }
-          if (nb_eligible) {
-            if (!nbase_heap_push(&results, (nbase_heap_item_t){nb, d})) {
-              nbase_heap_free(&candidates);
-              nbase_heap_free(&results);
-              return NBASE_ERR_NOMEM;
-            }
-            if (results.len > ef) {
-              (void)nbase_heap_pop(&results);
-            }
-          }
+          nb_n = 0U;
         }
+      }
+      if (!hnsw_eval_neighbor_batch(
+              hnsw, store, query_vec, metric, ef, for_query, filter, filter_ctx,
+              nb_slots, nb_n, &candidates, &results)) {
+        nbase_heap_free(&candidates);
+        nbase_heap_free(&results);
+        return NBASE_ERR_NOMEM;
       }
     }
   }
@@ -326,13 +413,26 @@ static nbase_status_t shrink_connections(
 
   const float *base_vec = hnsw_slot_vec(store, node_slot);
   size_t cand_count = 0;
-  for (uint32_t i = 0U; i < list->len; i++) {
-    uint32_t nb = list->neighbors[i];
-    if (nb == node_slot || hnsw->states[nb] == NBASE_SLOT_EMPTY) {
-      continue;
+  uint32_t chunk_slots[64];
+  float chunk_dists[64];
+  for (uint32_t base = 0U; base < list->len; base += 64U) {
+    uint32_t end = base + 64U;
+    if (end > list->len) {
+      end = list->len;
     }
-    float d = dist_fn(base_vec, hnsw_slot_vec(store, nb), store->dim);
-    cands[cand_count++] = (nbase_heap_item_t){nb, d};
+    uint32_t chunk_n = 0U;
+    for (uint32_t i = base; i < end; i++) {
+      uint32_t nb = list->neighbors[i];
+      if (nb == node_slot || hnsw->states[nb] == NBASE_SLOT_EMPTY) {
+        continue;
+      }
+      chunk_slots[chunk_n++] = nb;
+    }
+    nbase_distance_indexed_batch(
+        store->metric, base_vec, store->vectors, chunk_slots, chunk_n, store->dim, chunk_dists);
+    for (uint32_t j = 0U; j < chunk_n; j++) {
+      cands[cand_count++] = (nbase_heap_item_t){chunk_slots[j], chunk_dists[j]};
+    }
   }
 
   uint32_t kept = 0U;
@@ -457,7 +557,7 @@ nbase_status_t nbase_hnsw_insert(nbase_hnsw_t *hnsw, const nbase_store_t *store,
   for (int32_t lc = start_lc; lc >= 0; lc--) {
     nbase_heap_item_t *cands = NULL;
     size_t cand_count = 0;
-    st = search_layer(hnsw, store, query_vec, curr, hnsw->ef_construction, lc, dist_fn, false, NULL, NULL, &vis, &cands, &cand_count);
+    st = search_layer(hnsw, store, query_vec, curr, hnsw->ef_construction, lc, store->metric, dist_fn, false, NULL, NULL, &vis, &cands, &cand_count);
     if (st != NBASE_OK) {
       free(cands);
       free(selected);
@@ -587,6 +687,12 @@ static nbase_status_t search_layer_mt(
   nbase_heap_t results;
   nbase_heap_init(&candidates, false);
   nbase_heap_init(&results, true);
+  if (!nbase_heap_reserve(&results, (size_t)ef + 1U) ||
+      !nbase_heap_reserve(&candidates, (ef < 32U) ? 64U : ((size_t)ef * 2U))) {
+    nbase_heap_free(&candidates);
+    nbase_heap_free(&results);
+    return NBASE_ERR_NOMEM;
+  }
 
   float ep_dist = dist_fn(query_vec, hnsw_slot_vec(store, ep_slot), store->dim);
   (void)visited_test_and_set(vis, ep_slot);
@@ -605,6 +711,7 @@ static nbase_status_t search_layer_mt(
     }
   }
 
+  uint32_t nb_slots[32];
   while (candidates.len > 0) {
     nbase_heap_item_t curr = nbase_heap_pop(&candidates);
     float worst = (results.len > 0) ? results.data[0].dist : INFINITY;
@@ -620,34 +727,34 @@ static nbase_status_t search_layer_mt(
       return st;
     }
 
+    const uint32_t *nbs = *nb_scratch;
+    uint32_t nb_n = 0U;
     for (uint32_t i = 0U; i < nb_len; i++) {
-      uint32_t nb = (*nb_scratch)[i];
+      uint32_t nb = nbs[i];
       if (nb >= hnsw->node_count || visited_test_and_set(vis, nb)) {
         continue;
       }
       if (hnsw->states[nb] == NBASE_SLOT_EMPTY) {
         continue;
       }
-
-      float d = dist_fn(query_vec, hnsw_slot_vec(store, nb), store->dim);
-      worst = (results.len > 0) ? results.data[0].dist : INFINITY;
-      if (results.len < ef || d < worst) {
-        if (!nbase_heap_push(&candidates, (nbase_heap_item_t){nb, d})) {
+      nb_slots[nb_n++] = nb;
+      if (nb_n == 32U) {
+        if (!hnsw_eval_neighbor_batch(
+                hnsw, store, query_vec, store->metric, ef, false, NULL, NULL,
+                nb_slots, nb_n, &candidates, &results)) {
           nbase_heap_free(&candidates);
           nbase_heap_free(&results);
           return NBASE_ERR_NOMEM;
         }
-        if (hnsw->states[nb] == NBASE_SLOT_ACTIVE) {
-          if (!nbase_heap_push(&results, (nbase_heap_item_t){nb, d})) {
-            nbase_heap_free(&candidates);
-            nbase_heap_free(&results);
-            return NBASE_ERR_NOMEM;
-          }
-          if (results.len > ef) {
-            (void)nbase_heap_pop(&results);
-          }
-        }
+        nb_n = 0U;
       }
+    }
+    if (!hnsw_eval_neighbor_batch(
+            hnsw, store, query_vec, store->metric, ef, false, NULL, NULL,
+            nb_slots, nb_n, &candidates, &results)) {
+      nbase_heap_free(&candidates);
+      nbase_heap_free(&results);
+      return NBASE_ERR_NOMEM;
     }
   }
 
@@ -1033,24 +1140,32 @@ nbase_status_t nbase_hnsw_search(
     }
   }
 
+  uint64_t stack_bits[256];
   hnsw_visited_t vis;
-  if (!visited_init(&vis, hnsw->node_count)) {
+  if (!visited_init_bitset(&vis, hnsw->node_count, stack_bits, 256U)) {
     return NBASE_ERR_NOMEM;
   }
 
   nbase_heap_item_t *cands = NULL;
   size_t cand_count = 0;
-  nbase_status_t st = search_layer(hnsw, store, query, curr, ef, 0, dist_fn, true, filter, filter_ctx, &vis, &cands, &cand_count);
+  nbase_status_t st = search_layer(
+      hnsw, store, query, curr, ef, 0, metric, dist_fn, true, filter, filter_ctx, &vis, &cands, &cand_count);
   visited_free(&vis);
   if (st != NBASE_OK) {
     free(cands);
     return st;
   }
 
-  nbase_result_t *tmp = malloc(cand_count * sizeof(nbase_result_t));
-  if (!tmp && cand_count > 0) {
-    free(cands);
-    return NBASE_ERR_NOMEM;
+  nbase_result_t stack_tmp[256];
+  nbase_result_t *heap_tmp = NULL;
+  nbase_result_t *tmp = stack_tmp;
+  if (cand_count > 256U) {
+    heap_tmp = malloc(cand_count * sizeof(nbase_result_t));
+    if (!heap_tmp) {
+      free(cands);
+      return NBASE_ERR_NOMEM;
+    }
+    tmp = heap_tmp;
   }
   for (size_t i = 0; i < cand_count; i++) {
     tmp[i].id = store->ids[cands[i].slot];
@@ -1065,7 +1180,7 @@ nbase_status_t nbase_hnsw_search(
   if (ret_count > 0U) {
     memcpy(out_results, tmp, (size_t)ret_count * sizeof(nbase_result_t));
   }
-  free(tmp);
+  free(heap_tmp);
 
   *out_count = ret_count;
   return NBASE_OK;

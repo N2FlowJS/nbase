@@ -2958,6 +2958,109 @@ nbase_status_t nbase_pdb_find_similar(
   return st;
 }
 
+nbase_status_t nbase_pdb_find_similar_batch(
+    nbase_pdb_t *pdb,
+    const uint64_t *ids,
+    uint32_t id_count,
+    uint32_t k,
+    const nbase_pdb_search_opts_t *opts,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  if (!pdb || (id_count > 0U && (!ids || !out_counts || (k > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (id_count == 0U) {
+    return NBASE_OK;
+  }
+  if (k > 0U && (size_t)id_count > SIZE_MAX / (size_t)k) {
+    return NBASE_ERR_NOMEM;
+  }
+  memset(out_counts, 0, (size_t)id_count * sizeof(uint32_t));
+
+  nbase_pdb_search_opts_t eff;
+  if (opts != NULL) {
+    eff = *opts;
+  } else {
+    eff = nbase_pdb_search_opts_default();
+    eff.search_all_partitions = true;
+  }
+  if (eff.partition_id_count > 0U && !eff.partition_ids) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+
+  uint32_t dim = pdb->cfg.dim;
+  if ((size_t)id_count > SIZE_MAX / ((size_t)dim * sizeof(float))) {
+    return NBASE_ERR_NOMEM;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  pdb_part_ref_t *refs = NULL;
+  nbase_status_t st = pdb_collect_sorted_refs_locked(pdb, ids, NULL, id_count, &refs);
+  if (st != NBASE_OK || k == 0U || pdb->total_vectors <= 1ULL) {
+    free(refs);
+    pthread_mutex_unlock(&pdb->mu);
+    return st;
+  }
+
+  uint32_t fetch_k = (k < UINT32_MAX) ? (k + 1U) : k;
+  if ((uint64_t)fetch_k > pdb->total_vectors) {
+    fetch_k = (uint32_t)pdb->total_vectors;
+  }
+  float *qvecs = malloc((size_t)id_count * (size_t)dim * sizeof(float));
+  nbase_result_t *tmp = malloc((size_t)fetch_k * sizeof(nbase_result_t));
+  if (!qvecs || !tmp) {
+    free(qvecs);
+    free(tmp);
+    free(refs);
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_ERR_NOMEM;
+  }
+
+  uint32_t start = 0U;
+  while (st == NBASE_OK && start < id_count) {
+    uint32_t pid = refs[start].part_id;
+    pdb_part_t *part = pdb_find_part(pdb, pid);
+    if (!part) {
+      st = NBASE_ERR_CORRUPT;
+      break;
+    }
+    st = pdb_load_partition(pdb, part);
+    if (st != NBASE_OK) {
+      break;
+    }
+    uint32_t end = start;
+    while (end < id_count && refs[end].part_id == pid && st == NBASE_OK) {
+      uint32_t oi = refs[end].orig_idx;
+      st = nbase_get(part->db, ids[oi], qvecs + (size_t)oi * (size_t)dim, dim);
+      end++;
+    }
+    start = end;
+  }
+  free(refs);
+
+  for (uint32_t i = 0U; i < id_count && st == NBASE_OK; i++) {
+    uint32_t got = 0U;
+    st = pdb_search_unlocked(
+        pdb, qvecs + (size_t)i * (size_t)dim, dim, fetch_k, &eff, tmp, &got);
+    if (st == NBASE_OK) {
+      nbase_result_t *dst = out_results + (size_t)i * (size_t)k;
+      uint32_t out_i = 0U;
+      for (uint32_t j = 0U; j < got && out_i < k; j++) {
+        if (tmp[j].id == ids[i]) {
+          continue;
+        }
+        dst[out_i++] = tmp[j];
+      }
+      out_counts[i] = out_i;
+    }
+  }
+  pthread_mutex_unlock(&pdb->mu);
+
+  free(qvecs);
+  free(tmp);
+  return st;
+}
+
 static int cmp_pdb_edge_canonical(const void *pa, const void *pb) {
   const nbase_edge_t *a = (const nbase_edge_t *)pa;
   const nbase_edge_t *b = (const nbase_edge_t *)pb;

@@ -399,6 +399,22 @@ static inline void nbase_heap_free(nbase_heap_t *h) {
   h->cap = 0;
 }
 
+static inline bool nbase_heap_reserve(nbase_heap_t *h, size_t min_cap) {
+  if (min_cap <= h->cap) {
+    return true;
+  }
+  if (min_cap > SIZE_MAX / sizeof(nbase_heap_item_t)) {
+    return false;
+  }
+  nbase_heap_item_t *next = realloc(h->data, min_cap * sizeof(nbase_heap_item_t));
+  if (!next) {
+    return false;
+  }
+  h->data = next;
+  h->cap = min_cap;
+  return true;
+}
+
 static inline bool nbase_heap_push(nbase_heap_t *h, nbase_heap_item_t item) {
   if (h->len == h->cap) {
     size_t new_cap = h->cap == 0 ? 16 : h->cap * 2;

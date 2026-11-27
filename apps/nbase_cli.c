@@ -44,7 +44,7 @@ static void print_usage(const char *prog) {
       "  delete-text <dir> <id>\n"
       "  delete-text-batch <dir> <id1,id2,...>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
-      "  search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>]\n"
+      "  search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  rerank <dir> <diversity|weighted|standard> <id1:dist1,id2:dist2,...> [--k <K>] [--lambda <L>] [--weights <json>]\n"
       "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
@@ -52,9 +52,9 @@ static void print_usage(const char *prog) {
       "  communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]\n"
       "  search-text <dir> <query> [--k <K>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
-      "  search-text-batch <dir> <file.ndjson|-> [--k <K>] [--threads <T>] [--filter <json>]\n"
+      "  search-text-batch <dir> <file.ndjson|-> [--k <K>] [--threads <T>] [--filter <json>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  search-hybrid <dir> <q0,q1,...|-> <query_text> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
-      "  search-hybrid-batch <dir> <file.ndjson|-> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--threads <T>] [--filter <json>]\n"
+      "  search-hybrid-batch <dir> <file.ndjson|-> [--k <K>] [--alpha <A>] [--rrf-k <R>] [--metric <M>] [--threads <T>] [--filter <json>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  rebuild <dir> [--threads <T>]\n"
       "  compact <dir>\n"
       "  checkpoint <dir>\n"
@@ -70,25 +70,6 @@ static char *cli_strdup(const char *s) {
     memcpy(out, s, n);
   }
   return out;
-}
-
-static void cli_print_scored_batch_json(
-    uint32_t qcnt,
-    uint32_t k,
-    const nbase_scored_id_t *res,
-    const uint32_t *counts) {
-  printf("{\"queryCount\":%u,\"results\":[", qcnt);
-  for (uint32_t q = 0U; q < qcnt; q++) {
-    printf(q == 0U ? "[" : ",[");
-    const nbase_scored_id_t *row = res + (size_t)q * (size_t)k;
-    for (uint32_t j = 0U; j < counts[q]; j++) {
-      printf(j == 0U ? "{\"id\":%llu,\"score\":%.7g}" : ",{\"id\":%llu,\"score\":%.7g}",
-             (unsigned long long)row[j].id,
-             (double)row[j].score);
-    }
-    printf("]");
-  }
-  printf("]}\n");
 }
 
 static int cmp_cli_u64_asc(const void *pa, const void *pb) {
@@ -883,6 +864,63 @@ static bool cli_print_scored_results_json(
   nbase_sbuf_init(&sb);
   nbase_sbuf_appendf(&sb, "{\"count\":%u,\"results\":[", got);
   bool ok = cli_append_enriched_id_array(&sb, db, dim, NULL, NULL, res, got, inc_vecs, inc_meta, inc_text);
+  if (ok) {
+    nbase_sbuf_append(&sb, "]}");
+    ok = !sb.oom && (sb.data != NULL);
+  }
+  if (!ok) {
+    nbase_sbuf_free(&sb);
+    return false;
+  }
+  printf("%s\n", sb.data);
+  nbase_sbuf_free(&sb);
+  return true;
+}
+
+static bool cli_print_batch_results_json(
+    const nbase_db_t *db,
+    uint32_t dim,
+    const nbase_result_t *opt_res,
+    const nbase_scored_id_t *opt_scored,
+    const uint32_t *counts,
+    uint32_t qcnt,
+    uint32_t k,
+    bool inc_vecs,
+    bool inc_meta,
+    bool inc_text) {
+  nbase_sbuf_t sb;
+  nbase_sbuf_init(&sb);
+  nbase_sbuf_appendf(&sb, "{\"queryCount\":%u,\"results\":[", qcnt);
+  bool ok = true;
+  for (uint32_t q = 0U; q < qcnt && ok; q++) {
+    nbase_sbuf_append_n(&sb, q == 0U ? "[" : ",[", q == 0U ? 1U : 2U);
+    if (opt_res != NULL) {
+      ok = cli_append_enriched_id_array(
+          &sb,
+          db,
+          dim,
+          NULL,
+          opt_res + (size_t)q * (size_t)k,
+          NULL,
+          counts[q],
+          inc_vecs,
+          inc_meta,
+          inc_text);
+    } else {
+      ok = cli_append_enriched_id_array(
+          &sb,
+          db,
+          dim,
+          NULL,
+          NULL,
+          opt_scored + (size_t)q * (size_t)k,
+          counts[q],
+          inc_vecs,
+          inc_meta,
+          inc_text);
+    }
+    nbase_sbuf_append_n(&sb, "]", 1U);
+  }
   if (ok) {
     nbase_sbuf_append(&sb, "]}");
     ok = !sb.oom && (sb.data != NULL);
@@ -1864,6 +1902,9 @@ int main(int argc, char **argv) {
     uint32_t k = 10U;
     uint32_t num_threads = 0U;
     const char *flt_json = NULL;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
@@ -1877,6 +1918,12 @@ int main(int argc, char **argv) {
         }
       } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
@@ -1991,6 +2038,11 @@ int main(int argc, char **argv) {
 
     nbase_db_t *db = NULL;
     nbase_status_t st = nbase_open(argv[2], &db);
+    nbase_stats_t s;
+    memset(&s, 0, sizeof(s));
+    if (st == NBASE_OK && inc_vecs) {
+      (void)nbase_stats(db, &s);
+    }
     nbase_scored_id_t *res =
         (st == NBASE_OK) ? malloc((size_t)qcnt * (size_t)k * sizeof(nbase_scored_id_t)) : NULL;
     uint32_t *counts = (st == NBASE_OK) ? calloc((size_t)qcnt, sizeof(uint32_t)) : NULL;
@@ -2013,19 +2065,27 @@ int main(int argc, char **argv) {
       free(queries[i]);
     }
     free(queries);
-    nbase_close(db);
     free(conds);
     nbase_json_free(flt_root);
 
     if (st != NBASE_OK) {
+      if (db != NULL) {
+        nbase_close(db);
+      }
       free(res);
       free(counts);
       fprintf(stderr, "search-text-batch failed: %s\n", nbase_strerror(st));
       return 1;
     }
-    cli_print_scored_batch_json(qcnt, k, res, counts);
+    bool printed = cli_print_batch_results_json(
+        db, s.dim, NULL, res, counts, qcnt, k, inc_vecs, inc_meta, inc_text);
+    nbase_close(db);
     free(res);
     free(counts);
+    if (!printed) {
+      fprintf(stderr, "search-text-batch output formatting failed\n");
+      return 1;
+    }
     return 0;
   }
 
@@ -2167,6 +2227,9 @@ int main(int argc, char **argv) {
     float rrf_k = 60.0f;
     nbase_search_opts_t opts = nbase_search_opts_default();
     const char *flt_json = NULL;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
@@ -2196,6 +2259,12 @@ int main(int argc, char **argv) {
         }
       } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
@@ -2443,11 +2512,11 @@ int main(int argc, char **argv) {
       }
       free(qtexts);
     }
-    nbase_close(db);
     free(conds);
     nbase_json_free(flt_root);
 
     if (!ok || st != NBASE_OK) {
+      nbase_close(db);
       free(res);
       free(counts);
       if (ok) {
@@ -2455,9 +2524,15 @@ int main(int argc, char **argv) {
       }
       return 1;
     }
-    cli_print_scored_batch_json(qcnt, k, res, counts);
+    bool printed = cli_print_batch_results_json(
+        db, s.dim, NULL, res, counts, qcnt, k, inc_vecs, inc_meta, inc_text);
+    nbase_close(db);
     free(res);
     free(counts);
+    if (!printed) {
+      fprintf(stderr, "search-hybrid-batch output formatting failed\n");
+      return 1;
+    }
     return 0;
   }
 
@@ -2814,6 +2889,9 @@ int main(int argc, char **argv) {
     uint32_t k = 10U;
     nbase_search_opts_t opts = nbase_search_opts_default();
     const char *flt_json = NULL;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
     for (int i = 4; i < argc; i++) {
       if (strcmp(argv[i], "--exact") == 0) {
         opts.mode = NBASE_SEARCH_EXACT;
@@ -2840,6 +2918,12 @@ int main(int argc, char **argv) {
         }
       } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
       } else {
         fprintf(stderr, "Invalid option: %s\n", argv[i]);
         return 1;
@@ -2980,31 +3064,26 @@ int main(int argc, char **argv) {
 
     st = nbase_search_batch(db, queries, qcnt, s.dim, k, &opts, res, counts);
     free(queries);
-    nbase_close(db);
     free(conds);
     nbase_json_free(flt_root);
 
     if (st != NBASE_OK) {
+      nbase_close(db);
       free(res);
       free(counts);
       fprintf(stderr, "search-batch failed: %s\n", nbase_strerror(st));
       return 1;
     }
 
-    printf("{\"queryCount\":%u,\"results\":[", qcnt);
-    for (uint32_t q = 0U; q < qcnt; q++) {
-      printf(q == 0U ? "[" : ",[");
-      const nbase_result_t *row = res + (size_t)q * (size_t)k;
-      for (uint32_t j = 0U; j < counts[q]; j++) {
-        printf(j == 0U ? "{\"id\":%llu,\"distance\":%.7g}" : ",{\"id\":%llu,\"distance\":%.7g}",
-               (unsigned long long)row[j].id,
-               (double)row[j].distance);
-      }
-      printf("]");
-    }
-    printf("]}\n");
+    bool printed = cli_print_batch_results_json(
+        db, s.dim, res, NULL, counts, qcnt, k, inc_vecs, inc_meta, inc_text);
+    nbase_close(db);
     free(res);
     free(counts);
+    if (!printed) {
+      fprintf(stderr, "search-batch output formatting failed\n");
+      return 1;
+    }
     return 0;
   }
 

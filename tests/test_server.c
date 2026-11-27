@@ -2504,6 +2504,116 @@ static void test_http_server_batch_text_get_export_and_rerank_enrich(void) {
   nbase_close(db);
 }
 
+static void test_http_server_similar_batch_threads_and_2d_enrich(void) {
+  nbase_config_t cfg = nbase_config_default(4U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v1[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  float v2[4] = {0.9f, 0.1f, 0.0f, 0.0f};
+  float v3[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+  float v4[4] = {0.0f, 0.9f, 0.1f, 0.0f};
+  float v5[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+  float v6[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_STATUS(nbase_add(db, 1ULL, v1, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 2ULL, v2, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 3ULL, v3, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 4ULL, v4, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 5ULL, v5, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 6ULL, v6, 4U), NBASE_OK);
+
+  for (uint64_t id = 1ULL; id <= 6ULL; id++) {
+    nbase_meta_field_t m = {"grp", {.type = NBASE_META_STRING, .as = {.str = (id <= 3ULL) ? "a" : "b"}}};
+    ASSERT_STATUS(nbase_set_meta(db, id, &m, 1U), NBASE_OK);
+  }
+  ASSERT_STATUS(nbase_set_text(db, 1ULL, "doc one"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 3ULL, "doc three"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 5ULL, "doc five"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. POST /api/search/similar with threads + 2D enrichment across mixed text/null */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/similar",
+      NULL,
+      "{\"ids\":[1,4,6],\"k\":2,\"threads\":4,\"includeMetadata\":true,\"includeVectors\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"count\":3") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[0.9,0.1,0,0]") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"metadata\":{\"grp\":\"b\"}") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"doc three\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":null") != NULL);
+  free(r.body);
+
+  /* Invalid threads validation on /api/search/similar */
+  ASSERT_TRUE(http_req(
+      port, "POST", "/api/search/similar", NULL, "{\"ids\":[1],\"k\":2,\"threads\":-1}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+  ASSERT_TRUE(http_req(
+      port, "POST", "/api/search/similar", NULL, "{\"ids\":[1],\"k\":2,\"threads\":65}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  /* 2. Ragged 2D enrichment across /api/search/batch */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/batch",
+      NULL,
+      "{\"queries\":[[1,0,0,0],[0,0,0,1]],\"k\":2,\"maxDistance\":0.5,\"includeMetadata\":true,\"includeVectors\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"doc one\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":null") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[0,0,0,1]") != NULL);
+  free(r.body);
+
+  /* 3. Ragged 2D enrichment across /api/search/text/batch (row 0 hit, row 1 empty) */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/text/batch",
+      NULL,
+      "{\"queries\":[\"doc one\",\"missing_token_xyz\"],\"k\":2,\"threads\":2,\"includeMetadata\":true,\"includeVectors\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"queryCount\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"doc one\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[1,0,0,0]") != NULL);
+  ASSERT_TRUE(strstr(r.body, ",[]]}") != NULL);
+  free(r.body);
+
+  /* 4. 2D enrichment across /api/search/hybrid/batch */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/hybrid/batch",
+      NULL,
+      "{\"queries\":[{\"query\":[1,0,0,0],\"text\":\"one\"},{\"query\":[0,0,0,1],\"text\":\"five\"}],\"k\":2,\"threads\":2,\"includeMetadata\":true,\"includeVectors\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"queryCount\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"doc one\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"doc five\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":null") != NULL);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -2526,4 +2636,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_patch_batch_and_text_get_edges);
   RUN_TEST(test_http_server_search_similar_batch_and_enrich);
   RUN_TEST(test_http_server_batch_text_get_export_and_rerank_enrich);
+  RUN_TEST(test_http_server_similar_batch_threads_and_2d_enrich);
 }

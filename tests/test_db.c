@@ -364,7 +364,7 @@ static void test_db_query_lru_cache_and_invalidation(void) {
 }
 
 static void test_db_upsert_batch_and_get_batch(void) {
-  ASSERT_TRUE(strcmp(nbase_version(), "1.19.0") == 0);
+  ASSERT_TRUE(strcmp(nbase_version(), "1.20.0") == 0);
 
   const uint32_t dim = 3U;
   char dir[256];
@@ -906,6 +906,138 @@ static void test_db_get_text_batch_and_concurrent_reads(void) {
   test_rm_rf(dir);
 }
 
+typedef struct db_similar_batch_ctx {
+  const nbase_db_t *db;
+  const uint64_t *ids;
+  uint32_t qcnt;
+  uint32_t k;
+  nbase_search_opts_t opts;
+} db_similar_batch_ctx_t;
+
+static void *db_find_similar_batch_worker(void *arg) {
+  const db_similar_batch_ctx_t *ctx = (const db_similar_batch_ctx_t *)arg;
+  nbase_result_t res[16];
+  uint32_t cnts[4] = {0U, 0U, 0U, 0U};
+  for (int it = 0; it < 6; it++) {
+    if (nbase_find_similar_batch(ctx->db, ctx->ids, ctx->qcnt, ctx->k, &ctx->opts, res, cnts) !=
+        NBASE_OK) {
+      return (void *)1;
+    }
+    for (uint32_t q = 0U; q < ctx->qcnt; q++) {
+      if (cnts[q] != ctx->k) {
+        return (void *)1;
+      }
+      for (uint32_t j = 0U; j < cnts[q]; j++) {
+        size_t idx = (size_t)q * (size_t)ctx->k + (size_t)j;
+        if (res[idx].id == ctx->ids[q] || !isfinite(res[idx].distance)) {
+          return (void *)1;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_db_find_similar_batch_and_tsan(void) {
+  const uint32_t dim = 8U;
+  const uint32_t nvecs = 32U;
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = true;
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.seed = 2020ULL;
+
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float vecs[32U * 8U];
+  uint64_t all_ids[32U];
+  test_fill_vectors(vecs, nvecs, dim, 991ULL);
+  for (uint32_t i = 0U; i < nvecs; i++) {
+    all_ids[i] = (i == 0U) ? 0ULL : (100ULL + (uint64_t)i);
+    ASSERT_STATUS(nbase_add(db, all_ids[i], vecs + (size_t)i * (size_t)dim, dim), NBASE_OK);
+    nbase_meta_field_t mf = {"even", {.type = NBASE_META_INT64, .as = {.i64 = (int64_t)((i % 2U) == 0U ? 1 : 0)}}};
+    ASSERT_STATUS(nbase_set_meta(db, all_ids[i], &mf, 1U), NBASE_OK);
+  }
+
+  const uint64_t qids[4] = {0ULL, 105ULL, 114ULL, 131ULL};
+  const uint32_t qcnt = 4U;
+  const uint32_t k = 5U;
+  nbase_result_t batch_1t[4U * 5U];
+  nbase_result_t batch_4t[4U * 5U];
+  nbase_result_t single_row[5U];
+  uint32_t cnt_1t[4] = {0};
+  uint32_t cnt_4t[4] = {0};
+
+  /* Error & edge cases */
+  const uint64_t missing_qids[2] = {0ULL, 999999ULL};
+  ASSERT_STATUS(nbase_find_similar_batch(db, missing_qids, 2U, k, NULL, batch_1t, cnt_1t), NBASE_ERR_NOT_FOUND);
+  ASSERT_STATUS(nbase_find_similar_batch(db, NULL, 0U, k, NULL, NULL, NULL), NBASE_OK);
+  uint32_t zcnt[2] = {9U, 9U};
+  ASSERT_STATUS(nbase_find_similar_batch(db, qids, 2U, 0U, NULL, NULL, zcnt), NBASE_OK);
+  ASSERT_EQ_U64(zcnt[0], 0ULL);
+  ASSERT_EQ_U64(zcnt[1], 0ULL);
+  ASSERT_STATUS(nbase_find_similar_batch(db, qids, 2U, 3U, NULL, NULL, cnt_1t), NBASE_ERR_INVALID_ARG);
+
+  /* Single-thread vs 4-thread parity & per-ID match */
+  nbase_search_opts_t opts1 = nbase_search_opts_default();
+  opts1.num_threads = 1U;
+  nbase_search_opts_t opts4 = nbase_search_opts_default();
+  opts4.num_threads = 4U;
+  ASSERT_STATUS(nbase_find_similar_batch(db, qids, qcnt, k, &opts1, batch_1t, cnt_1t), NBASE_OK);
+  ASSERT_STATUS(nbase_find_similar_batch(db, qids, qcnt, k, &opts4, batch_4t, cnt_4t), NBASE_OK);
+
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    uint32_t scnt = 0U;
+    ASSERT_STATUS(nbase_find_similar(db, qids[q], k, &opts1, single_row, &scnt), NBASE_OK);
+    ASSERT_EQ_U64(cnt_1t[q], scnt);
+    ASSERT_EQ_U64(cnt_4t[q], scnt);
+    for (uint32_t j = 0U; j < scnt; j++) {
+      size_t idx = (size_t)q * (size_t)k + (size_t)j;
+      ASSERT_TRUE(batch_1t[idx].id != qids[q]);
+      ASSERT_EQ_U64(batch_1t[idx].id, single_row[j].id);
+      ASSERT_EQ_U64(batch_4t[idx].id, single_row[j].id);
+      ASSERT_NEAR(batch_1t[idx].distance, single_row[j].distance, 1e-6, 1e-6);
+      ASSERT_NEAR(batch_4t[idx].distance, single_row[j].distance, 1e-6, 1e-6);
+    }
+  }
+
+  /* Filtered + metric override batch similarity */
+  nbase_meta_cond_t cond = {"even", NBASE_OP_EQ, {.type = NBASE_META_INT64, .as = {.i64 = 1}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  nbase_search_opts_t fopts = nbase_search_opts_default();
+  fopts.meta_filter = &flt;
+  fopts.metric = NBASE_METRIC_COSINE;
+  fopts.use_metric_override = true;
+  fopts.num_threads = 4U;
+  ASSERT_STATUS(nbase_find_similar_batch(db, qids, qcnt, k, &fopts, batch_4t, cnt_4t), NBASE_OK);
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    uint32_t scnt = 0U;
+    ASSERT_STATUS(nbase_find_similar(db, qids[q], k, &fopts, single_row, &scnt), NBASE_OK);
+    ASSERT_EQ_U64(cnt_4t[q], scnt);
+    for (uint32_t j = 0U; j < scnt; j++) {
+      size_t idx = (size_t)q * (size_t)k + (size_t)j;
+      ASSERT_EQ_U64(batch_4t[idx].id, single_row[j].id);
+      ASSERT_NEAR(batch_4t[idx].distance, single_row[j].distance, 1e-6, 1e-6);
+      ASSERT_TRUE(batch_4t[idx].id == 0ULL || ((batch_4t[idx].id - 100ULL) % 2ULL == 0ULL));
+    }
+  }
+
+  /* Concurrent TSan stress test */
+  db_similar_batch_ctx_t wctx = {db, qids, qcnt, 4U, nbase_search_opts_default()};
+  wctx.opts.num_threads = 2U;
+  pthread_t th[4];
+  for (int t = 0; t < 4; t++) {
+    ASSERT_TRUE(pthread_create(&th[t], NULL, db_find_similar_batch_worker, &wctx) == 0);
+  }
+  for (int t = 0; t < 4; t++) {
+    void *ret = NULL;
+    ASSERT_TRUE(pthread_join(th[t], &ret) == 0);
+    ASSERT_TRUE(ret == NULL);
+  }
+
+  nbase_close(db);
+}
+
 void test_db_run(void) {
   RUN_TEST(test_db_upsert_with_and_without_hnsw);
   RUN_TEST(test_db_batch_search);
@@ -918,4 +1050,5 @@ void test_db_run(void) {
   RUN_TEST(test_db_count_filtered_and_unfiltered);
   RUN_TEST(test_binary_formats_fuzz_corruption_and_truncation);
   RUN_TEST(test_db_get_text_batch_and_concurrent_reads);
+  RUN_TEST(test_db_find_similar_batch_and_tsan);
 }
