@@ -2491,6 +2491,53 @@ static void send_similar_results(
   nbase_sbuf_free(&sb);
 }
 
+static bool parse_optional_max_distance_query(
+    const http_conn_t *c,
+    const char *query_str,
+    bool *out_use_radius,
+    float *out_max_distance) {
+  *out_use_radius = false;
+  *out_max_distance = 0.0f;
+  char mdbuf[64];
+  if (!query_param_get(query_str, "maxDistance", mdbuf, sizeof(mdbuf))) {
+    return true;
+  }
+  if (mdbuf[0] == '\0') {
+    send_error_json(c, 400, "maxDistance must be a finite number");
+    return false;
+  }
+  errno = 0;
+  char *endp = NULL;
+  double val = strtod(mdbuf, &endp);
+  if (errno != 0 || endp == mdbuf || *endp != '\0' || !isfinite(val) || !isfinite((float)val)) {
+    send_error_json(c, 400, "maxDistance must be a finite number");
+    return false;
+  }
+  *out_use_radius = true;
+  *out_max_distance = (float)val;
+  return true;
+}
+
+static bool parse_optional_max_distance_json(
+    const http_conn_t *c,
+    const nbase_json_t *root,
+    bool *out_use_radius,
+    float *out_max_distance) {
+  *out_use_radius = false;
+  *out_max_distance = 0.0f;
+  const nbase_json_t *jmd = nbase_json_obj_get(root, "maxDistance");
+  if (jmd == NULL) {
+    return true;
+  }
+  if (jmd->type != NBASE_JSON_NUMBER || !isfinite(jmd->num) || !isfinite((float)jmd->num)) {
+    send_error_json(c, 400, "maxDistance must be a finite number");
+    return false;
+  }
+  *out_use_radius = true;
+  *out_max_distance = (float)jmd->num;
+  return true;
+}
+
 static void handle_get_similar(const http_conn_t *c, uint64_t id, const char *query_str) {
   nbase_http_server_t *srv = c->srv;
   uint32_t k = 10U;
@@ -2502,6 +2549,11 @@ static void handle_get_similar(const http_conn_t *c, uint64_t id, const char *qu
       return;
     }
     k = (uint32_t)kv;
+  }
+  bool use_radius = false;
+  float max_distance = 0.0f;
+  if (!parse_optional_max_distance_query(c, query_str, &use_radius, &max_distance)) {
+    return;
   }
   bool inc_meta = query_param_bool(query_str, "includeMetadata", false);
   bool inc_vec = query_param_bool(query_str, "includeVectors", false);
@@ -2530,6 +2582,13 @@ static void handle_get_similar(const http_conn_t *c, uint64_t id, const char *qu
     send_error_json(c, http_code_for_status(st), nbase_strerror(st));
     return;
   }
+  if (use_radius) {
+    uint32_t keep = 0U;
+    while (keep < got && res[keep].distance <= max_distance) {
+      keep++;
+    }
+    got = keep;
+  }
 
   send_similar_results(c, res, got, db_st.dim, inc_meta, inc_vec, inc_text);
   free(res);
@@ -2551,6 +2610,8 @@ static void handle_post_similar(
   nbase_http_server_t *srv = c->srv;
   nbase_json_t *root = NULL;
   uint32_t k = 10U;
+  bool use_radius = false;
+  float max_distance = 0.0f;
   bool inc_meta = false;
   bool inc_vec = false;
   bool inc_text = false;
@@ -2573,6 +2634,11 @@ static void handle_post_similar(
         return;
       }
       k = (uint32_t)jk->i64;
+    }
+
+    if (!parse_optional_max_distance_json(c, root, &use_radius, &max_distance)) {
+      nbase_json_free(root);
+      return;
     }
 
     if (!parse_include_flags(c, root, &inc_meta, &inc_vec, &inc_text)) {
@@ -2618,6 +2684,13 @@ static void handle_post_similar(
     send_error_json(c, http_code_for_status(st), nbase_strerror(st));
     return;
   }
+  if (use_radius) {
+    uint32_t keep = 0U;
+    while (keep < got && res[keep].distance <= max_distance) {
+      keep++;
+    }
+    got = keep;
+  }
 
   send_similar_results(c, res, got, db_st.dim, inc_meta, inc_vec, inc_text);
   free(res);
@@ -2648,6 +2721,13 @@ static void handle_search_similar_batch(const http_conn_t *c, const char *body, 
       return;
     }
     k = (uint32_t)jk->i64;
+  }
+
+  bool use_radius = false;
+  float max_distance = 0.0f;
+  if (!parse_optional_max_distance_json(c, root, &use_radius, &max_distance)) {
+    nbase_json_free(root);
+    return;
   }
 
   bool inc_meta = false;
@@ -2737,6 +2817,16 @@ static void handle_search_similar_batch(const http_conn_t *c, const char *body, 
     free(res_cnts);
     send_error_json(c, http_code_for_status(st), nbase_strerror(st));
     return;
+  }
+  if (use_radius) {
+    for (uint32_t q = 0U; q < cnt; q++) {
+      const nbase_result_t *row = res_buf + (size_t)q * (size_t)k;
+      uint32_t keep = 0U;
+      while (keep < res_cnts[q] && row[keep].distance <= max_distance) {
+        keep++;
+      }
+      res_cnts[q] = keep;
+    }
   }
 
   nbase_sbuf_t sb;

@@ -245,6 +245,53 @@ static bool hnsw_eval_neighbor_batch(
   return true;
 }
 
+static bool hnsw_greedy_step_neighbors(
+    const nbase_hnsw_t *hnsw,
+    const nbase_store_t *store,
+    const float *query_vec,
+    nbase_metric_t metric,
+    const uint32_t *neighbors,
+    uint32_t neighbor_count,
+    uint32_t *curr,
+    float *curr_dist) {
+  bool improved = false;
+  uint32_t batch_slots[32];
+  float batch_dists[32];
+  uint32_t batch_n = 0U;
+
+  for (uint32_t i = 0U; i < neighbor_count; i++) {
+    uint32_t nb = neighbors[i];
+    if (nb >= hnsw->node_count || hnsw->states[nb] == NBASE_SLOT_EMPTY) {
+      continue;
+    }
+    batch_slots[batch_n++] = nb;
+    if (batch_n == 32U) {
+      nbase_distance_indexed_batch(
+          metric, query_vec, store->vectors, batch_slots, batch_n, store->dim, batch_dists);
+      for (uint32_t b = 0U; b < batch_n; b++) {
+        if (batch_dists[b] < *curr_dist) {
+          *curr_dist = batch_dists[b];
+          *curr = batch_slots[b];
+          improved = true;
+        }
+      }
+      batch_n = 0U;
+    }
+  }
+  if (batch_n > 0U) {
+    nbase_distance_indexed_batch(
+        metric, query_vec, store->vectors, batch_slots, batch_n, store->dim, batch_dists);
+    for (uint32_t b = 0U; b < batch_n; b++) {
+      if (batch_dists[b] < *curr_dist) {
+        *curr_dist = batch_dists[b];
+        *curr = batch_slots[b];
+        improved = true;
+      }
+    }
+  }
+  return improved;
+}
+
 static nbase_status_t search_layer(
     const nbase_hnsw_t *hnsw,
     const nbase_store_t *store,
@@ -521,23 +568,11 @@ nbase_status_t nbase_hnsw_insert(nbase_hnsw_t *hnsw, const nbase_store_t *store,
   float curr_dist = dist_fn(query_vec, hnsw_slot_vec(store, curr), store->dim);
 
   for (int32_t lc = hnsw->max_level; lc > level; lc--) {
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      if (lc <= hnsw->levels[curr] && hnsw->adj[curr] != NULL) {
-        const nbase_adj_t *list = &hnsw->adj[curr][lc];
-        for (uint32_t i = 0U; i < list->len; i++) {
-          uint32_t nb = list->neighbors[i];
-          if (nb >= hnsw->node_count || hnsw->states[nb] == NBASE_SLOT_EMPTY) {
-            continue;
-          }
-          float d = dist_fn(query_vec, hnsw_slot_vec(store, nb), store->dim);
-          if (d < curr_dist) {
-            curr_dist = d;
-            curr = nb;
-            changed = true;
-          }
-        }
+    while (lc <= hnsw->levels[curr] && hnsw->adj[curr] != NULL) {
+      const nbase_adj_t *list = &hnsw->adj[curr][lc];
+      if (!hnsw_greedy_step_neighbors(
+              hnsw, store, query_vec, store->metric, list->neighbors, list->len, &curr, &curr_dist)) {
+        break;
       }
     }
   }
@@ -819,24 +854,13 @@ static void *hnsw_mt_worker(void *arg) {
     for (int32_t lc = max_level; lc > level && st == NBASE_OK; lc--) {
       bool changed = true;
       while (changed) {
-        changed = false;
         uint32_t nb_len = 0U;
         st = copy_neighbors_locked(ctx, curr, lc, &nb_scratch, &nb_scratch_cap, &nb_len);
         if (st != NBASE_OK) {
           break;
         }
-        for (uint32_t i = 0U; i < nb_len; i++) {
-          uint32_t nb = nb_scratch[i];
-          if (nb >= hnsw->node_count || hnsw->states[nb] == NBASE_SLOT_EMPTY) {
-            continue;
-          }
-          float d = ctx->dist_fn(query_vec, hnsw_slot_vec(store, nb), store->dim);
-          if (d < curr_dist) {
-            curr_dist = d;
-            curr = nb;
-            changed = true;
-          }
-        }
+        changed = hnsw_greedy_step_neighbors(
+            hnsw, store, query_vec, store->metric, nb_scratch, nb_len, &curr, &curr_dist);
       }
     }
 
@@ -1119,23 +1143,11 @@ nbase_status_t nbase_hnsw_search(
   float curr_dist = dist_fn(query, hnsw_slot_vec(store, curr), store->dim);
 
   for (int32_t lc = hnsw->max_level; lc > 0; lc--) {
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      if (lc <= hnsw->levels[curr] && hnsw->adj[curr] != NULL) {
-        const nbase_adj_t *list = &hnsw->adj[curr][lc];
-        for (uint32_t i = 0U; i < list->len; i++) {
-          uint32_t nb = list->neighbors[i];
-          if (nb >= hnsw->node_count || hnsw->states[nb] == NBASE_SLOT_EMPTY) {
-            continue;
-          }
-          float d = dist_fn(query, hnsw_slot_vec(store, nb), store->dim);
-          if (d < curr_dist) {
-            curr_dist = d;
-            curr = nb;
-            changed = true;
-          }
-        }
+    while (lc <= hnsw->levels[curr] && hnsw->adj[curr] != NULL) {
+      const nbase_adj_t *list = &hnsw->adj[curr][lc];
+      if (!hnsw_greedy_step_neighbors(
+              hnsw, store, query, metric, list->neighbors, list->len, &curr, &curr_dist)) {
+        break;
       }
     }
   }

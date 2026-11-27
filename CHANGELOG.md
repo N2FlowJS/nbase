@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-11-27
+
+Parallel `search_radius_batch` parity across standalone clustered, IVF-PQ, and LSH indexes, reusable IVF-PQ worker scratch buffers & partial probe selection, SIMD-batched HNSW upper-layer greedy descent, `maxDistance` support across all HTTP `similar` endpoints, and enriched batch CLI `get-batch` / `export`.
+
+### Added & Changed
+- **Standalone Index `search_radius_batch` Parity (`include/nbase.h`, `include/nbase.hpp`, `src/clustered.c`, `src/ivfpq.c`, `src/lsh.c`)**:
+  - Added `nbase_clustered_search_radius_batch`, `nbase_ivfpq_search_radius_batch`, and `nbase_lsh_search_radius_batch` sharing unified internal batch dispatch with `*_search_batch_filtered` and validating `!isfinite(max_distance)` before `query_count == 0U`.
+  - Added matching C++17 RAII methods `ClusteredDatabase::search_radius_batch`, `IvfPq::search_radius_batch`, and `Lsh::search_radius_batch`.
+- **IVF-PQ & HNSW Search Performance (`src/ivfpq.c`, `src/hnsw.c`)**:
+  - Eliminated per-query heap allocations inside IVF-PQ searches via per-worker reusable `ivfpq_search_scratch_t` buffers (`malloc`-free single-query stack fast paths) and $O(\text{eff\_probe} \cdot \text{nlist})$ partial selection when `eff_probe <= 8 && nlist > 8`.
+  - Replaced scalar upper-layer greedy neighbor loops across `nbase_hnsw_insert`, `hnsw_mt_worker`, and `nbase_hnsw_search` with `hnsw_greedy_step_neighbors` backed by `nbase_distance_indexed_batch`.
+- **HTTP/1.1 Server & CLI Parity (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added optional `maxDistance` radius filtering (returning HTTP `400` on non-finite/invalid values) to `GET /api/vectors/:id/similar`, `POST /api/vectors/:id/similar`, and `POST /api/search/similar`.
+  - Added `[--include-vectors|--no-vectors] [--include-meta] [--include-text]` to `nbase-cli get-batch` (via `nbase_get_text_batch` & `nbase_foreach_meta`) and upgraded `nbase-cli export` to 256-ID chunked `nbase_get_batch` + `nbase_get_text_batch` with `[--include-vectors|--no-vectors] [--include-meta|--no-meta] [--include-text|--no-text]`.
+- **Tests (`tests/test_db.c`, `tests/test_clustered.c`, `tests/test_ivfpq.c`, `tests/test_lsh.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.22.0"` and added `test_clustered_search_radius_batch_and_tsan`, `test_lsh_search_radius_batch_and_tsan`, `test_ivfpq_search_radius_batch_and_tsan`, and `test_http_server_similar_max_distance` (`141` total tests).
+
 ## [1.21.0] - 2026-11-27
 
 Batch radius search (`nbase_search_radius_batch` & `nbase_pdb_search_radius_batch`) and standalone `find_similar_batch` parity (`nbase_clustered_find_similar_batch` & `nbase_lsh_find_similar_batch`) across C11 & C++17, AVX2 indexed batch Manhattan/Chebyshev + filtered exact/MMR SIMD batching, `POST /api/search/radius/batch` & `/api/search/batch` `maxDistance`, and CLI `find-similar-batch` + `search-batch --max-distance`.

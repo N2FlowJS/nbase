@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define NBASE_VERSION_MAJOR 1
-#define NBASE_VERSION_MINOR 21
+#define NBASE_VERSION_MINOR 22
 #define NBASE_VERSION_PATCH 0
 #define NBASE_MAX_DIM 65536U
 
@@ -436,6 +436,19 @@ nbase_status_t nbase_clustered_search_radius(
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count);
+nbase_status_t nbase_clustered_search_radius_batch(
+    const nbase_clustered_t *cl,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_clustered_find_similar(
     const nbase_clustered_t *cl,
     uint64_t id,
@@ -533,6 +546,18 @@ nbase_status_t nbase_ivfpq_search_radius(
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count);
+nbase_status_t nbase_ivfpq_search_radius_batch(
+    const nbase_ivfpq_t *index,
+    const float *queries,
+    uint32_t query_count,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_ivfpq_search_batch(
     const nbase_ivfpq_t *index,
     const float *queries,
@@ -643,6 +668,19 @@ nbase_status_t nbase_lsh_search_radius(
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_count);
+nbase_status_t nbase_lsh_search_radius_batch(
+    const nbase_lsh_t *lsh,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t multi_probe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts);
 nbase_status_t nbase_lsh_find_similar(
     const nbase_lsh_t *lsh,
     uint64_t id,

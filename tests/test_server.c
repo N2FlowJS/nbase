@@ -2713,6 +2713,107 @@ static void test_http_server_radius_batch_and_search_batch_max_distance(void) {
   nbase_close(db);
 }
 
+static void test_http_server_similar_max_distance(void) {
+  nbase_config_t cfg = nbase_config_default(4U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.enable_hnsw = false;
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float v1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float v2[4] = {0.2f, 0.0f, 0.0f, 0.0f};
+  float v3[4] = {0.6f, 0.0f, 0.0f, 0.0f};
+  float v4[4] = {2.0f, 0.0f, 0.0f, 0.0f};
+  float v5[4] = {2.1f, 0.0f, 0.0f, 0.0f};
+  ASSERT_STATUS(nbase_add(db, 1ULL, v1, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 2ULL, v2, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 3ULL, v3, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 4ULL, v4, 4U), NBASE_OK);
+  ASSERT_STATUS(nbase_add(db, 5ULL, v5, 4U), NBASE_OK);
+
+  nbase_meta_field_t m2 = {"tag", {.type = NBASE_META_STRING, .as = {.str = "close-two"}}};
+  nbase_meta_field_t m4 = {"tag", {.type = NBASE_META_STRING, .as = {.str = "close-four"}}};
+  ASSERT_STATUS(nbase_set_meta(db, 2ULL, &m2, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_meta(db, 4ULL, &m4, 1U), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 2ULL, "second doc"), NBASE_OK);
+  ASSERT_STATUS(nbase_set_text(db, 4ULL, "fourth doc"), NBASE_OK);
+
+  nbase_http_config_t hcfg = nbase_http_config_default();
+  hcfg.port = 0U;
+  hcfg.num_workers = 2U;
+  nbase_http_server_t *srv = NULL;
+  ASSERT_STATUS(nbase_http_server_start(db, &hcfg, &srv), NBASE_OK);
+  uint16_t port = nbase_http_server_port(srv);
+
+  http_resp_t r;
+  /* 1. GET /api/vectors/:id/similar?maxDistance=... */
+  ASSERT_TRUE(http_req(
+      port,
+      "GET",
+      "/api/vectors/1/similar?k=4&maxDistance=0.3&includeMetadata=true&includeText=true",
+      NULL,
+      NULL,
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":1") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":3") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":4") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"tag\":\"close-two\"") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"second doc\"") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/1/similar?maxDistance=oops", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+  ASSERT_TRUE(http_req(port, "GET", "/api/vectors/1/similar?maxDistance=NaN", NULL, NULL, &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  /* 2. POST /api/vectors/:id/similar with maxDistance */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/vectors/1/similar",
+      NULL,
+      "{\"k\":4,\"maxDistance\":0.3,\"includeVectors\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":3") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"vector\":[0.2,0,0,0]") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(port, "POST", "/api/vectors/1/similar", NULL, "{\"maxDistance\":\"bad\"}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  /* 3. POST /api/search/similar with maxDistance */
+  ASSERT_TRUE(http_req(
+      port,
+      "POST",
+      "/api/search/similar",
+      NULL,
+      "{\"ids\":[1,5],\"k\":4,\"maxDistance\":0.3,\"includeMetadata\":true,\"includeText\":true}",
+      &r));
+  ASSERT_EQ_I64(r.status, 200);
+  ASSERT_TRUE(strstr(r.body, "\"id\":2") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":4") != NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":1") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":3") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"id\":5") == NULL);
+  ASSERT_TRUE(strstr(r.body, "\"text\":\"fourth doc\"") != NULL);
+  free(r.body);
+
+  ASSERT_TRUE(http_req(
+      port, "POST", "/api/search/similar", NULL, "{\"ids\":[1],\"maxDistance\":null}", &r));
+  ASSERT_EQ_I64(r.status, 400);
+  free(r.body);
+
+  nbase_http_server_stop(srv);
+  nbase_close(db);
+}
+
 void test_server_run(void) {
   RUN_TEST(test_http_server_crud_search_auth_and_admin);
   RUN_TEST(test_http_server_concurrent_clients_tsan);
@@ -2737,4 +2838,5 @@ void test_server_run(void) {
   RUN_TEST(test_http_server_batch_text_get_export_and_rerank_enrich);
   RUN_TEST(test_http_server_similar_batch_threads_and_2d_enrich);
   RUN_TEST(test_http_server_radius_batch_and_search_batch_max_distance);
+  RUN_TEST(test_http_server_similar_max_distance);
 }

@@ -1178,6 +1178,8 @@ typedef struct lsh_batch_ctx {
   const float *queries;
   uint32_t query_count;
   uint32_t k;
+  bool use_radius;
+  float max_distance;
   uint32_t multi_probe;
   nbase_filter_fn filter;
   void *filter_ctx;
@@ -1209,8 +1211,8 @@ static void *lsh_search_batch_worker(void *raw) {
         ctx->queries + (size_t)q * (size_t)ctx->lsh->dim,
         ctx->lsh->dim,
         ctx->k,
-        false,
-        0.0f,
+        ctx->use_radius,
+        ctx->max_distance,
         ctx->multi_probe,
         ctx->filter,
         ctx->filter_ctx,
@@ -1230,19 +1232,21 @@ static void *lsh_search_batch_worker(void *raw) {
   return NULL;
 }
 
-nbase_status_t nbase_lsh_search_batch_filtered(
+static nbase_status_t lsh_search_batch_internal(
     const nbase_lsh_t *lsh,
     const float *queries,
     uint32_t query_count,
     uint32_t dim,
-    uint32_t k,
+    uint32_t max_results,
+    bool use_radius,
+    float max_distance,
     uint32_t multi_probe,
     uint32_t num_threads,
     nbase_filter_fn filter,
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_counts) {
-  if (!lsh) {
+  if (!lsh || (use_radius && !isfinite(max_distance))) {
     return NBASE_ERR_INVALID_ARG;
   }
   if (dim != lsh->dim) {
@@ -1251,11 +1255,11 @@ nbase_status_t nbase_lsh_search_batch_filtered(
   if (query_count == 0U) {
     return NBASE_OK;
   }
-  if (!queries || !out_counts || (k > 0U && !out_results)) {
+  if (!queries || !out_counts || (max_results > 0U && !out_results)) {
     return NBASE_ERR_INVALID_ARG;
   }
   if ((size_t)query_count > SIZE_MAX / (size_t)dim ||
-      (k > 0U && (size_t)query_count > SIZE_MAX / (size_t)k)) {
+      (max_results > 0U && (size_t)query_count > SIZE_MAX / (size_t)max_results)) {
     return NBASE_ERR_NOMEM;
   }
   for (uint32_t q = 0U; q < query_count; q++) {
@@ -1264,7 +1268,7 @@ nbase_status_t nbase_lsh_search_batch_filtered(
       return NBASE_ERR_INVALID_VECTOR;
     }
   }
-  if (k == 0U) {
+  if (max_results == 0U) {
     return NBASE_OK;
   }
 
@@ -1283,7 +1287,9 @@ nbase_status_t nbase_lsh_search_batch_filtered(
   ctx.lsh = lsh;
   ctx.queries = queries;
   ctx.query_count = query_count;
-  ctx.k = k;
+  ctx.k = max_results;
+  ctx.use_radius = use_radius;
+  ctx.max_distance = max_distance;
   ctx.multi_probe = multi_probe;
   ctx.filter = filter;
   ctx.filter_ctx = filter_ctx;
@@ -1312,6 +1318,63 @@ nbase_status_t nbase_lsh_search_batch_filtered(
 
   pthread_rwlock_unlock(&mutable_lsh->rwlock);
   return (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
+}
+
+nbase_status_t nbase_lsh_search_batch_filtered(
+    const nbase_lsh_t *lsh,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t multi_probe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return lsh_search_batch_internal(
+      lsh,
+      queries,
+      query_count,
+      dim,
+      k,
+      false,
+      0.0f,
+      multi_probe,
+      num_threads,
+      filter,
+      filter_ctx,
+      out_results,
+      out_counts);
+}
+
+nbase_status_t nbase_lsh_search_radius_batch(
+    const nbase_lsh_t *lsh,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t multi_probe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return lsh_search_batch_internal(
+      lsh,
+      queries,
+      query_count,
+      dim,
+      max_results,
+      true,
+      max_distance,
+      multi_probe,
+      num_threads,
+      filter,
+      filter_ctx,
+      out_results,
+      out_counts);
 }
 
 nbase_status_t nbase_lsh_search_batch(

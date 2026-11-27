@@ -1312,6 +1312,8 @@ typedef struct cl_batch_ctx {
   const float *queries;
   uint32_t query_count;
   uint32_t k;
+  bool use_radius;
+  float max_distance;
   uint32_t nprobe;
   nbase_filter_fn filter;
   void *filter_ctx;
@@ -1337,8 +1339,8 @@ static void *cl_search_batch_worker(void *raw) {
         ctx->queries + (size_t)q * (size_t)ctx->cl->cfg.dim,
         ctx->cl->cfg.dim,
         ctx->k,
-        false,
-        0.0f,
+        ctx->use_radius,
+        ctx->max_distance,
         ctx->nprobe,
         ctx->filter,
         ctx->filter_ctx,
@@ -1354,19 +1356,21 @@ static void *cl_search_batch_worker(void *raw) {
   return NULL;
 }
 
-nbase_status_t nbase_clustered_search_batch_filtered(
+static nbase_status_t cl_search_batch_internal(
     const nbase_clustered_t *cl,
     const float *queries,
     uint32_t query_count,
     uint32_t dim,
-    uint32_t k,
+    uint32_t max_results,
+    bool use_radius,
+    float max_distance,
     uint32_t nprobe,
     uint32_t num_threads,
     nbase_filter_fn filter,
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_counts) {
-  if (!cl) {
+  if (!cl || (use_radius && !isfinite(max_distance))) {
     return NBASE_ERR_INVALID_ARG;
   }
   if (dim != cl->cfg.dim) {
@@ -1375,11 +1379,11 @@ nbase_status_t nbase_clustered_search_batch_filtered(
   if (query_count == 0U) {
     return NBASE_OK;
   }
-  if (!queries || !out_counts || (k > 0U && !out_results)) {
+  if (!queries || !out_counts || (max_results > 0U && !out_results)) {
     return NBASE_ERR_INVALID_ARG;
   }
   if ((size_t)query_count > SIZE_MAX / (size_t)dim ||
-      (k > 0U && (size_t)query_count > SIZE_MAX / (size_t)k)) {
+      (max_results > 0U && (size_t)query_count > SIZE_MAX / (size_t)max_results)) {
     return NBASE_ERR_NOMEM;
   }
   for (uint32_t q = 0U; q < query_count; q++) {
@@ -1388,7 +1392,7 @@ nbase_status_t nbase_clustered_search_batch_filtered(
       return NBASE_ERR_INVALID_VECTOR;
     }
   }
-  if (k == 0U) {
+  if (max_results == 0U) {
     return NBASE_OK;
   }
 
@@ -1407,7 +1411,9 @@ nbase_status_t nbase_clustered_search_batch_filtered(
   ctx.cl = cl;
   ctx.queries = queries;
   ctx.query_count = query_count;
-  ctx.k = k;
+  ctx.k = max_results;
+  ctx.use_radius = use_radius;
+  ctx.max_distance = max_distance;
   ctx.nprobe = nprobe;
   ctx.filter = filter;
   ctx.filter_ctx = filter_ctx;
@@ -1436,6 +1442,63 @@ nbase_status_t nbase_clustered_search_batch_filtered(
 
   pthread_rwlock_unlock(&mcl->rwlock);
   return (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
+}
+
+nbase_status_t nbase_clustered_search_batch_filtered(
+    const nbase_clustered_t *cl,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return cl_search_batch_internal(
+      cl,
+      queries,
+      query_count,
+      dim,
+      k,
+      false,
+      0.0f,
+      nprobe,
+      num_threads,
+      filter,
+      filter_ctx,
+      out_results,
+      out_counts);
+}
+
+nbase_status_t nbase_clustered_search_radius_batch(
+    const nbase_clustered_t *cl,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return cl_search_batch_internal(
+      cl,
+      queries,
+      query_count,
+      dim,
+      max_results,
+      true,
+      max_distance,
+      nprobe,
+      num_threads,
+      filter,
+      filter_ctx,
+      out_results,
+      out_counts);
 }
 
 nbase_status_t nbase_clustered_search_batch(

@@ -24,7 +24,7 @@ static void print_usage(const char *prog) {
       "  patch <dir> <id> [--vector <v0,v1,...>] [--meta <json>] [--text <str>|--clear-text]\n"
       "  patch-batch <dir> <file.ndjson|->\n"
       "  get <dir> <id>\n"
-      "  get-batch <dir> <id1,id2,...>\n"
+      "  get-batch <dir> <id1,id2,...> [--include-vectors|--no-vectors] [--include-meta] [--include-text]\n"
       "  exists <dir> <id1,id2,...>\n"
       "  list <dir> [--offset <N>] [--limit <M>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  count <dir> [--filter <json>]\n"
@@ -60,7 +60,7 @@ static void print_usage(const char *prog) {
       "  compact <dir>\n"
       "  checkpoint <dir>\n"
       "  import <dir> <file.ndjson|-> [--upsert] [--threads <T>]\n"
-      "  export <dir> [file.ndjson|-] [--ids <id1,id2,...>] [--filter <json>]\n",
+      "  export <dir> [file.ndjson|-] [--ids <id1,id2,...>] [--filter <json>] [--include-vectors|--no-vectors] [--include-meta|--no-meta] [--include-text|--no-text]\n",
       prog);
 }
 
@@ -1150,9 +1150,28 @@ int main(int argc, char **argv) {
       strcmp(cmd, "exists") == 0) {
     bool is_get = (strcmp(cmd, "get-batch") == 0);
     bool is_exists = (strcmp(cmd, "exists") == 0);
-    if (argc != 4 || argv[3][0] == '\0') {
+    if ((!is_get && argc != 4) || (is_get && argc < 4) || argv[3][0] == '\0') {
       print_usage(argv[0]);
       return 1;
+    }
+    bool inc_vec = true;
+    bool inc_meta = false;
+    bool inc_text = false;
+    if (is_get) {
+      for (int i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "--include-vectors") == 0) {
+          inc_vec = true;
+        } else if (strcmp(argv[i], "--no-vectors") == 0) {
+          inc_vec = false;
+        } else if (strcmp(argv[i], "--include-meta") == 0) {
+          inc_meta = true;
+        } else if (strcmp(argv[i], "--include-text") == 0) {
+          inc_text = true;
+        } else {
+          fprintf(stderr, "Invalid option: %s\n", argv[i]);
+          return 1;
+        }
+      }
     }
     uint64_t *ids = NULL;
     uint32_t cnt = 0U;
@@ -1190,44 +1209,102 @@ int main(int argc, char **argv) {
     if (is_get) {
       nbase_stats_t s;
       (void)nbase_stats(db, &s);
-      float *vecs = malloc((size_t)cnt * (size_t)s.dim * sizeof(float));
+      float *vecs = inc_vec ? malloc((size_t)cnt * (size_t)s.dim * sizeof(float)) : NULL;
       bool *found = malloc((size_t)cnt * sizeof(bool));
-      if (!vecs || !found) {
+      char **texts = inc_text ? calloc(cnt, sizeof(char *)) : NULL;
+      bool *tfound = inc_text ? calloc(cnt, sizeof(bool)) : NULL;
+      if ((inc_vec && !vecs) || !found || (inc_text && (!texts || !tfound))) {
         free(vecs);
         free(found);
+        free(texts);
+        free(tfound);
         free(ids);
         nbase_close(db);
         return 1;
       }
-      st = nbase_get_batch(db, ids, cnt, s.dim, vecs, found);
-      nbase_close(db);
+      if (inc_vec) {
+        st = nbase_get_batch(db, ids, cnt, s.dim, vecs, found);
+      } else {
+        st = NBASE_OK;
+        for (uint32_t i = 0U; i < cnt; i++) {
+          found[i] = nbase_contains(db, ids[i]);
+        }
+      }
+      if (st == NBASE_OK && inc_text) {
+        st = nbase_get_text_batch(db, ids, cnt, texts, tfound);
+      }
       if (st != NBASE_OK) {
+        if (texts) {
+          nbase_free_texts(texts, cnt);
+        }
+        free(texts);
+        free(tfound);
         free(vecs);
         free(found);
         free(ids);
+        nbase_close(db);
         fprintf(stderr, "get-batch failed: %s\n", nbase_strerror(st));
         return 1;
       }
-      printf("{\"results\":[");
-      for (uint32_t i = 0U; i < cnt; i++) {
-        printf(
+      nbase_sbuf_t sb;
+      nbase_sbuf_init(&sb);
+      nbase_sbuf_append(&sb, "{\"results\":[");
+      for (uint32_t i = 0U; i < cnt && !sb.oom; i++) {
+        nbase_sbuf_appendf(
+            &sb,
             i == 0U ? "{\"id\":%llu,\"found\":%s" : ",{\"id\":%llu,\"found\":%s",
             (unsigned long long)ids[i],
             found[i] ? "true" : "false");
         if (found[i]) {
-          printf(",\"vector\":[");
-          const float *v = vecs + (size_t)i * (size_t)s.dim;
-          for (uint32_t d = 0U; d < s.dim; d++) {
-            printf(d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+          if (inc_vec) {
+            nbase_sbuf_append(&sb, ",\"vector\":[");
+            const float *v = vecs + (size_t)i * (size_t)s.dim;
+            for (uint32_t d = 0U; d < s.dim; d++) {
+              nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
+            }
+            nbase_sbuf_append_n(&sb, "]", 1U);
           }
-          printf("]");
+          if (inc_meta) {
+            cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
+            nbase_status_t mst = nbase_foreach_meta(db, ids[i], cli_meta_cb, &mctx);
+            if (mst != NBASE_OK) {
+              st = mst;
+              break;
+            }
+            if (mctx.first) {
+              nbase_sbuf_append(&sb, ",\"metadata\":{}");
+            } else {
+              nbase_sbuf_append_n(&sb, "}", 1U);
+            }
+          }
+          if (inc_text) {
+            if (tfound[i] && texts[i] != NULL) {
+              nbase_sbuf_append(&sb, ",\"text\":");
+              nbase_sbuf_append_json_str(&sb, texts[i]);
+            } else {
+              nbase_sbuf_append(&sb, ",\"text\":null");
+            }
+          }
         }
-        printf("}");
+        nbase_sbuf_append_n(&sb, "}", 1U);
       }
-      printf("]}\n");
+      nbase_sbuf_append(&sb, "]}\n");
+      if (texts) {
+        nbase_free_texts(texts, cnt);
+      }
+      free(texts);
+      free(tfound);
       free(vecs);
       free(found);
       free(ids);
+      nbase_close(db);
+      if (st != NBASE_OK || sb.oom || !sb.data) {
+        nbase_sbuf_free(&sb);
+        fprintf(stderr, "get-batch failed: %s\n", nbase_strerror(st != NBASE_OK ? st : NBASE_ERR_NOMEM));
+        return 1;
+      }
+      fwrite(sb.data, 1U, sb.len, stdout);
+      nbase_sbuf_free(&sb);
       return 0;
     }
 
@@ -4300,11 +4377,26 @@ int main(int argc, char **argv) {
     const char *out_path = NULL;
     const char *flt_json = NULL;
     const char *ids_csv = NULL;
+    bool inc_vec = true;
+    bool inc_meta = true;
+    bool inc_text = true;
     for (int i = 3; i < argc; i++) {
       if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
         flt_json = argv[++i];
       } else if (strcmp(argv[i], "--ids") == 0 && i + 1 < argc) {
         ids_csv = argv[++i];
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vec = true;
+      } else if (strcmp(argv[i], "--no-vectors") == 0) {
+        inc_vec = false;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--no-meta") == 0) {
+        inc_meta = false;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
+      } else if (strcmp(argv[i], "--no-text") == 0) {
+        inc_text = false;
       } else if ((argv[i][0] != '-' || strcmp(argv[i], "-") == 0) && !out_path) {
         out_path = argv[i];
       } else {
@@ -4357,16 +4449,18 @@ int main(int argc, char **argv) {
 
     bool ok = true;
     if (s.active_vectors > 0ULL) {
+      const uint32_t chunk_cap = 256U;
       uint32_t limit = (s.active_vectors > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)s.active_vectors;
       uint64_t *ids = NULL;
       uint32_t got = 0U;
-      float *vec = malloc((size_t)s.dim * sizeof(float));
-      char *txt_buf = NULL;
-      size_t txt_cap = 0U;
+      float *vecs = inc_vec ? malloc((size_t)chunk_cap * (size_t)s.dim * sizeof(float)) : NULL;
+      bool *vfound = inc_vec ? calloc(chunk_cap, sizeof(bool)) : NULL;
+      char **texts = inc_text ? calloc(chunk_cap, sizeof(char *)) : NULL;
+      bool *tfound = inc_text ? calloc(chunk_cap, sizeof(bool)) : NULL;
       nbase_sbuf_t sb;
       nbase_sbuf_init(&sb);
 
-      if (!vec) {
+      if ((inc_vec && (!vecs || !vfound)) || (inc_text && (!texts || !tfound))) {
         ok = false;
       } else if (req_ids != NULL && flt.count == 0U) {
         ids = req_ids;
@@ -4411,51 +4505,67 @@ int main(int argc, char **argv) {
         }
       }
       if (ok && ids != NULL) {
-        for (uint32_t i = 0U; i < got && ok; i++) {
-          st = nbase_get(db, ids[i], vec, s.dim);
-          if (st != NBASE_OK) {
-            ok = false;
-            break;
+        for (uint32_t base = 0U; base < got && ok; base += chunk_cap) {
+          uint32_t chunk = (got - base > chunk_cap) ? chunk_cap : (got - base);
+          if (inc_vec) {
+            st = nbase_get_batch(db, ids + base, chunk, s.dim, vecs, vfound);
+            if (st != NBASE_OK) {
+              ok = false;
+              break;
+            }
           }
-          sb.len = 0U;
-          nbase_sbuf_appendf(&sb, "{\"id\":%llu,\"vector\":[", (unsigned long long)ids[i]);
-          for (uint32_t d = 0U; d < s.dim; d++) {
-            nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)vec[d]);
+          if (inc_text) {
+            memset(texts, 0, (size_t)chunk * sizeof(char *));
+            memset(tfound, 0, (size_t)chunk * sizeof(bool));
+            st = nbase_get_text_batch(db, ids + base, chunk, texts, tfound);
+            if (st != NBASE_OK) {
+              ok = false;
+              break;
+            }
           }
-          nbase_sbuf_append_n(&sb, "]", 1U);
-
-          cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
-          (void)nbase_foreach_meta(db, ids[i], cli_meta_cb, &mctx);
-          if (!mctx.first) {
-            nbase_sbuf_append_n(&sb, "}", 1U);
-          }
-
-          size_t tlen = 0U;
-          if (nbase_get_text(db, ids[i], NULL, 0U, &tlen) == NBASE_OK) {
-            if (tlen + 1U > txt_cap) {
-              char *nb = realloc(txt_buf, tlen + 1U);
-              if (!nb) {
-                ok = false;
-                break;
+          for (uint32_t j = 0U; j < chunk && ok; j++) {
+            uint64_t eid = ids[base + j];
+            if (inc_vec && !vfound[j]) {
+              ok = false;
+              break;
+            }
+            sb.len = 0U;
+            nbase_sbuf_appendf(&sb, "{\"id\":%llu", (unsigned long long)eid);
+            if (inc_vec) {
+              nbase_sbuf_append(&sb, ",\"vector\":[");
+              const float *v = vecs + (size_t)j * (size_t)s.dim;
+              for (uint32_t d = 0U; d < s.dim; d++) {
+                nbase_sbuf_appendf(&sb, d == 0U ? "%.7g" : ",%.7g", (double)v[d]);
               }
-              txt_buf = nb;
-              txt_cap = tlen + 1U;
+              nbase_sbuf_append_n(&sb, "]", 1U);
             }
-            if (nbase_get_text(db, ids[i], txt_buf, txt_cap, &tlen) == NBASE_OK) {
+            if (inc_meta) {
+              cli_meta_ctx_t mctx = {&sb, true, ",\"metadata\":{"};
+              (void)nbase_foreach_meta(db, eid, cli_meta_cb, &mctx);
+              if (!mctx.first) {
+                nbase_sbuf_append_n(&sb, "}", 1U);
+              }
+            }
+            if (inc_text && tfound[j] && texts[j] != NULL) {
               nbase_sbuf_append(&sb, ",\"text\":");
-              nbase_sbuf_append_json_str(&sb, txt_buf);
+              nbase_sbuf_append_json_str(&sb, texts[j]);
+            }
+            nbase_sbuf_append(&sb, "}\n");
+            if (sb.oom || !sb.data || fwrite(sb.data, 1U, sb.len, out) != sb.len) {
+              ok = false;
+              break;
             }
           }
-          nbase_sbuf_append(&sb, "}\n");
-          if (sb.oom || !sb.data || fwrite(sb.data, 1U, sb.len, out) != sb.len) {
-            ok = false;
-            break;
+          if (inc_text) {
+            nbase_free_texts(texts, chunk);
           }
         }
       }
       nbase_sbuf_free(&sb);
-      free(txt_buf);
-      free(vec);
+      free(texts);
+      free(tfound);
+      free(vecs);
+      free(vfound);
       free(ids);
     }
 

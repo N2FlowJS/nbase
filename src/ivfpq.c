@@ -918,6 +918,69 @@ nbase_status_t nbase_ivfpq_compact(nbase_ivfpq_t *index) {
   return st;
 }
 
+typedef struct ivfpq_search_scratch {
+  float *q_buf;
+  float *q_res;
+  float *coarse_dists;
+  probe_cand_t *probes;
+  float *lut;
+  nbase_result_t *heap_buf;
+  float *list_dists;
+  uint32_t max_list_len;
+} ivfpq_search_scratch_t;
+
+static void ivfpq_search_scratch_free(ivfpq_search_scratch_t *s) {
+  if (!s) {
+    return;
+  }
+  free(s->q_buf);
+  free(s->q_res);
+  free(s->coarse_dists);
+  free(s->probes);
+  free(s->lut);
+  free(s->heap_buf);
+  free(s->list_dists);
+  memset(s, 0, sizeof(*s));
+}
+
+static bool ivfpq_search_scratch_prepare(
+    ivfpq_search_scratch_t *s,
+    const nbase_ivfpq_t *index,
+    uint32_t k,
+    bool need_list_dists) {
+  memset(s, 0, sizeof(*s));
+  if (k == 0U || index->count == 0ULL) {
+    return true;
+  }
+  uint32_t max_list_len = 0U;
+  if (need_list_dists) {
+    for (uint32_t c = 0U; c < index->nlist; c++) {
+      if (index->lists[c].len > max_list_len) {
+        max_list_len = index->lists[c].len;
+      }
+    }
+  }
+  s->q_buf = malloc((size_t)index->dim * sizeof(float));
+  s->q_res = malloc((size_t)index->dim * sizeof(float));
+  s->coarse_dists = malloc((size_t)index->nlist * sizeof(float));
+  s->probes = malloc((size_t)index->nlist * sizeof(probe_cand_t));
+  s->lut = malloc((size_t)index->num_subvectors * (size_t)index->num_centroids * sizeof(float));
+  s->heap_buf = malloc((size_t)k * sizeof(nbase_result_t));
+  if (need_list_dists && max_list_len > 0U) {
+    s->list_dists = malloc((size_t)max_list_len * sizeof(float));
+    if (!s->list_dists) {
+      ivfpq_search_scratch_free(s);
+      return false;
+    }
+  }
+  s->max_list_len = max_list_len;
+  if (!s->q_buf || !s->q_res || !s->coarse_dists || !s->probes || !s->lut || !s->heap_buf) {
+    ivfpq_search_scratch_free(s);
+    return false;
+  }
+  return true;
+}
+
 static nbase_status_t ivfpq_search_core_unlocked(
     const nbase_ivfpq_t *index,
     const float *query,
@@ -927,27 +990,64 @@ static nbase_status_t ivfpq_search_core_unlocked(
     uint32_t nprobe,
     nbase_filter_fn filter,
     void *filter_ctx,
+    ivfpq_search_scratch_t *scratch,
     nbase_result_t *out_results,
     uint32_t *out_count) {
+  *out_count = 0U;
   if (k == 0U || index->count == 0ULL) {
     return NBASE_OK;
   }
 
   uint32_t eff_probe = (nprobe == 0U) ? 1U : ((nprobe > index->nlist) ? index->nlist : nprobe);
+  size_t lut_elems = (size_t)index->num_subvectors * (size_t)index->num_centroids;
 
-  float *q_buf = malloc((size_t)index->dim * sizeof(float));
-  float *q_res = malloc((size_t)index->dim * sizeof(float));
-  float *coarse_dists = malloc((size_t)index->nlist * sizeof(float));
-  probe_cand_t *probes = malloc((size_t)index->nlist * sizeof(probe_cand_t));
-  float *lut = malloc((size_t)index->num_subvectors * (size_t)index->num_centroids * sizeof(float));
-  nbase_result_t *heap_buf = malloc((size_t)k * sizeof(nbase_result_t));
+  float stack_q_buf[256];
+  float stack_q_res[256];
+  float stack_coarse_dists[256];
+  probe_cand_t stack_probes[256];
+  float stack_lut[2048];
+  nbase_result_t stack_heap_buf[64];
+  float stack_list_dists[512];
+
+  bool using_scratch = (scratch != NULL);
+  float *q_buf = using_scratch
+                     ? scratch->q_buf
+                     : ((index->dim <= 256U) ? stack_q_buf : malloc((size_t)index->dim * sizeof(float)));
+  float *q_res = using_scratch
+                     ? scratch->q_res
+                     : ((index->dim <= 256U) ? stack_q_res : malloc((size_t)index->dim * sizeof(float)));
+  float *coarse_dists = using_scratch
+                            ? scratch->coarse_dists
+                            : ((index->nlist <= 256U) ? stack_coarse_dists
+                                                      : malloc((size_t)index->nlist * sizeof(float)));
+  probe_cand_t *probes = using_scratch
+                             ? scratch->probes
+                             : ((index->nlist <= 256U) ? stack_probes
+                                                       : malloc((size_t)index->nlist * sizeof(probe_cand_t)));
+  float *lut = using_scratch
+                   ? scratch->lut
+                   : ((lut_elems <= 2048U) ? stack_lut : malloc(lut_elems * sizeof(float)));
+  nbase_result_t *heap_buf = using_scratch
+                                 ? scratch->heap_buf
+                                 : ((k <= 64U) ? stack_heap_buf : malloc((size_t)k * sizeof(nbase_result_t)));
+
   if (!q_buf || !q_res || !coarse_dists || !probes || !lut || !heap_buf) {
-    free(q_buf);
-    free(q_res);
-    free(coarse_dists);
-    free(probes);
-    free(lut);
-    free(heap_buf);
+    if (!using_scratch) {
+      if (index->dim > 256U) {
+        free(q_buf);
+        free(q_res);
+      }
+      if (index->nlist > 256U) {
+        free(coarse_dists);
+        free(probes);
+      }
+      if (lut_elems > 2048U) {
+        free(lut);
+      }
+      if (k > 64U) {
+        free(heap_buf);
+      }
+    }
     return NBASE_ERR_NOMEM;
   }
 
@@ -963,21 +1063,49 @@ static nbase_status_t ivfpq_search_core_unlocked(
   nbase_status_t st = nbase_distance_batch(
       coarse_metric, q_buf, index->coarse_centroids, index->nlist, index->dim, coarse_dists);
   if (st != NBASE_OK) {
-    free(q_buf);
-    free(q_res);
-    free(coarse_dists);
-    free(probes);
-    free(lut);
-    free(heap_buf);
+    if (!using_scratch) {
+      if (index->dim > 256U) {
+        free(q_buf);
+        free(q_res);
+      }
+      if (index->nlist > 256U) {
+        free(coarse_dists);
+        free(probes);
+      }
+      if (lut_elems > 2048U) {
+        free(lut);
+      }
+      if (k > 64U) {
+        free(heap_buf);
+      }
+    }
     return st;
   }
   for (uint32_t c = 0U; c < index->nlist; c++) {
     probes[c].list_id = c;
     probes[c].dist = coarse_dists[c];
   }
-  qsort(probes, index->nlist, sizeof(probe_cand_t), cmp_probe_asc);
+  if (eff_probe <= 8U && index->nlist > 8U) {
+    for (uint32_t p = 0U; p < eff_probe; p++) {
+      uint32_t best = p;
+      for (uint32_t j = p + 1U; j < index->nlist; j++) {
+        if (probes[j].dist < probes[best].dist ||
+            (probes[j].dist == probes[best].dist && probes[j].list_id < probes[best].list_id)) {
+          best = j;
+        }
+      }
+      if (best != p) {
+        probe_cand_t tmp = probes[p];
+        probes[p] = probes[best];
+        probes[best] = tmp;
+      }
+    }
+  } else {
+    qsort(probes, index->nlist, sizeof(probe_cand_t), cmp_probe_asc);
+  }
 
   float *list_dists = NULL;
+  bool alloc_list_dists = false;
   if (filter == NULL) {
     uint32_t max_list_len = 0U;
     for (uint32_t p = 0U; p < eff_probe; p++) {
@@ -987,14 +1115,36 @@ static nbase_status_t ivfpq_search_core_unlocked(
       }
     }
     if (max_list_len > 0U) {
-      list_dists = malloc((size_t)max_list_len * sizeof(float));
+      if (using_scratch) {
+        if (scratch->list_dists && max_list_len <= scratch->max_list_len) {
+          list_dists = scratch->list_dists;
+        } else {
+          list_dists = malloc((size_t)max_list_len * sizeof(float));
+          alloc_list_dists = true;
+        }
+      } else if (max_list_len <= 512U) {
+        list_dists = stack_list_dists;
+      } else {
+        list_dists = malloc((size_t)max_list_len * sizeof(float));
+        alloc_list_dists = true;
+      }
       if (!list_dists) {
-        free(q_buf);
-        free(q_res);
-        free(coarse_dists);
-        free(probes);
-        free(lut);
-        free(heap_buf);
+        if (!using_scratch) {
+          if (index->dim > 256U) {
+            free(q_buf);
+            free(q_res);
+          }
+          if (index->nlist > 256U) {
+            free(coarse_dists);
+            free(probes);
+          }
+          if (lut_elems > 2048U) {
+            free(lut);
+          }
+          if (k > 64U) {
+            free(heap_buf);
+          }
+        }
         return NBASE_ERR_NOMEM;
       }
     }
@@ -1077,13 +1227,25 @@ static nbase_status_t ivfpq_search_core_unlocked(
     *out_count = heap.len;
   }
 
-  free(list_dists);
-  free(q_buf);
-  free(q_res);
-  free(coarse_dists);
-  free(probes);
-  free(lut);
-  free(heap_buf);
+  if (alloc_list_dists) {
+    free(list_dists);
+  }
+  if (!using_scratch) {
+    if (index->dim > 256U) {
+      free(q_buf);
+      free(q_res);
+    }
+    if (index->nlist > 256U) {
+      free(coarse_dists);
+      free(probes);
+    }
+    if (lut_elems > 2048U) {
+      free(lut);
+    }
+    if (k > 64U) {
+      free(heap_buf);
+    }
+  }
   return st;
 }
 
@@ -1106,7 +1268,7 @@ nbase_status_t nbase_ivfpq_search_filtered(
   nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
   pthread_rwlock_rdlock(&mutable_idx->rwlock);
   nbase_status_t st = ivfpq_search_core_unlocked(
-      index, query, k, false, 0.0f, nprobe, filter, filter_ctx, out_results, out_count);
+      index, query, k, false, 0.0f, nprobe, filter, filter_ctx, NULL, out_results, out_count);
   pthread_rwlock_unlock(&mutable_idx->rwlock);
   return st;
 }
@@ -1132,7 +1294,7 @@ nbase_status_t nbase_ivfpq_search_radius(
   nbase_ivfpq_t *mutable_idx = (nbase_ivfpq_t *)(uintptr_t)index;
   pthread_rwlock_rdlock(&mutable_idx->rwlock);
   nbase_status_t st = ivfpq_search_core_unlocked(
-      index, query, max_results, true, max_distance, nprobe, filter, filter_ctx, out_results, out_count);
+      index, query, max_results, true, max_distance, nprobe, filter, filter_ctx, NULL, out_results, out_count);
   pthread_rwlock_unlock(&mutable_idx->rwlock);
   return st;
 }
@@ -1152,6 +1314,8 @@ typedef struct ivfpq_batch_ctx {
   const float *queries;
   uint32_t query_count;
   uint32_t k;
+  bool use_radius;
+  float max_distance;
   uint32_t nprobe;
   nbase_filter_fn filter;
   void *filter_ctx;
@@ -1163,6 +1327,13 @@ typedef struct ivfpq_batch_ctx {
 
 static void *ivfpq_search_batch_worker(void *raw) {
   ivfpq_batch_ctx_t *ctx = (ivfpq_batch_ctx_t *)raw;
+  ivfpq_search_scratch_t scratch;
+  if (!ivfpq_search_scratch_prepare(&scratch, ctx->index, ctx->k, ctx->filter == NULL)) {
+    int expected = (int)NBASE_OK;
+    (void)atomic_compare_exchange_strong(&ctx->first_err, &expected, (int)NBASE_ERR_NOMEM);
+    return NULL;
+  }
+
   while (true) {
     if (atomic_load_explicit(&ctx->first_err, memory_order_acquire) != (int)NBASE_OK) {
       break;
@@ -1176,11 +1347,12 @@ static void *ivfpq_search_batch_worker(void *raw) {
         ctx->index,
         ctx->queries + (size_t)q * (size_t)ctx->index->dim,
         ctx->k,
-        false,
-        0.0f,
+        ctx->use_radius,
+        ctx->max_distance,
         ctx->nprobe,
         ctx->filter,
         ctx->filter_ctx,
+        &scratch,
         ctx->out_results + (size_t)q * (size_t)ctx->k,
         &got);
     ctx->out_counts[q] = got;
@@ -1190,31 +1362,35 @@ static void *ivfpq_search_batch_worker(void *raw) {
       break;
     }
   }
+
+  ivfpq_search_scratch_free(&scratch);
   return NULL;
 }
 
-nbase_status_t nbase_ivfpq_search_batch_filtered(
+static nbase_status_t ivfpq_search_batch_internal(
     const nbase_ivfpq_t *index,
     const float *queries,
     uint32_t query_count,
-    uint32_t k,
+    uint32_t max_results,
+    bool use_radius,
+    float max_distance,
     uint32_t nprobe,
     uint32_t num_threads,
     nbase_filter_fn filter,
     void *filter_ctx,
     nbase_result_t *out_results,
     uint32_t *out_counts) {
-  if (!index) {
+  if (!index || (use_radius && !isfinite(max_distance))) {
     return NBASE_ERR_INVALID_ARG;
   }
   if (query_count == 0U) {
     return NBASE_OK;
   }
-  if (!queries || !out_counts || (k > 0U && !out_results)) {
+  if (!queries || !out_counts || (max_results > 0U && !out_results)) {
     return NBASE_ERR_INVALID_ARG;
   }
   if ((size_t)query_count > SIZE_MAX / (size_t)index->dim ||
-      (k > 0U && (size_t)query_count > SIZE_MAX / (size_t)k)) {
+      (max_results > 0U && (size_t)query_count > SIZE_MAX / (size_t)max_results)) {
     return NBASE_ERR_NOMEM;
   }
   for (uint32_t q = 0U; q < query_count; q++) {
@@ -1223,7 +1399,7 @@ nbase_status_t nbase_ivfpq_search_batch_filtered(
       return NBASE_ERR_INVALID_VECTOR;
     }
   }
-  if (k == 0U) {
+  if (max_results == 0U) {
     return NBASE_OK;
   }
 
@@ -1242,7 +1418,9 @@ nbase_status_t nbase_ivfpq_search_batch_filtered(
   ctx.index = index;
   ctx.queries = queries;
   ctx.query_count = query_count;
-  ctx.k = k;
+  ctx.k = max_results;
+  ctx.use_radius = use_radius;
+  ctx.max_distance = max_distance;
   ctx.nprobe = nprobe;
   ctx.filter = filter;
   ctx.filter_ctx = filter_ctx;
@@ -1266,6 +1444,48 @@ nbase_status_t nbase_ivfpq_search_batch_filtered(
   nbase_status_t st = (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
   pthread_rwlock_unlock(&mutable_idx->rwlock);
   return st;
+}
+
+nbase_status_t nbase_ivfpq_search_batch_filtered(
+    const nbase_ivfpq_t *index,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return ivfpq_search_batch_internal(
+      index, queries, query_count, k, false, 0.0f, nprobe, num_threads, filter, filter_ctx, out_results, out_counts);
+}
+
+nbase_status_t nbase_ivfpq_search_radius_batch(
+    const nbase_ivfpq_t *index,
+    const float *queries,
+    uint32_t query_count,
+    float max_distance,
+    uint32_t max_results,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  return ivfpq_search_batch_internal(
+      index,
+      queries,
+      query_count,
+      max_results,
+      true,
+      max_distance,
+      nprobe,
+      num_threads,
+      filter,
+      filter_ctx,
+      out_results,
+      out_counts);
 }
 
 nbase_status_t nbase_ivfpq_search_batch(

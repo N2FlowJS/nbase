@@ -875,6 +875,158 @@ static void test_ivfpq_search_batch_filtered_and_tsan(void) {
   free(vecs);
 }
 
+typedef struct ivfpq_rad_batch_tsan_ctx {
+  nbase_ivfpq_t *idx;
+  const float *qs;
+  float max_distance;
+  atomic_bool stop;
+  atomic_int errors;
+} ivfpq_rad_batch_tsan_ctx_t;
+
+static void *ivfpq_rad_batch_reader_fn(void *raw) {
+  ivfpq_rad_batch_tsan_ctx_t *ctx = (ivfpq_rad_batch_tsan_ctx_t *)raw;
+  nbase_result_t res[20];
+  uint32_t cnts[4];
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    if (nbase_ivfpq_search_radius_batch(
+            ctx->idx, ctx->qs, 4U, ctx->max_distance, 5U, 4U, 2U, ivfpq_even_filter, NULL, res, cnts) !=
+        NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t q = 0U; q < 4U; q++) {
+      for (uint32_t i = 0U; i < cnts[q]; i++) {
+        nbase_result_t item = res[(size_t)q * 5U + i];
+        if ((item.id % 2ULL) != 0ULL || item.distance > ctx->max_distance) {
+          atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+          return NULL;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_ivfpq_search_radius_batch_and_tsan(void) {
+  const uint32_t dim = 32U;
+  const uint32_t clusters = 10U;
+  const uint32_t per_cluster = 16U;
+  const uint32_t n = clusters * per_cluster;
+  const uint32_t nq = 6U;
+  const uint32_t max_res = 6U;
+
+  float *vecs = malloc((size_t)n * (size_t)dim * sizeof(float));
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  float *qs = malloc((size_t)nq * (size_t)dim * sizeof(float));
+  nbase_result_t *bres1 = malloc((size_t)nq * max_res * sizeof(nbase_result_t));
+  nbase_result_t *bres4 = malloc((size_t)nq * max_res * sizeof(nbase_result_t));
+  uint32_t *bcnts1 = malloc((size_t)nq * sizeof(uint32_t));
+  uint32_t *bcnts4 = malloc((size_t)nq * sizeof(uint32_t));
+  ASSERT_TRUE(vecs && ids && qs && bres1 && bres4 && bcnts1 && bcnts4);
+
+  make_clustered_vectors(vecs, clusters, per_cluster, dim, 9601ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 200ULL + (uint64_t)i;
+  }
+  for (uint32_t q = 0U; q < nq; q++) {
+    memcpy(qs + (size_t)q * dim, vecs + (size_t)(q * per_cluster) * dim, (size_t)dim * sizeof(float));
+  }
+
+  nbase_ivfpq_config_t cfg = nbase_ivfpq_config_default(dim, clusters, 4U);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.num_centroids = 32U;
+  cfg.max_iters = 8U;
+  cfg.seed = 9602ULL;
+
+  nbase_ivfpq_t *idx = NULL;
+  ASSERT_STATUS(nbase_ivfpq_train(&cfg, vecs, n, &idx), NBASE_OK);
+  ASSERT_STATUS(nbase_ivfpq_add(idx, ids, vecs, n), NBASE_OK);
+
+  ASSERT_STATUS(
+      nbase_ivfpq_search_radius_batch(NULL, qs, nq, 2.0f, max_res, 4U, 2U, NULL, NULL, bres1, bcnts1),
+      NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(
+      nbase_ivfpq_search_radius_batch(idx, NULL, 0U, NAN, max_res, 4U, 2U, NULL, NULL, NULL, NULL),
+      NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(
+      nbase_ivfpq_search_radius_batch(idx, NULL, 0U, INFINITY, max_res, 4U, 2U, NULL, NULL, NULL, NULL),
+      NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(
+      nbase_ivfpq_search_radius_batch(idx, NULL, 0U, 2.0f, max_res, 4U, 2U, NULL, NULL, NULL, NULL),
+      NBASE_OK);
+  uint32_t zc[2] = {5U, 5U};
+  ASSERT_STATUS(
+      nbase_ivfpq_search_radius_batch(idx, qs, 2U, 2.0f, 0U, 4U, 2U, NULL, NULL, NULL, zc),
+      NBASE_OK);
+  ASSERT_EQ_U64(zc[0], 0ULL);
+  ASSERT_EQ_U64(zc[1], 0ULL);
+
+  float bad_q[32] = {0};
+  bad_q[0] = NAN;
+  ASSERT_STATUS(
+      nbase_ivfpq_search_radius_batch(idx, bad_q, 1U, 2.0f, max_res, 4U, 1U, NULL, NULL, bres1, bcnts1),
+      NBASE_ERR_INVALID_VECTOR);
+
+  const float max_dist = 2.5f;
+  const uint32_t nprobes[2] = {4U, 10U};
+  for (size_t pi = 0; pi < 2; pi++) {
+    uint32_t np = nprobes[pi];
+    for (int flt_mode = 0; flt_mode < 2; flt_mode++) {
+      nbase_filter_fn fn = (flt_mode == 1) ? ivfpq_even_filter : NULL;
+      ASSERT_STATUS(
+          nbase_ivfpq_search_radius_batch(idx, qs, nq, max_dist, max_res, np, 1U, fn, NULL, bres1, bcnts1),
+          NBASE_OK);
+      ASSERT_STATUS(
+          nbase_ivfpq_search_radius_batch(idx, qs, nq, max_dist, max_res, np, 4U, fn, NULL, bres4, bcnts4),
+          NBASE_OK);
+      for (uint32_t q = 0U; q < nq; q++) {
+        nbase_result_t sres[6];
+        uint32_t scnt = 0U;
+        ASSERT_STATUS(
+            nbase_ivfpq_search_radius(
+                idx, qs + (size_t)q * dim, max_dist, max_res, np, fn, NULL, sres, &scnt),
+            NBASE_OK);
+        ASSERT_EQ_U64(bcnts1[q], scnt);
+        ASSERT_EQ_U64(bcnts4[q], scnt);
+        for (uint32_t i = 0U; i < scnt; i++) {
+          nbase_result_t r1 = bres1[(size_t)q * max_res + i];
+          nbase_result_t r4 = bres4[(size_t)q * max_res + i];
+          ASSERT_EQ_U64(r1.id, sres[i].id);
+          ASSERT_EQ_U64(r4.id, sres[i].id);
+          ASSERT_TRUE(r1.distance <= max_dist);
+          ASSERT_TRUE(fabsf(r1.distance - sres[i].distance) < 1e-6f);
+          ASSERT_TRUE(fabsf(r4.distance - sres[i].distance) < 1e-6f);
+        }
+      }
+    }
+  }
+
+  ivfpq_rad_batch_tsan_ctx_t ctx = {idx, qs, max_dist, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, ivfpq_rad_batch_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, ivfpq_rad_batch_reader_fn, &ctx) == 0);
+  for (uint32_t step = 0U; step < 12U; step++) {
+    uint64_t tid = 4200ULL + (step % 4ULL);
+    ASSERT_STATUS(nbase_ivfpq_upsert(idx, tid, vecs + (size_t)step * dim, dim), NBASE_OK);
+    if ((step % 3U) == 2U) {
+      ASSERT_STATUS(nbase_ivfpq_delete(idx, tid), NBASE_OK);
+    }
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  nbase_ivfpq_destroy(idx);
+  free(bcnts4);
+  free(bcnts1);
+  free(bres4);
+  free(bres1);
+  free(qs);
+  free(ids);
+  free(vecs);
+}
+
 void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_train_add_search_euclidean_and_save_load);
   RUN_TEST(test_ivfpq_cosine_and_inner_product);
@@ -885,4 +1037,5 @@ void test_ivfpq_run(void) {
   RUN_TEST(test_ivfpq_delete_batch_and_tsan);
   RUN_TEST(test_ivfpq_upsert_batch_and_search_radius_tsan);
   RUN_TEST(test_ivfpq_search_batch_filtered_and_tsan);
+  RUN_TEST(test_ivfpq_search_radius_batch_and_tsan);
 }

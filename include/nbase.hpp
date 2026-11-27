@@ -1530,6 +1530,60 @@ class Lsh {
     return res;
   }
 
+  std::vector<std::vector<nbase_result_t>> search_radius_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      float max_distance,
+      uint32_t max_results,
+      uint32_t multi_probe = 2U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr,
+      uint32_t num_threads = 0U,
+      std::vector<uint32_t> *out_counts = nullptr) const {
+    if (dim == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
+      throw Error(dim == 0U ? NBASE_ERR_INVALID_ARG : NBASE_ERR_DIM_MISMATCH);
+    }
+    if (query_count == 0U) {
+      detail::check(nbase_lsh_search_radius_batch(
+          ptr_,
+          nullptr,
+          0U,
+          dim,
+          max_distance,
+          max_results,
+          multi_probe,
+          num_threads,
+          filter,
+          filter_ctx,
+          nullptr,
+          nullptr));
+      if (out_counts != nullptr) {
+        out_counts->clear();
+      }
+      return {};
+    }
+    std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(max_results));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_lsh_search_radius_batch(
+        ptr_,
+        queries.data(),
+        query_count,
+        dim,
+        max_distance,
+        max_results,
+        multi_probe,
+        num_threads,
+        filter,
+        filter_ctx,
+        max_results > 0U ? flat.data() : nullptr,
+        counts.data()));
+    if (out_counts != nullptr) {
+      *out_counts = counts;
+    }
+    return detail::unpack_batch_results(flat, counts, query_count, max_results);
+  }
+
   void save(const std::string &file_path) const {
     detail::check(nbase_lsh_save(ptr_, file_path.c_str()));
   }
@@ -2292,6 +2346,58 @@ class IvfPq {
     return res;
   }
 
+  std::vector<std::vector<nbase_result_t>> search_radius_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      float max_distance,
+      uint32_t max_results,
+      uint32_t nprobe = 8U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr,
+      uint32_t num_threads = 0U,
+      std::vector<uint32_t> *out_counts = nullptr) const {
+    uint32_t d = stats().dim;
+    if (d == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(d)) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    if (query_count == 0U) {
+      detail::check(nbase_ivfpq_search_radius_batch(
+          ptr_,
+          nullptr,
+          0U,
+          max_distance,
+          max_results,
+          nprobe,
+          num_threads,
+          filter,
+          filter_ctx,
+          nullptr,
+          nullptr));
+      if (out_counts != nullptr) {
+        out_counts->clear();
+      }
+      return {};
+    }
+    std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(max_results));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_ivfpq_search_radius_batch(
+        ptr_,
+        queries.data(),
+        query_count,
+        max_distance,
+        max_results,
+        nprobe,
+        num_threads,
+        filter,
+        filter_ctx,
+        max_results > 0U ? flat.data() : nullptr,
+        counts.data()));
+    if (out_counts != nullptr) {
+      *out_counts = counts;
+    }
+    return detail::unpack_batch_results(flat, counts, query_count, max_results);
+  }
+
   void save(const std::string &file_path) const {
     detail::check(nbase_ivfpq_save(ptr_, file_path.c_str()));
   }
@@ -2669,6 +2775,60 @@ class ClusteredDatabase {
       *out_counts = counts;
     }
     return res;
+  }
+
+  std::vector<std::vector<nbase_result_t>> search_radius_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      float max_distance,
+      uint32_t max_results,
+      uint32_t nprobe = 0U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr,
+      uint32_t num_threads = 0U,
+      std::vector<uint32_t> *out_counts = nullptr) const {
+    if (dim == 0U || queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
+      throw Error(dim == 0U ? NBASE_ERR_INVALID_ARG : NBASE_ERR_DIM_MISMATCH);
+    }
+    if (query_count == 0U) {
+      detail::check(nbase_clustered_search_radius_batch(
+          ptr_,
+          nullptr,
+          0U,
+          dim,
+          max_distance,
+          max_results,
+          nprobe,
+          num_threads,
+          filter,
+          filter_ctx,
+          nullptr,
+          nullptr));
+      if (out_counts != nullptr) {
+        out_counts->clear();
+      }
+      return {};
+    }
+    std::vector<nbase_result_t> flat(static_cast<size_t>(query_count) * static_cast<size_t>(max_results));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_clustered_search_radius_batch(
+        ptr_,
+        queries.data(),
+        query_count,
+        dim,
+        max_distance,
+        max_results,
+        nprobe,
+        num_threads,
+        filter,
+        filter_ctx,
+        max_results > 0U ? flat.data() : nullptr,
+        counts.data()));
+    if (out_counts != nullptr) {
+      *out_counts = counts;
+    }
+    return detail::unpack_batch_results(flat, counts, query_count, max_results);
   }
 
   nbase_clustered_stats_t stats() const {

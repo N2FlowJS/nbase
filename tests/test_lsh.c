@@ -1066,6 +1066,154 @@ static void test_lsh_find_similar_batch_and_tsan(void) {
   free(ids);
 }
 
+typedef struct lsh_rad_batch_tsan_ctx {
+  const nbase_lsh_t *lsh;
+  const float *qs;
+  uint32_t dim;
+  float max_distance;
+  atomic_bool stop;
+  atomic_int errors;
+} lsh_rad_batch_tsan_ctx_t;
+
+static void *lsh_rad_batch_reader_fn(void *raw) {
+  lsh_rad_batch_tsan_ctx_t *ctx = (lsh_rad_batch_tsan_ctx_t *)raw;
+  nbase_result_t res[16];
+  uint32_t cnts[4] = {0};
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    if (nbase_lsh_search_radius_batch(
+            ctx->lsh, ctx->qs, 4U, ctx->dim, ctx->max_distance, 4U, 2U, 2U, lsh_sim_even_filter, NULL, res, cnts) !=
+        NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t q = 0U; q < 4U; q++) {
+      for (uint32_t j = 0U; j < cnts[q]; j++) {
+        nbase_result_t item = res[(size_t)q * 4U + (size_t)j];
+        if ((item.id % 2ULL) != 0ULL || item.distance > ctx->max_distance) {
+          atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+          break;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_lsh_search_radius_batch_and_tsan(void) {
+  const uint32_t n = 80U;
+  const uint32_t dim = 16U;
+  const uint32_t nq = 4U;
+  const uint32_t max_res = 6U;
+
+  nbase_lsh_config_t cfg = nbase_lsh_config_default(dim);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.num_tables = 6U;
+  cfg.num_bits = 8U;
+  cfg.seed = 8801ULL;
+
+  nbase_lsh_t *lsh = NULL;
+  ASSERT_STATUS(nbase_lsh_create(&cfg, &lsh), NBASE_OK);
+
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  float *vecs = malloc((size_t)n * (size_t)dim * sizeof(float));
+  float *qs = malloc((size_t)nq * (size_t)dim * sizeof(float));
+  ASSERT_TRUE(ids && vecs && qs);
+  test_fill_vectors(vecs, n, dim, 8802ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = 600ULL + (uint64_t)i;
+  }
+  ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids, vecs, n, dim), NBASE_OK);
+
+  const uint32_t q_idx[4] = {0U, 15U, 35U, 65U};
+  for (uint32_t q = 0U; q < nq; q++) {
+    memcpy(qs + (size_t)q * (size_t)dim, vecs + (size_t)q_idx[q] * (size_t)dim, (size_t)dim * sizeof(float));
+  }
+
+  nbase_result_t b1[4U * 6U];
+  nbase_result_t b4[4U * 6U];
+  nbase_result_t single[6U];
+  uint32_t c1[4] = {0};
+  uint32_t c4[4] = {0};
+
+  ASSERT_STATUS(
+      nbase_lsh_search_radius_batch(NULL, qs, nq, dim, 1.5f, max_res, 2U, 2U, NULL, NULL, b1, c1),
+      NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(
+      nbase_lsh_search_radius_batch(lsh, NULL, 0U, dim, NAN, max_res, 2U, 2U, NULL, NULL, NULL, NULL),
+      NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(
+      nbase_lsh_search_radius_batch(lsh, NULL, 0U, dim, INFINITY, max_res, 2U, 2U, NULL, NULL, NULL, NULL),
+      NBASE_ERR_INVALID_ARG);
+  ASSERT_STATUS(
+      nbase_lsh_search_radius_batch(lsh, qs, nq, dim + 1U, 1.5f, max_res, 2U, 2U, NULL, NULL, b1, c1),
+      NBASE_ERR_DIM_MISMATCH);
+  ASSERT_STATUS(
+      nbase_lsh_search_radius_batch(lsh, NULL, 0U, dim, 1.5f, max_res, 2U, 2U, NULL, NULL, NULL, NULL),
+      NBASE_OK);
+  uint32_t zc[2] = {7U, 7U};
+  ASSERT_STATUS(
+      nbase_lsh_search_radius_batch(lsh, qs, 2U, dim, 1.5f, 0U, 2U, 2U, NULL, NULL, NULL, zc),
+      NBASE_OK);
+  ASSERT_EQ_U64(zc[0], 0ULL);
+  ASSERT_EQ_U64(zc[1], 0ULL);
+
+  float bad_q[16] = {0};
+  bad_q[2] = -INFINITY;
+  ASSERT_STATUS(
+      nbase_lsh_search_radius_batch(lsh, bad_q, 1U, dim, 1.5f, max_res, 2U, 1U, NULL, NULL, b1, c1),
+      NBASE_ERR_INVALID_VECTOR);
+
+  const float max_dist = 1.65f;
+  for (int flt_mode = 0; flt_mode < 2; flt_mode++) {
+    nbase_filter_fn fn = (flt_mode == 1) ? lsh_sim_even_filter : NULL;
+    ASSERT_STATUS(
+        nbase_lsh_search_radius_batch(lsh, qs, nq, dim, max_dist, max_res, 2U, 1U, fn, NULL, b1, c1),
+        NBASE_OK);
+    ASSERT_STATUS(
+        nbase_lsh_search_radius_batch(lsh, qs, nq, dim, max_dist, max_res, 2U, 4U, fn, NULL, b4, c4),
+        NBASE_OK);
+    for (uint32_t q = 0U; q < nq; q++) {
+      uint32_t sc = 0U;
+      ASSERT_STATUS(
+          nbase_lsh_search_radius(
+              lsh, qs + (size_t)q * (size_t)dim, dim, max_dist, max_res, 2U, fn, NULL, single, &sc),
+          NBASE_OK);
+      ASSERT_EQ_U64(c1[q], sc);
+      ASSERT_EQ_U64(c4[q], sc);
+      for (uint32_t j = 0U; j < sc; j++) {
+        nbase_result_t r1 = b1[(size_t)q * (size_t)max_res + (size_t)j];
+        nbase_result_t r4 = b4[(size_t)q * (size_t)max_res + (size_t)j];
+        ASSERT_EQ_U64(r1.id, single[j].id);
+        ASSERT_EQ_U64(r4.id, single[j].id);
+        ASSERT_TRUE(r1.distance <= max_dist);
+        ASSERT_TRUE(fabsf(r1.distance - single[j].distance) < 1e-6f);
+        ASSERT_TRUE(fabsf(r4.distance - single[j].distance) < 1e-6f);
+      }
+    }
+  }
+
+  lsh_rad_batch_tsan_ctx_t ctx = {lsh, qs, dim, max_dist, false, 0};
+  pthread_t t1, t2;
+  ASSERT_TRUE(pthread_create(&t1, NULL, lsh_rad_batch_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&t2, NULL, lsh_rad_batch_reader_fn, &ctx) == 0);
+  for (uint32_t step = 0U; step < 12U; step++) {
+    uint64_t tid = 2100ULL + (uint64_t)(step % 4U);
+    ASSERT_STATUS(nbase_lsh_upsert(lsh, tid, vecs + (size_t)step * (size_t)dim, dim), NBASE_OK);
+    if ((step % 3U) == 2U) {
+      ASSERT_STATUS(nbase_lsh_delete(lsh, tid), NBASE_OK);
+    }
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(t1, NULL);
+  pthread_join(t2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  nbase_lsh_destroy(lsh);
+  free(qs);
+  free(vecs);
+  free(ids);
+}
+
 void test_lsh_run(void) {
   RUN_TEST(test_lsh_cosine_and_multiprobe);
   RUN_TEST(test_lsh_euclidean_save_load_and_errors);
@@ -1077,4 +1225,5 @@ void test_lsh_run(void) {
   RUN_TEST(test_lsh_find_similar_and_tsan);
   RUN_TEST(test_lsh_search_batch_filtered_and_tsan);
   RUN_TEST(test_lsh_find_similar_batch_and_tsan);
+  RUN_TEST(test_lsh_search_radius_batch_and_tsan);
 }
