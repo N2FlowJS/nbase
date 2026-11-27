@@ -936,6 +936,136 @@ static void test_lsh_search_batch_filtered_and_tsan(void) {
   free(ids);
 }
 
+typedef struct lsh_sim_batch_tsan_ctx {
+  const nbase_lsh_t *lsh;
+  const uint64_t *qids;
+  uint32_t qcnt;
+  atomic_bool stop;
+  atomic_int errors;
+} lsh_sim_batch_tsan_ctx_t;
+
+static bool lsh_sim_even_filter(uint64_t id, void *ctx) {
+  (void)ctx;
+  return (id % 2ULL) == 0ULL;
+}
+
+static void *lsh_sim_batch_reader_fn(void *raw) {
+  lsh_sim_batch_tsan_ctx_t *ctx = (lsh_sim_batch_tsan_ctx_t *)raw;
+  nbase_result_t res[16];
+  uint32_t cnts[4] = {0};
+  while (!atomic_load_explicit(&ctx->stop, memory_order_relaxed)) {
+    if (nbase_lsh_find_similar_batch(
+            ctx->lsh, ctx->qids, ctx->qcnt, 4U, 2U, 2U, lsh_sim_even_filter, NULL, res, cnts) !=
+        NBASE_OK) {
+      atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+      break;
+    }
+    for (uint32_t q = 0U; q < ctx->qcnt; q++) {
+      for (uint32_t j = 0U; j < cnts[q]; j++) {
+        uint64_t rid = res[(size_t)q * 4U + (size_t)j].id;
+        if (rid == ctx->qids[q] || (rid % 2ULL) != 0ULL) {
+          atomic_fetch_add_explicit(&ctx->errors, 1, memory_order_relaxed);
+          break;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_lsh_find_similar_batch_and_tsan(void) {
+  const uint32_t n = 80U;
+  const uint32_t dim = 16U;
+  const uint32_t k = 5U;
+
+  nbase_lsh_config_t cfg = nbase_lsh_config_default(dim);
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.num_tables = 6U;
+  cfg.num_bits = 8U;
+  cfg.seed = 7788ULL;
+
+  nbase_lsh_t *lsh = NULL;
+  ASSERT_STATUS(nbase_lsh_create(&cfg, &lsh), NBASE_OK);
+
+  uint64_t *ids = malloc((size_t)n * sizeof(uint64_t));
+  float *vecs = malloc((size_t)n * (size_t)dim * sizeof(float));
+  ASSERT_TRUE(ids && vecs);
+  test_fill_vectors(vecs, n, dim, 7800ULL);
+  for (uint32_t i = 0U; i < n; i++) {
+    ids[i] = (i == 0U) ? 0ULL : (400ULL + (uint64_t)i);
+  }
+  ASSERT_STATUS(nbase_lsh_add_batch(lsh, ids, vecs, n, dim), NBASE_OK);
+
+  const uint64_t qids[4] = {0ULL, 411ULL, 434ULL, 467ULL};
+  const uint32_t qcnt = 4U;
+  nbase_result_t b1[4U * 5U];
+  nbase_result_t b4[4U * 5U];
+  nbase_result_t single[5U];
+  uint32_t c1[4] = {0};
+  uint32_t c4[4] = {0};
+
+  const uint64_t missing[2] = {0ULL, 999999ULL};
+  ASSERT_STATUS(
+      nbase_lsh_find_similar_batch(lsh, missing, 2U, k, 2U, 2U, NULL, NULL, b1, c1),
+      NBASE_ERR_NOT_FOUND);
+  ASSERT_STATUS(
+      nbase_lsh_find_similar_batch(lsh, NULL, 0U, k, 2U, 2U, NULL, NULL, NULL, NULL),
+      NBASE_OK);
+  uint32_t zc[2] = {6U, 6U};
+  ASSERT_STATUS(
+      nbase_lsh_find_similar_batch(lsh, qids, 2U, 0U, 2U, 2U, NULL, NULL, NULL, zc),
+      NBASE_OK);
+  ASSERT_EQ_U64(zc[0], 0ULL);
+  ASSERT_EQ_U64(zc[1], 0ULL);
+  ASSERT_STATUS(
+      nbase_lsh_find_similar_batch(lsh, qids, 2U, k, 2U, 2U, NULL, NULL, NULL, c1),
+      NBASE_ERR_INVALID_ARG);
+
+  ASSERT_STATUS(
+      nbase_lsh_find_similar_batch(lsh, qids, qcnt, k, 2U, 1U, lsh_sim_even_filter, NULL, b1, c1),
+      NBASE_OK);
+  ASSERT_STATUS(
+      nbase_lsh_find_similar_batch(lsh, qids, qcnt, k, 2U, 4U, lsh_sim_even_filter, NULL, b4, c4),
+      NBASE_OK);
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    uint32_t sc = 0U;
+    ASSERT_STATUS(
+        nbase_lsh_find_similar(lsh, qids[q], k, 2U, lsh_sim_even_filter, NULL, single, &sc),
+        NBASE_OK);
+    ASSERT_EQ_U64(c1[q], sc);
+    ASSERT_EQ_U64(c4[q], sc);
+    for (uint32_t j = 0U; j < sc; j++) {
+      size_t idx = (size_t)q * (size_t)k + (size_t)j;
+      ASSERT_TRUE(b1[idx].id != qids[q]);
+      ASSERT_EQ_U64(b1[idx].id, single[j].id);
+      ASSERT_EQ_U64(b4[idx].id, single[j].id);
+      ASSERT_NEAR(b1[idx].distance, single[j].distance, 1e-6, 1e-6);
+      ASSERT_EQ_U64(b1[idx].id % 2ULL, 0ULL);
+    }
+  }
+
+  /* TSan concurrent find_similar_batch readers + upserts/deletes */
+  lsh_sim_batch_tsan_ctx_t ctx = {lsh, qids, qcnt, false, 0};
+  pthread_t r1, r2;
+  ASSERT_TRUE(pthread_create(&r1, NULL, lsh_sim_batch_reader_fn, &ctx) == 0);
+  ASSERT_TRUE(pthread_create(&r2, NULL, lsh_sim_batch_reader_fn, &ctx) == 0);
+  for (uint32_t step = 0U; step < 12U; step++) {
+    uint64_t tid = 2000ULL + (uint64_t)(step % 4U);
+    ASSERT_STATUS(nbase_lsh_upsert(lsh, tid, vecs + (size_t)step * (size_t)dim, dim), NBASE_OK);
+    if ((step % 3U) == 2U) {
+      ASSERT_STATUS(nbase_lsh_delete(lsh, tid), NBASE_OK);
+    }
+  }
+  atomic_store_explicit(&ctx.stop, true, memory_order_relaxed);
+  pthread_join(r1, NULL);
+  pthread_join(r2, NULL);
+  ASSERT_EQ_U64((uint64_t)atomic_load_explicit(&ctx.errors, memory_order_relaxed), 0ULL);
+
+  nbase_lsh_destroy(lsh);
+  free(vecs);
+  free(ids);
+}
+
 void test_lsh_run(void) {
   RUN_TEST(test_lsh_cosine_and_multiprobe);
   RUN_TEST(test_lsh_euclidean_save_load_and_errors);
@@ -946,4 +1076,5 @@ void test_lsh_run(void) {
   RUN_TEST(test_lsh_search_radius_and_batch_scratch_tsan);
   RUN_TEST(test_lsh_find_similar_and_tsan);
   RUN_TEST(test_lsh_search_batch_filtered_and_tsan);
+  RUN_TEST(test_lsh_find_similar_batch_and_tsan);
 }

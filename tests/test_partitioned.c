@@ -858,6 +858,149 @@ static void test_pdb_find_similar_batch_multi_partition_and_tsan(void) {
   test_rm_rf(dir);
 }
 
+typedef struct pdb_radius_batch_ctx {
+  nbase_pdb_t *pdb;
+  const float *queries;
+  uint32_t qcnt;
+  uint32_t dim;
+  float max_distance;
+  uint32_t max_results;
+} pdb_radius_batch_ctx_t;
+
+static void *pdb_search_radius_batch_worker(void *raw) {
+  const pdb_radius_batch_ctx_t *ctx = (const pdb_radius_batch_ctx_t *)raw;
+  nbase_pdb_search_opts_t opts = nbase_pdb_search_opts_default();
+  opts.search_all_partitions = true;
+  opts.search.mode = NBASE_SEARCH_EXACT;
+  nbase_result_t res[18];
+  uint32_t cnts[3] = {0};
+  for (int it = 0; it < 4; it++) {
+    if (nbase_pdb_search_radius_batch(
+            ctx->pdb,
+            ctx->queries,
+            ctx->qcnt,
+            ctx->dim,
+            ctx->max_distance,
+            ctx->max_results,
+            &opts,
+            res,
+            cnts) != NBASE_OK) {
+      return (void *)1;
+    }
+    for (uint32_t q = 0U; q < ctx->qcnt; q++) {
+      for (uint32_t j = 0U; j < cnts[q]; j++) {
+        if (res[(size_t)q * (size_t)ctx->max_results + (size_t)j].distance > ctx->max_distance) {
+          return (void *)1;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_pdb_search_radius_batch_multi_partition_and_tsan(void) {
+  char dir[128];
+  ASSERT_TRUE(test_make_tmpdir(dir, sizeof(dir)));
+
+  const uint32_t dim = 8U;
+  const uint32_t nvecs = 18U;
+  const uint32_t qcnt = 3U;
+  const uint32_t max_res = 6U;
+
+  nbase_pdb_config_t cfg = nbase_pdb_config_default(dim);
+  cfg.partition_capacity = 6U;
+  cfg.max_active_partitions = 2U;
+  cfg.seed = 2125ULL;
+
+  nbase_pdb_t *pdb = NULL;
+  ASSERT_STATUS(nbase_pdb_open(dir, &cfg, &pdb), NBASE_OK);
+
+  float vecs[18U * 8U];
+  test_fill_vectors(vecs, nvecs, dim, 5250ULL);
+  for (uint32_t i = 0U; i < nvecs; i++) {
+    uint64_t id = (uint64_t)i * 10ULL;
+    ASSERT_STATUS(nbase_pdb_add(pdb, id, vecs + (size_t)i * (size_t)dim, dim), NBASE_OK);
+    nbase_meta_field_t mf = {"even", {.type = NBASE_META_BOOL, .as = {.b = ((i % 2U) == 0U)}}};
+    ASSERT_STATUS(nbase_pdb_set_meta(pdb, id, &mf, 1U), NBASE_OK);
+  }
+
+  float queries[3U * 8U];
+  memcpy(queries, vecs, (size_t)dim * sizeof(float));
+  memcpy(queries + (size_t)dim, vecs + (size_t)12U * (size_t)dim, (size_t)dim * sizeof(float));
+  for (uint32_t d = 0U; d < dim; d++) {
+    queries[2U * dim + d] = 0.0f;
+  }
+
+  nbase_result_t bres[3U * 6U];
+  nbase_result_t sres[6U];
+  uint32_t bcnts[3] = {0};
+
+  ASSERT_STATUS(
+      nbase_pdb_search_radius_batch(pdb, NULL, 0U, dim, 1.0f, max_res, NULL, NULL, NULL),
+      NBASE_OK);
+  uint32_t zc[2] = {4U, 4U};
+  ASSERT_STATUS(
+      nbase_pdb_search_radius_batch(pdb, queries, 2U, dim, 1.0f, 0U, NULL, NULL, zc),
+      NBASE_OK);
+  ASSERT_EQ_U64(zc[0], 0ULL);
+  ASSERT_EQ_U64(zc[1], 0ULL);
+  ASSERT_STATUS(
+      nbase_pdb_search_radius_batch(pdb, queries, 2U, dim + 1U, 1.0f, max_res, NULL, bres, bcnts),
+      NBASE_ERR_DIM_MISMATCH);
+  ASSERT_STATUS(
+      nbase_pdb_search_radius_batch(pdb, queries, 2U, dim, NAN, max_res, NULL, bres, bcnts),
+      NBASE_ERR_INVALID_ARG);
+  queries[dim] = NAN;
+  ASSERT_STATUS(
+      nbase_pdb_search_radius_batch(pdb, queries, 2U, dim, 1.0f, max_res, NULL, bres, bcnts),
+      NBASE_ERR_INVALID_VECTOR);
+  memcpy(queries + (size_t)dim, vecs + (size_t)12U * (size_t)dim, (size_t)dim * sizeof(float));
+
+  nbase_meta_cond_t cond = {"even", NBASE_OP_EQ, {.type = NBASE_META_BOOL, .as = {.b = true}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  nbase_pdb_search_opts_t popts = nbase_pdb_search_opts_default();
+  popts.search_all_partitions = true;
+  popts.search.mode = NBASE_SEARCH_EXACT;
+  popts.search.meta_filter = &flt;
+  popts.search.metric = NBASE_METRIC_COSINE;
+  popts.search.use_metric_override = true;
+
+  const float max_dist = 0.65f;
+  ASSERT_STATUS(
+      nbase_pdb_search_radius_batch(pdb, queries, qcnt, dim, max_dist, max_res, &popts, bres, bcnts),
+      NBASE_OK);
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    uint32_t sc = 0U;
+    ASSERT_STATUS(
+        nbase_pdb_search_radius(
+            pdb, queries + (size_t)q * (size_t)dim, dim, max_dist, max_res, &popts, sres, &sc),
+        NBASE_OK);
+    ASSERT_EQ_U64(bcnts[q], sc);
+    for (uint32_t j = 0U; j < sc; j++) {
+      size_t idx = (size_t)q * (size_t)max_res + (size_t)j;
+      ASSERT_EQ_U64(bres[idx].id, sres[j].id);
+      ASSERT_NEAR(bres[idx].distance, sres[j].distance, 1e-6, 1e-6);
+      ASSERT_EQ_U64((bres[idx].id / 10ULL) % 2ULL, 0ULL);
+      ASSERT_TRUE(bres[idx].distance <= max_dist);
+    }
+  }
+  ASSERT_EQ_U64(bcnts[2], 0ULL);
+
+  pdb_radius_batch_ctx_t wctx = {pdb, queries, qcnt, dim, 2.0f, max_res};
+  pthread_t th[3];
+  for (int t = 0; t < 3; t++) {
+    ASSERT_TRUE(pthread_create(&th[t], NULL, pdb_search_radius_batch_worker, &wctx) == 0);
+  }
+  for (int t = 0; t < 3; t++) {
+    void *ret = NULL;
+    ASSERT_TRUE(pthread_join(th[t], &ret) == 0);
+    ASSERT_TRUE(ret == NULL);
+  }
+
+  ASSERT_STATUS(nbase_pdb_close(pdb), NBASE_OK);
+  test_rm_rf(dir);
+}
+
 void test_partitioned_run(void) {
   RUN_TEST(test_pdb_durable_eviction_and_partition_ids);
   RUN_TEST(test_pdb_batch_text_hybrid_and_cache_stats);
@@ -869,4 +1012,5 @@ void test_partitioned_run(void) {
   RUN_TEST(test_pdb_batch_delete_meta_text_and_search_text_hybrid_batch);
   RUN_TEST(test_pdb_get_text_batch_multi_partition_and_eviction);
   RUN_TEST(test_pdb_find_similar_batch_multi_partition_and_tsan);
+  RUN_TEST(test_pdb_search_radius_batch_multi_partition_and_tsan);
 }

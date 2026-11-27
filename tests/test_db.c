@@ -364,7 +364,7 @@ static void test_db_query_lru_cache_and_invalidation(void) {
 }
 
 static void test_db_upsert_batch_and_get_batch(void) {
-  ASSERT_TRUE(strcmp(nbase_version(), "1.20.0") == 0);
+  ASSERT_TRUE(strcmp(nbase_version(), "1.21.0") == 0);
 
   const uint32_t dim = 3U;
   char dir[256];
@@ -1038,6 +1038,164 @@ static void test_db_find_similar_batch_and_tsan(void) {
   nbase_close(db);
 }
 
+typedef struct db_radius_batch_tsan_ctx {
+  const nbase_db_t *db;
+  const float *queries;
+  uint32_t qcnt;
+  uint32_t dim;
+  float max_distance;
+  uint32_t max_results;
+  nbase_search_opts_t opts;
+} db_radius_batch_tsan_ctx_t;
+
+static void *db_search_radius_batch_worker(void *raw) {
+  const db_radius_batch_tsan_ctx_t *ctx = (const db_radius_batch_tsan_ctx_t *)raw;
+  nbase_result_t res[24];
+  uint32_t cnts[3] = {0};
+  for (int it = 0; it < 6; it++) {
+    if (nbase_search_radius_batch(
+            ctx->db,
+            ctx->queries,
+            ctx->qcnt,
+            ctx->dim,
+            ctx->max_distance,
+            ctx->max_results,
+            &ctx->opts,
+            res,
+            cnts) != NBASE_OK) {
+      return (void *)1;
+    }
+    for (uint32_t q = 0U; q < ctx->qcnt; q++) {
+      for (uint32_t j = 0U; j < cnts[q]; j++) {
+        float d = res[(size_t)q * (size_t)ctx->max_results + (size_t)j].distance;
+        if (!isfinite(d) || d > ctx->max_distance) {
+          return (void *)1;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void test_db_search_radius_batch_and_filtered_exact_tsan(void) {
+  const uint32_t dim = 8U;
+  const uint32_t nvecs = 40U;
+  const uint32_t qcnt = 3U;
+  const uint32_t max_res = 8U;
+
+  nbase_config_t cfg = nbase_config_default(dim);
+  cfg.enable_hnsw = true;
+  cfg.metric = NBASE_METRIC_EUCLIDEAN;
+  cfg.seed = 2121ULL;
+
+  nbase_db_t *db = NULL;
+  ASSERT_STATUS(nbase_create(&cfg, &db), NBASE_OK);
+
+  float vecs[40U * 8U];
+  test_fill_vectors(vecs, nvecs, dim, 2122ULL);
+  for (uint32_t i = 0U; i < nvecs; i++) {
+    uint64_t id = (i == 0U) ? 0ULL : (50ULL + (uint64_t)i);
+    ASSERT_STATUS(nbase_add(db, id, vecs + (size_t)i * (size_t)dim, dim), NBASE_OK);
+    nbase_meta_field_t mf = {
+        "tag",
+        {.type = NBASE_META_STRING, .as = {.str = ((i % 2U) == 0U) ? "even" : "odd"}}};
+    ASSERT_STATUS(nbase_set_meta(db, id, &mf, 1U), NBASE_OK);
+  }
+
+  float queries[3U * 8U];
+  memcpy(queries, vecs, (size_t)dim * sizeof(float));
+  memcpy(queries + (size_t)dim, vecs + (size_t)10U * (size_t)dim, (size_t)dim * sizeof(float));
+  for (uint32_t d = 0U; d < dim; d++) {
+    queries[2U * dim + d] = 100.0f + (float)d;
+  }
+
+  nbase_result_t r1[3U * 8U];
+  nbase_result_t r4[3U * 8U];
+  nbase_result_t rs[8U];
+  uint32_t c1[3] = {0};
+  uint32_t c4[3] = {0};
+
+  /* Error & edge paths */
+  ASSERT_STATUS(nbase_search_radius_batch(db, NULL, 0U, dim, 1.5f, max_res, NULL, NULL, NULL), NBASE_OK);
+  uint32_t zc[2] = {5U, 5U};
+  ASSERT_STATUS(nbase_search_radius_batch(db, queries, 2U, dim, 1.5f, 0U, NULL, NULL, zc), NBASE_OK);
+  ASSERT_EQ_U64(zc[0], 0ULL);
+  ASSERT_EQ_U64(zc[1], 0ULL);
+  ASSERT_STATUS(
+      nbase_search_radius_batch(db, queries, 2U, dim - 1U, 1.5f, max_res, NULL, r1, c1),
+      NBASE_ERR_DIM_MISMATCH);
+  ASSERT_STATUS(
+      nbase_search_radius_batch(db, queries, 2U, dim, NAN, max_res, NULL, r1, c1),
+      NBASE_ERR_INVALID_ARG);
+  queries[dim] = NAN;
+  ASSERT_STATUS(
+      nbase_search_radius_batch(db, queries, 2U, dim, 1.5f, max_res, NULL, r1, c1),
+      NBASE_ERR_INVALID_VECTOR);
+  memcpy(queries + (size_t)dim, vecs + (size_t)10U * (size_t)dim, (size_t)dim * sizeof(float));
+
+  /* Filtered exact mode + Manhattan override exercising 64-slot exact_flush_filtered_slots */
+  nbase_meta_cond_t cond = {"tag", NBASE_OP_EQ, {.type = NBASE_META_STRING, .as = {.str = "even"}}};
+  nbase_meta_filter_t flt = {&cond, 1U};
+  nbase_search_opts_t opts1 = nbase_search_opts_default();
+  opts1.mode = NBASE_SEARCH_EXACT;
+  opts1.meta_filter = &flt;
+  opts1.metric = NBASE_METRIC_MANHATTAN;
+  opts1.use_metric_override = true;
+  opts1.num_threads = 1U;
+  nbase_search_opts_t opts4 = opts1;
+  opts4.num_threads = 4U;
+
+  const float max_dist = 3.5f;
+  ASSERT_STATUS(
+      nbase_search_radius_batch(db, queries, qcnt, dim, max_dist, max_res, &opts1, r1, c1),
+      NBASE_OK);
+  ASSERT_STATUS(
+      nbase_search_radius_batch(db, queries, qcnt, dim, max_dist, max_res, &opts4, r4, c4),
+      NBASE_OK);
+  for (uint32_t q = 0U; q < qcnt; q++) {
+    uint32_t sc = 0U;
+    ASSERT_STATUS(
+        nbase_search_radius(
+            db, queries + (size_t)q * (size_t)dim, dim, max_dist, max_res, &opts1, rs, &sc),
+        NBASE_OK);
+    ASSERT_EQ_U64(c1[q], sc);
+    ASSERT_EQ_U64(c4[q], sc);
+    for (uint32_t j = 0U; j < sc; j++) {
+      size_t idx = (size_t)q * (size_t)max_res + (size_t)j;
+      ASSERT_EQ_U64(r1[idx].id, rs[j].id);
+      ASSERT_EQ_U64(r4[idx].id, rs[j].id);
+      ASSERT_NEAR(r1[idx].distance, rs[j].distance, 1e-6, 1e-6);
+      ASSERT_TRUE(r1[idx].distance <= max_dist);
+      ASSERT_TRUE(r1[idx].id == 0ULL || ((r1[idx].id - 50ULL) % 2ULL == 0ULL));
+    }
+  }
+  ASSERT_EQ_U64(c1[2], 0ULL);
+
+  /* HNSW parallel radius batch + TSan concurrency */
+  nbase_search_opts_t hopts = nbase_search_opts_default();
+  hopts.mode = NBASE_SEARCH_HNSW;
+  hopts.ef_search = 64U;
+  hopts.num_threads = 4U;
+  ASSERT_STATUS(
+      nbase_search_radius_batch(db, queries, qcnt, dim, 2.0f, max_res, &hopts, r4, c4),
+      NBASE_OK);
+  ASSERT_TRUE(c4[0] >= 1U);
+
+  db_radius_batch_tsan_ctx_t wctx = {db, queries, qcnt, dim, max_dist, max_res, opts1};
+  wctx.opts.num_threads = 2U;
+  pthread_t th[4];
+  for (int t = 0; t < 4; t++) {
+    ASSERT_TRUE(pthread_create(&th[t], NULL, db_search_radius_batch_worker, &wctx) == 0);
+  }
+  for (int t = 0; t < 4; t++) {
+    void *ret = NULL;
+    ASSERT_TRUE(pthread_join(th[t], &ret) == 0);
+    ASSERT_TRUE(ret == NULL);
+  }
+
+  nbase_close(db);
+}
+
 void test_db_run(void) {
   RUN_TEST(test_db_upsert_with_and_without_hnsw);
   RUN_TEST(test_db_batch_search);
@@ -1051,4 +1209,5 @@ void test_db_run(void) {
   RUN_TEST(test_binary_formats_fuzz_corruption_and_truncation);
   RUN_TEST(test_db_get_text_batch_and_concurrent_reads);
   RUN_TEST(test_db_find_similar_batch_and_tsan);
+  RUN_TEST(test_db_search_radius_batch_and_filtered_exact_tsan);
 }

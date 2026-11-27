@@ -2362,6 +2362,67 @@ nbase_status_t nbase_pdb_search_radius(
   return st;
 }
 
+nbase_status_t nbase_pdb_search_radius_batch(
+    nbase_pdb_t *pdb,
+    const float *queries,
+    uint32_t query_count,
+    uint32_t dim,
+    float max_distance,
+    uint32_t max_results,
+    const nbase_pdb_search_opts_t *opts,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  if (!pdb || !isfinite(max_distance) ||
+      (query_count > 0U && (!queries || !out_counts || (max_results > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (query_count > 0U && dim > 0U &&
+      ((size_t)query_count > SIZE_MAX / (size_t)dim ||
+       (max_results > 0U && (size_t)query_count > SIZE_MAX / (size_t)max_results))) {
+    return NBASE_ERR_NOMEM;
+  }
+
+  nbase_pdb_search_opts_t eff = opts ? *opts : nbase_pdb_search_opts_default();
+  if (eff.partition_id_count > 0U && !eff.partition_ids) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+
+  pthread_mutex_lock(&pdb->mu);
+  if (dim != pdb->cfg.dim) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_ERR_DIM_MISMATCH;
+  }
+  if (query_count == 0U) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_OK;
+  }
+  memset(out_counts, 0, (size_t)query_count * sizeof(uint32_t));
+  for (uint32_t q = 0U; q < query_count; q++) {
+    if (!nbase_vec_is_finite(queries + (size_t)q * (size_t)dim, dim)) {
+      pthread_mutex_unlock(&pdb->mu);
+      return NBASE_ERR_INVALID_VECTOR;
+    }
+  }
+  if (max_results == 0U) {
+    pthread_mutex_unlock(&pdb->mu);
+    return NBASE_OK;
+  }
+
+  nbase_status_t st = NBASE_OK;
+  for (uint32_t i = 0U; i < query_count; i++) {
+    const float *q = queries + (size_t)i * (size_t)dim;
+    nbase_result_t *dst = out_results + (size_t)i * (size_t)max_results;
+    st = pdb_search_common_unlocked(
+        pdb, q, dim, max_results, true, max_distance, &eff, dst, &out_counts[i]);
+    if (st != NBASE_OK) {
+      break;
+    }
+  }
+
+  pthread_mutex_unlock(&pdb->mu);
+  return st;
+}
+
 nbase_status_t nbase_pdb_search_batch(
     nbase_pdb_t *pdb,
     const float *queries,

@@ -1090,6 +1090,122 @@ static __attribute__((target("avx2,fma"))) void cosine_indexed_batch_avx2(
   }
 }
 
+static __attribute__((target("avx2,fma"))) void manhattan_indexed_batch_avx2(
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+  uint32_t n = 0U;
+  for (; n + 2U <= count; n += 2U) {
+    if (n + 4U <= count) {
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 2U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 3U] * (size_t)dim), _MM_HINT_T0);
+    }
+    const float *v0 = vectors + (size_t)slots[n] * (size_t)dim;
+    const float *v1 = vectors + (size_t)slots[n + 1U] * (size_t)dim;
+    __m256 a0a = _mm256_setzero_ps();
+    __m256 a0b = _mm256_setzero_ps();
+    __m256 a1a = _mm256_setzero_ps();
+    __m256 a1b = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 16U <= dim; i += 16U) {
+      __m256 q0 = _mm256_loadu_ps(query + i);
+      __m256 q1 = _mm256_loadu_ps(query + i + 8U);
+      __m256 d0a = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q0, _mm256_loadu_ps(v0 + i)));
+      __m256 d0b = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q1, _mm256_loadu_ps(v0 + i + 8U)));
+      __m256 d1a = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q0, _mm256_loadu_ps(v1 + i)));
+      __m256 d1b = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q1, _mm256_loadu_ps(v1 + i + 8U)));
+      a0a = _mm256_add_ps(a0a, d0a);
+      a0b = _mm256_add_ps(a0b, d0b);
+      a1a = _mm256_add_ps(a1a, d1a);
+      a1b = _mm256_add_ps(a1b, d1b);
+    }
+    __m256 a0 = _mm256_add_ps(a0a, a0b);
+    __m256 a1 = _mm256_add_ps(a1a, a1b);
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      a0 = _mm256_add_ps(a0, _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vq, _mm256_loadu_ps(v0 + i))));
+      a1 = _mm256_add_ps(a1, _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vq, _mm256_loadu_ps(v1 + i))));
+    }
+    float s0 = hsum256_ps(a0);
+    float s1 = hsum256_ps(a1);
+    for (; i < dim; i++) {
+      float q = query[i];
+      s0 += fabsf(q - v0[i]);
+      s1 += fabsf(q - v1[i]);
+    }
+    out_distances[n] = s0;
+    out_distances[n + 1U] = s1;
+  }
+  for (; n < count; n++) {
+    out_distances[n] = manhattan_avx2(query, vectors + (size_t)slots[n] * (size_t)dim, dim);
+  }
+}
+
+static __attribute__((target("avx2,fma"))) void chebyshev_indexed_batch_avx2(
+    const float *query,
+    const float *vectors,
+    const uint32_t *slots,
+    uint32_t count,
+    uint32_t dim,
+    float *out_distances) {
+  const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+  uint32_t n = 0U;
+  for (; n + 2U <= count; n += 2U) {
+    if (n + 4U <= count) {
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 2U] * (size_t)dim), _MM_HINT_T0);
+      _mm_prefetch((const char *)(vectors + (size_t)slots[n + 3U] * (size_t)dim), _MM_HINT_T0);
+    }
+    const float *v0 = vectors + (size_t)slots[n] * (size_t)dim;
+    const float *v1 = vectors + (size_t)slots[n + 1U] * (size_t)dim;
+    __m256 m0a = _mm256_setzero_ps();
+    __m256 m0b = _mm256_setzero_ps();
+    __m256 m1a = _mm256_setzero_ps();
+    __m256 m1b = _mm256_setzero_ps();
+    uint32_t i = 0U;
+    for (; i + 16U <= dim; i += 16U) {
+      __m256 q0 = _mm256_loadu_ps(query + i);
+      __m256 q1 = _mm256_loadu_ps(query + i + 8U);
+      __m256 d0a = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q0, _mm256_loadu_ps(v0 + i)));
+      __m256 d0b = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q1, _mm256_loadu_ps(v0 + i + 8U)));
+      __m256 d1a = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q0, _mm256_loadu_ps(v1 + i)));
+      __m256 d1b = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(q1, _mm256_loadu_ps(v1 + i + 8U)));
+      m0a = _mm256_max_ps(m0a, d0a);
+      m0b = _mm256_max_ps(m0b, d0b);
+      m1a = _mm256_max_ps(m1a, d1a);
+      m1b = _mm256_max_ps(m1b, d1b);
+    }
+    __m256 m0 = _mm256_max_ps(m0a, m0b);
+    __m256 m1 = _mm256_max_ps(m1a, m1b);
+    for (; i + 8U <= dim; i += 8U) {
+      __m256 vq = _mm256_loadu_ps(query + i);
+      m0 = _mm256_max_ps(m0, _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vq, _mm256_loadu_ps(v0 + i))));
+      m1 = _mm256_max_ps(m1, _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vq, _mm256_loadu_ps(v1 + i))));
+    }
+    float r0 = hmax256_ps(m0);
+    float r1 = hmax256_ps(m1);
+    for (; i < dim; i++) {
+      float q = query[i];
+      float d0 = fabsf(q - v0[i]);
+      float d1 = fabsf(q - v1[i]);
+      if (d0 > r0) {
+        r0 = d0;
+      }
+      if (d1 > r1) {
+        r1 = d1;
+      }
+    }
+    out_distances[n] = r0;
+    out_distances[n + 1U] = r1;
+  }
+  for (; n < count; n++) {
+    out_distances[n] = chebyshev_avx2(query, vectors + (size_t)slots[n] * (size_t)dim, dim);
+  }
+}
+
 static __attribute__((target("avx2,fma"))) void distance_indexed_batch_avx2(
     nbase_metric_t metric,
     const float *query,
@@ -1111,17 +1227,20 @@ static __attribute__((target("avx2,fma"))) void distance_indexed_batch_avx2(
     case NBASE_METRIC_INNER_PRODUCT:
       inner_product_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
       return;
+    case NBASE_METRIC_MANHATTAN:
+      manhattan_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
+      return;
+    case NBASE_METRIC_CHEBYSHEV:
+      chebyshev_indexed_batch_avx2(query, vectors, slots, count, dim, out_distances);
+      return;
     default:
       break;
   }
-  nbase_dist_fn fn = (metric == NBASE_METRIC_MANHATTAN)
-                         ? manhattan_avx2
-                         : ((metric == NBASE_METRIC_CHEBYSHEV) ? chebyshev_avx2 : hamming_avx2);
   for (uint32_t n = 0U; n < count; n++) {
     if (n + 1U < count) {
       _mm_prefetch((const char *)(vectors + (size_t)slots[n + 1U] * (size_t)dim), _MM_HINT_T0);
     }
-    out_distances[n] = fn(query, vectors + (size_t)slots[n] * (size_t)dim, dim);
+    out_distances[n] = hamming_avx2(query, vectors + (size_t)slots[n] * (size_t)dim, dim);
   }
 }
 

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-11-27
+
+Batch radius search (`nbase_search_radius_batch` & `nbase_pdb_search_radius_batch`) and standalone `find_similar_batch` parity (`nbase_clustered_find_similar_batch` & `nbase_lsh_find_similar_batch`) across C11 & C++17, AVX2 indexed batch Manhattan/Chebyshev + filtered exact/MMR SIMD batching, `POST /api/search/radius/batch` & `/api/search/batch` `maxDistance`, and CLI `find-similar-batch` + `search-batch --max-distance`.
+
+### Added & Changed
+- **Radius Batch & Index Find-Similar Batch Parity (`include/nbase.h`, `include/nbase.hpp`, `src/nbase.c`, `src/partitioned.c`, `src/clustered.c`, `src/lsh.c`)**:
+  - Added parallel work-stealing `nbase_search_radius_batch` (`nbase_db_t`), `nbase_pdb_search_radius_batch` (`nbase_pdb_t`), `nbase_clustered_find_similar_batch` (`nbase_clustered_t`), and `nbase_lsh_find_similar_batch` (`nbase_lsh_t`) with matching C++17 RAII wrappers `Database::search_radius_batch`, `PartitionedDatabase::search_radius_batch`, `ClusteredDatabase::find_similar_batch`, and `Lsh::find_similar_batch`.
+- **SIMD Indexed Distance, Filtered Exact Scan & MMR Optimization (`src/distance.c`, `src/store.c`, `src/rerank.c`)**:
+  - Added 2-row unrolled AVX2 `manhattan_indexed_batch_avx2` and `chebyshev_indexed_batch_avx2` kernels with `_mm_prefetch` to `nbase_distance_indexed_batch`.
+  - Pre-reserved `nbase_heap_t` and batched filtered exact scans in 64-slot `nbase_distance_indexed_batch` chunks (`exact_flush_filtered_slots`) inside `src/store.c`.
+  - Batched pairwise diversity distance updates inside `nbase_rerank_mmr` (`mmr_update_pairwise_min_div` via `nbase_distance_indexed_batch`).
+- **HTTP/1.1 Server & CLI Parity (`src/http_server.c`, `apps/nbase_cli.c`)**:
+  - Added `POST /api/search/radius/batch` (`handle_search_radius_batch`) and optional `"maxDistance"` support in `POST /api/search/batch` via shared `handle_vector_batch_search_common` with `"threads"` and 2D batch enrichment.
+  - Added `--max-distance <D>` to `nbase-cli search-batch` and new `nbase-cli find-similar-batch` supporting CSV IDs, `--threads`, `--filter`, `--metric`, `--exact`, `--ef`, and `--include-vectors` / `--include-meta` / `--include-text`.
+- **Tests (`tests/test_db.c`, `tests/test_partitioned.c`, `tests/test_clustered.c`, `tests/test_lsh.c`, `tests/test_server.c`)**:
+  - Updated `nbase_version()` assertion to `"1.21.0"` and added `test_db_search_radius_batch_and_filtered_exact_tsan`, `test_pdb_search_radius_batch_multi_partition_and_tsan`, `test_clustered_find_similar_batch_and_tsan`, `test_lsh_find_similar_batch_and_tsan`, and `test_http_server_radius_batch_and_search_batch_max_distance`.
+
 ## [1.20.0] - 2026-11-27
 
 Parallel `find_similar_batch` parity for Single-DB and Partitioned DB (C11 & C++17), batched HNSW neighbor evaluation & generation-stamped traversal optimization, parallel `POST /api/search/similar` + unified 2D batch HTTP enrichment, and CLI `--include-*` flags across batch search commands.

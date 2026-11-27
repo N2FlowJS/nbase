@@ -561,6 +561,33 @@ static bool exact_heap_consider(
   return true;
 }
 
+static bool exact_flush_filtered_slots(
+    const nbase_store_t *store,
+    const float *query,
+    nbase_metric_t metric,
+    uint32_t k,
+    bool use_radius,
+    float max_distance,
+    const uint32_t *slots,
+    uint32_t count,
+    nbase_heap_t *heap) {
+  if (count == 0U) {
+    return true;
+  }
+  float dists[64];
+  nbase_distance_indexed_batch(metric, query, store->vectors, slots, count, store->dim, dists);
+  for (uint32_t i = 0U; i < count; i++) {
+    float d = dists[i];
+    if (use_radius && d > max_distance) {
+      continue;
+    }
+    if (!exact_heap_consider(heap, k, store->ids, slots[i], d)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static nbase_status_t store_exact_search_internal(
     const nbase_store_t *store,
     const float *query,
@@ -583,6 +610,15 @@ static nbase_status_t store_exact_search_internal(
 
   nbase_heap_t heap;
   nbase_heap_init(&heap, true);
+  uint32_t reserve_cap =
+      ((uint64_t)k < store->active_count) ? k : (uint32_t)store->active_count;
+  if (reserve_cap > 256U) {
+    reserve_cap = 256U;
+  }
+  if (reserve_cap > 0U && !nbase_heap_reserve(&heap, (size_t)reserve_cap)) {
+    nbase_heap_free(&heap);
+    return NBASE_ERR_NOMEM;
+  }
 
   if (filter == NULL) {
     float batch_dists[256] = {0.0f};
@@ -624,23 +660,29 @@ static nbase_status_t store_exact_search_internal(
       }
     }
   } else {
-    nbase_dist_fn dist_fn = nbase_get_distance_fn(metric);
+    uint32_t fslots[64];
+    uint32_t fn = 0U;
     for (uint32_t slot = 0U; slot < store->slot_count; slot++) {
       if (store->slot_flags[slot] != NBASE_SLOT_ACTIVE) {
         continue;
       }
-      uint64_t id = store->ids[slot];
-      if (!filter(id, filter_ctx)) {
+      if (!filter(store->ids[slot], filter_ctx)) {
         continue;
       }
-      float dist = dist_fn(query, store->vectors + (size_t)slot * (size_t)store->dim, store->dim);
-      if (use_radius && dist > max_distance) {
-        continue;
+      fslots[fn++] = slot;
+      if (fn == 64U) {
+        if (!exact_flush_filtered_slots(
+                store, query, metric, k, use_radius, max_distance, fslots, fn, &heap)) {
+          nbase_heap_free(&heap);
+          return NBASE_ERR_NOMEM;
+        }
+        fn = 0U;
       }
-      if (!exact_heap_consider(&heap, k, store->ids, slot, dist)) {
-        nbase_heap_free(&heap);
-        return NBASE_ERR_NOMEM;
-      }
+    }
+    if (!exact_flush_filtered_slots(
+            store, query, metric, k, use_radius, max_distance, fslots, fn, &heap)) {
+      nbase_heap_free(&heap);
+      return NBASE_ERR_NOMEM;
     }
   }
 

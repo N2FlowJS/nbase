@@ -39,6 +39,50 @@ static int cmp_edge_canonical(const void *pa, const void *pb) {
   return 0;
 }
 
+static void mmr_update_pairwise_min_div(
+    const nbase_store_t *store,
+    const uint32_t *slots,
+    const bool *used,
+    uint32_t candidate_count,
+    uint32_t ref_slot,
+    bool take_min,
+    float *min_div) {
+  const float *ref_vec = nbase_store_get_vector(store, ref_slot);
+  uint32_t bidx[64];
+  uint32_t bslots[64];
+  float bdists[64];
+  uint32_t bn = 0U;
+  for (uint32_t i = 0U; i < candidate_count; i++) {
+    if (used[i]) {
+      continue;
+    }
+    bidx[bn] = i;
+    bslots[bn] = slots[i];
+    bn++;
+    if (bn == 64U) {
+      nbase_distance_indexed_batch(
+          store->metric, ref_vec, store->vectors, bslots, bn, store->dim, bdists);
+      for (uint32_t j = 0U; j < bn; j++) {
+        uint32_t ci = bidx[j];
+        if (!take_min || bdists[j] < min_div[ci]) {
+          min_div[ci] = bdists[j];
+        }
+      }
+      bn = 0U;
+    }
+  }
+  if (bn > 0U) {
+    nbase_distance_indexed_batch(
+        store->metric, ref_vec, store->vectors, bslots, bn, store->dim, bdists);
+    for (uint32_t j = 0U; j < bn; j++) {
+      uint32_t ci = bidx[j];
+      if (!take_min || bdists[j] < min_div[ci]) {
+        min_div[ci] = bdists[j];
+      }
+    }
+  }
+}
+
 nbase_status_t nbase_rerank_mmr(
     const nbase_db_t *db,
     const nbase_result_t *candidates,
@@ -108,7 +152,6 @@ nbase_status_t nbase_rerank_mmr(
   }
 
   uint32_t eff_k = (k < candidate_count) ? k : candidate_count;
-  nbase_dist_fn dist_fn = nbase_get_distance_fn(store->metric);
 
   out_results[0] = candidates[first];
   used[first] = true;
@@ -116,13 +159,12 @@ nbase_status_t nbase_rerank_mmr(
   float pair_min = 0.0f;
   float pair_max = 0.0f;
   bool first_pair_set = false;
-  const float *first_vec = nbase_store_get_vector(store, slots[first]);
+  mmr_update_pairwise_min_div(store, slots, used, candidate_count, slots[first], false, min_div);
   for (uint32_t i = 0U; i < candidate_count; i++) {
     if (used[i]) {
       continue;
     }
-    float pd = dist_fn(nbase_store_get_vector(store, slots[i]), first_vec, store->dim);
-    min_div[i] = pd;
+    float pd = min_div[i];
     if (!first_pair_set) {
       pair_min = (pd < 0.0f) ? pd : 0.0f;
       pair_max = pd;
@@ -162,16 +204,7 @@ nbase_status_t nbase_rerank_mmr(
     out_results[step] = candidates[best_idx];
     used[best_idx] = true;
 
-    const float *picked_vec = nbase_store_get_vector(store, slots[best_idx]);
-    for (uint32_t i = 0U; i < candidate_count; i++) {
-      if (used[i]) {
-        continue;
-      }
-      float pd = dist_fn(nbase_store_get_vector(store, slots[i]), picked_vec, store->dim);
-      if (pd < min_div[i]) {
-        min_div[i] = pd;
-      }
-    }
+    mmr_update_pairwise_min_div(store, slots, used, candidate_count, slots[best_idx], true, min_div);
   }
 
   *out_count = eff_k;

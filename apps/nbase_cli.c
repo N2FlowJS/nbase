@@ -44,10 +44,11 @@ static void print_usage(const char *prog) {
       "  delete-text <dir> <id>\n"
       "  delete-text-batch <dir> <id1,id2,...>\n"
       "  search <dir> <q0,q1,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
-      "  search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>] [--include-vectors] [--include-meta] [--include-text]\n"
+      "  search-batch <dir> <file.ndjson|-> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--max-distance <D>] [--threads <T>] [--filter <json>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  search-meta <dir> [--filter <json>] [--limit <N>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  rerank <dir> <diversity|weighted|standard> <id1:dist1,id2:dist2,...> [--k <K>] [--lambda <L>] [--weights <json>]\n"
       "  find-similar <dir> <id> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--filter <json>] [--json] [--include-vectors] [--include-meta] [--include-text]\n"
+      "  find-similar-batch <dir> <id1,id2,...> [--k <K>] [--ef <EF>] [--exact] [--metric <M>] [--threads <T>] [--filter <json>] [--include-vectors] [--include-meta] [--include-text]\n"
       "  relationships <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  communities <dir> [--k <K>] [--max-distance <D>] [--filter <json>]\n"
       "  distance <metric> <q0,q1,...> <v0,v1,...> [<w0,w1,...> ...]\n"
@@ -2887,6 +2888,8 @@ int main(int argc, char **argv) {
       return 1;
     }
     uint32_t k = 10U;
+    bool use_radius = false;
+    float max_dist = 0.0f;
     nbase_search_opts_t opts = nbase_search_opts_default();
     const char *flt_json = NULL;
     bool inc_vecs = false;
@@ -2911,6 +2914,12 @@ int main(int argc, char **argv) {
           return 1;
         }
         opts.use_metric_override = true;
+      } else if (strcmp(argv[i], "--max-distance") == 0 && i + 1 < argc) {
+        if (!parse_float_arg(argv[++i], &max_dist) || !isfinite(max_dist)) {
+          fprintf(stderr, "Invalid --max-distance\n");
+          return 1;
+        }
+        use_radius = true;
       } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
         if (!parse_u32(argv[++i], &opts.num_threads) || opts.num_threads > 64U) {
           fprintf(stderr, "Invalid --threads\n");
@@ -3062,7 +3071,9 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    st = nbase_search_batch(db, queries, qcnt, s.dim, k, &opts, res, counts);
+    st = use_radius
+             ? nbase_search_radius_batch(db, queries, qcnt, s.dim, max_dist, k, &opts, res, counts)
+             : nbase_search_batch(db, queries, qcnt, s.dim, k, &opts, res, counts);
     free(queries);
     free(conds);
     nbase_json_free(flt_root);
@@ -3320,6 +3331,126 @@ int main(int argc, char **argv) {
     free(res);
     nbase_close(db);
     return rc;
+  }
+
+  if (strcmp(cmd, "find-similar-batch") == 0) {
+    if (argc < 4 || argv[3][0] == '\0') {
+      print_usage(argv[0]);
+      return 1;
+    }
+    uint32_t k = 10U;
+    bool inc_vecs = false;
+    bool inc_meta = false;
+    bool inc_text = false;
+    nbase_search_opts_t opts = nbase_search_opts_default();
+    const char *flt_json = NULL;
+    for (int i = 4; i < argc; i++) {
+      if (strcmp(argv[i], "--exact") == 0) {
+        opts.mode = NBASE_SEARCH_EXACT;
+      } else if (strcmp(argv[i], "--include-vectors") == 0) {
+        inc_vecs = true;
+      } else if (strcmp(argv[i], "--include-meta") == 0) {
+        inc_meta = true;
+      } else if (strcmp(argv[i], "--include-text") == 0) {
+        inc_text = true;
+      } else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &k) || k == 0U || k > 10000U) {
+          fprintf(stderr, "Invalid --k\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--ef") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &opts.ef_search) || opts.ef_search == 0U) {
+          fprintf(stderr, "Invalid --ef\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc) {
+        if (!parse_metric(argv[++i], &opts.metric)) {
+          fprintf(stderr, "Invalid --metric\n");
+          return 1;
+        }
+        opts.use_metric_override = true;
+      } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+        if (!parse_u32(argv[++i], &opts.num_threads) || opts.num_threads > 64U) {
+          fprintf(stderr, "Invalid --threads\n");
+          return 1;
+        }
+      } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        flt_json = argv[++i];
+      } else {
+        fprintf(stderr, "Invalid option: %s\n", argv[i]);
+        return 1;
+      }
+    }
+
+    uint64_t *ids = NULL;
+    uint32_t cnt = 0U;
+    if (!parse_u64_list_csv(argv[3], &ids, &cnt)) {
+      return 1;
+    }
+
+    nbase_json_t *flt_root = NULL;
+    nbase_meta_cond_t *conds = NULL;
+    nbase_meta_filter_t flt = {NULL, 0U};
+    if (flt_json != NULL) {
+      if (nbase_json_parse(flt_json, strlen(flt_json), &flt_root) != NBASE_OK ||
+          cli_parse_meta_filter_json(flt_root, &conds, &flt) != NBASE_OK) {
+        free(ids);
+        free(conds);
+        nbase_json_free(flt_root);
+        fprintf(stderr, "Invalid --filter JSON\n");
+        return 1;
+      }
+      if (flt.count > 0U) {
+        opts.meta_filter = &flt;
+      }
+    }
+
+    nbase_db_t *db = NULL;
+    nbase_status_t st = nbase_open(argv[2], &db);
+    if (st != NBASE_OK) {
+      free(ids);
+      free(conds);
+      nbase_json_free(flt_root);
+      fprintf(stderr, "open failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+    nbase_stats_t s;
+    (void)nbase_stats(db, &s);
+
+    nbase_result_t *res = malloc((size_t)cnt * (size_t)k * sizeof(nbase_result_t));
+    uint32_t *counts = calloc((size_t)cnt, sizeof(uint32_t));
+    if (!res || !counts) {
+      free(res);
+      free(counts);
+      free(ids);
+      free(conds);
+      nbase_json_free(flt_root);
+      nbase_close(db);
+      return 1;
+    }
+
+    st = nbase_find_similar_batch(db, ids, cnt, k, &opts, res, counts);
+    free(ids);
+    free(conds);
+    nbase_json_free(flt_root);
+    if (st != NBASE_OK) {
+      free(res);
+      free(counts);
+      nbase_close(db);
+      fprintf(stderr, "find-similar-batch failed: %s\n", nbase_strerror(st));
+      return 1;
+    }
+
+    bool printed = cli_print_batch_results_json(
+        db, s.dim, res, NULL, counts, cnt, k, inc_vecs, inc_meta, inc_text);
+    nbase_close(db);
+    free(res);
+    free(counts);
+    if (!printed) {
+      fprintf(stderr, "find-similar-batch output formatting failed\n");
+      return 1;
+    }
+    return 0;
   }
 
   if (strcmp(cmd, "relationships") == 0) {

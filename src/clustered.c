@@ -1109,6 +1109,154 @@ nbase_status_t nbase_clustered_find_similar(
   return st;
 }
 
+typedef struct cl_similar_batch_ctx {
+  const nbase_clustered_t *cl;
+  const uint64_t *ids;
+  const uint32_t *slots;
+  uint32_t id_count;
+  uint32_t k;
+  uint32_t nprobe;
+  nbase_filter_fn filter;
+  void *filter_ctx;
+  nbase_result_t *out_results;
+  uint32_t *out_counts;
+  atomic_uint next_q;
+  atomic_int first_err;
+} cl_similar_batch_ctx_t;
+
+static void *cl_similar_batch_worker(void *raw) {
+  cl_similar_batch_ctx_t *ctx = (cl_similar_batch_ctx_t *)raw;
+  while (true) {
+    if (atomic_load_explicit(&ctx->first_err, memory_order_acquire) != (int)NBASE_OK) {
+      break;
+    }
+    uint32_t q = atomic_fetch_add_explicit(&ctx->next_q, 1U, memory_order_relaxed);
+    if (q >= ctx->id_count) {
+      break;
+    }
+    cl_exclude_id_ctx_t ex = {ctx->ids[q], ctx->filter, ctx->filter_ctx};
+    const float *qvec = nbase_store_get_vector(ctx->cl->store, ctx->slots[q]);
+    uint32_t got = 0U;
+    nbase_status_t st = cl_search_unlocked(
+        ctx->cl,
+        qvec,
+        ctx->cl->cfg.dim,
+        ctx->k,
+        false,
+        0.0f,
+        ctx->nprobe,
+        cl_exclude_id_filter,
+        &ex,
+        ctx->out_results + (size_t)q * (size_t)ctx->k,
+        &got);
+    ctx->out_counts[q] = got;
+    if (st != NBASE_OK) {
+      int expected = (int)NBASE_OK;
+      (void)atomic_compare_exchange_strong(&ctx->first_err, &expected, (int)st);
+      break;
+    }
+  }
+  return NULL;
+}
+
+nbase_status_t nbase_clustered_find_similar_batch(
+    const nbase_clustered_t *cl,
+    const uint64_t *ids,
+    uint32_t id_count,
+    uint32_t k,
+    uint32_t nprobe,
+    uint32_t num_threads,
+    nbase_filter_fn filter,
+    void *filter_ctx,
+    nbase_result_t *out_results,
+    uint32_t *out_counts) {
+  if (!cl || (id_count > 0U && (!ids || !out_counts || (k > 0U && !out_results)))) {
+    return NBASE_ERR_INVALID_ARG;
+  }
+  if (id_count == 0U) {
+    return NBASE_OK;
+  }
+  if (k > 0U && (size_t)id_count > SIZE_MAX / (size_t)k) {
+    return NBASE_ERR_NOMEM;
+  }
+  memset(out_counts, 0, (size_t)id_count * sizeof(uint32_t));
+
+  uint32_t stack_slots[64];
+  uint32_t *slots = (id_count <= 64U) ? stack_slots : malloc((size_t)id_count * sizeof(uint32_t));
+  if (!slots) {
+    return NBASE_ERR_NOMEM;
+  }
+
+  nbase_clustered_t *mcl = (nbase_clustered_t *)(uintptr_t)cl;
+  pthread_rwlock_rdlock(&mcl->rwlock);
+  for (uint32_t i = 0U; i < id_count; i++) {
+    uint32_t s = NBASE_INVALID_SLOT;
+    if (!nbase_store_find_slot(cl->store, ids[i], &s) ||
+        nbase_store_get_vector(cl->store, s) == NULL) {
+      pthread_rwlock_unlock(&mcl->rwlock);
+      if (slots != stack_slots) {
+        free(slots);
+      }
+      return NBASE_ERR_NOT_FOUND;
+    }
+    slots[i] = s;
+  }
+  if (k == 0U) {
+    pthread_rwlock_unlock(&mcl->rwlock);
+    if (slots != stack_slots) {
+      free(slots);
+    }
+    return NBASE_OK;
+  }
+
+  uint32_t workers = (num_threads == 0U) ? 4U : num_threads;
+  if (workers > 8U) {
+    workers = 8U;
+  }
+  if (workers > id_count) {
+    workers = id_count;
+  }
+
+  cl_similar_batch_ctx_t ctx;
+  ctx.cl = cl;
+  ctx.ids = ids;
+  ctx.slots = slots;
+  ctx.id_count = id_count;
+  ctx.k = k;
+  ctx.nprobe = nprobe;
+  ctx.filter = filter;
+  ctx.filter_ctx = filter_ctx;
+  ctx.out_results = out_results;
+  ctx.out_counts = out_counts;
+  atomic_init(&ctx.next_q, 0U);
+  atomic_init(&ctx.first_err, (int)NBASE_OK);
+
+  if (workers <= 1U) {
+    (void)cl_similar_batch_worker(&ctx);
+  } else {
+    pthread_t th[8];
+    uint32_t created = 0U;
+    for (uint32_t t = 0U; t < workers; t++) {
+      if (pthread_create(&th[t], NULL, cl_similar_batch_worker, &ctx) != 0) {
+        break;
+      }
+      created++;
+    }
+    if (created < workers) {
+      (void)cl_similar_batch_worker(&ctx);
+    }
+    for (uint32_t t = 0U; t < created; t++) {
+      pthread_join(th[t], NULL);
+    }
+  }
+
+  pthread_rwlock_unlock(&mcl->rwlock);
+  if (slots != stack_slots) {
+    free(slots);
+  }
+  return (nbase_status_t)atomic_load_explicit(&ctx.first_err, memory_order_acquire);
+}
+
 nbase_status_t nbase_clustered_compact(nbase_clustered_t *cl) {
   if (!cl) {
     return NBASE_ERR_INVALID_ARG;

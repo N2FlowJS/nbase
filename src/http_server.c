@@ -3554,7 +3554,11 @@ static bool parse_threads_field(const nbase_json_t *root, uint32_t *out_threads)
   return true;
 }
 
-static void handle_search_batch(const http_conn_t *c, const char *body, size_t body_len) {
+static void handle_vector_batch_search_common(
+    const http_conn_t *c,
+    const char *body,
+    size_t body_len,
+    bool require_radius) {
   nbase_http_server_t *srv = c->srv;
   nbase_json_t *root = NULL;
   if (nbase_json_parse(body, body_len, &root) != NBASE_OK || root->type != NBASE_JSON_OBJECT) {
@@ -3577,15 +3581,50 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
     return;
   }
 
-  uint32_t k = 10U;
-  const nbase_json_t *jk = nbase_json_obj_get(root, "k");
-  if (jk != NULL) {
-    if (jk->type != NBASE_JSON_NUMBER || !jk->is_int || jk->i64 <= 0 || jk->i64 > 1000) {
+  bool use_radius = require_radius;
+  float max_distance = 0.0f;
+  const nbase_json_t *jmd = nbase_json_obj_get(root, "maxDistance");
+  if (require_radius) {
+    if (!jmd || jmd->type != NBASE_JSON_NUMBER || !isfinite(jmd->num) || !isfinite((float)jmd->num)) {
       nbase_json_free(root);
-      send_error_json(c, 400, "k must be in 1..1000");
+      send_error_json(c, 400, "maxDistance must be a finite float32");
       return;
     }
-    k = (uint32_t)jk->i64;
+    max_distance = (float)jmd->num;
+  } else if (jmd != NULL) {
+    if (jmd->type != NBASE_JSON_NUMBER || !isfinite(jmd->num) || !isfinite((float)jmd->num)) {
+      nbase_json_free(root);
+      send_error_json(c, 400, "maxDistance must be a finite float32");
+      return;
+    }
+    use_radius = true;
+    max_distance = (float)jmd->num;
+  }
+
+  uint32_t stride_k = require_radius ? 100U : 10U;
+  if (require_radius) {
+    const nbase_json_t *jlim = nbase_json_obj_get(root, "maxResults");
+    if (jlim == NULL) {
+      jlim = nbase_json_obj_get(root, "limit");
+    }
+    if (jlim != NULL) {
+      if (jlim->type != NBASE_JSON_NUMBER || !jlim->is_int || jlim->i64 <= 0 || jlim->i64 > 10000) {
+        nbase_json_free(root);
+        send_error_json(c, 400, "maxResults must be in 1..10000");
+        return;
+      }
+      stride_k = (uint32_t)jlim->i64;
+    }
+  } else {
+    const nbase_json_t *jk = nbase_json_obj_get(root, "k");
+    if (jk != NULL) {
+      if (jk->type != NBASE_JSON_NUMBER || !jk->is_int || jk->i64 <= 0 || jk->i64 > 1000) {
+        nbase_json_free(root);
+        send_error_json(c, 400, "k must be in 1..1000");
+        return;
+      }
+      stride_k = (uint32_t)jk->i64;
+    }
   }
 
   bool inc_meta = false;
@@ -3615,7 +3654,7 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
   uint32_t qcnt = (uint32_t)jqs->len;
   uint32_t dim = db_st.dim;
   float *queries = malloc((size_t)qcnt * (size_t)dim * sizeof(float));
-  nbase_result_t *results = malloc((size_t)qcnt * (size_t)k * sizeof(nbase_result_t));
+  nbase_result_t *results = malloc((size_t)qcnt * (size_t)stride_k * sizeof(nbase_result_t));
   uint32_t *counts = malloc((size_t)qcnt * sizeof(uint32_t));
   if (!queries || !results || !counts) {
     free(queries);
@@ -3645,7 +3684,11 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
   }
 
   uint64_t t0 = monotonic_us();
-  nbase_status_t st = nbase_search_batch(srv->db, queries, qcnt, dim, k, &opts, results, counts);
+  nbase_status_t st =
+      use_radius
+          ? nbase_search_radius_batch(
+                srv->db, queries, qcnt, dim, max_distance, stride_k, &opts, results, counts)
+          : nbase_search_batch(srv->db, queries, qcnt, dim, stride_k, &opts, results, counts);
   uint64_t t1 = monotonic_us();
   record_search_latency(srv, qcnt, t1 - t0);
 
@@ -3662,8 +3705,13 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
 
   nbase_sbuf_t sb;
   nbase_sbuf_init(&sb);
-  nbase_sbuf_append(&sb, "{\"success\":true,\"results\":[");
-  append_result_batch_json(&sb, srv->db, results, counts, qcnt, k, dim, inc_meta, inc_vec, inc_text);
+  if (require_radius) {
+    nbase_sbuf_appendf(&sb, "{\"success\":true,\"queryCount\":%u,\"results\":[", qcnt);
+  } else {
+    nbase_sbuf_append(&sb, "{\"success\":true,\"results\":[");
+  }
+  append_result_batch_json(
+      &sb, srv->db, results, counts, qcnt, stride_k, dim, inc_meta, inc_vec, inc_text);
   nbase_sbuf_append(&sb, "]}");
   free(results);
   free(counts);
@@ -3674,6 +3722,14 @@ static void handle_search_batch(const http_conn_t *c, const char *body, size_t b
   }
   send_sbuf_json(c, 200, &sb);
   nbase_sbuf_free(&sb);
+}
+
+static void handle_search_batch(const http_conn_t *c, const char *body, size_t body_len) {
+  handle_vector_batch_search_common(c, body, body_len, false);
+}
+
+static void handle_search_radius_batch(const http_conn_t *c, const char *body, size_t body_len) {
+  handle_vector_batch_search_common(c, body, body_len, true);
 }
 
 static void handle_search_metadata(const http_conn_t *c, const char *body, size_t body_len) {
@@ -5436,6 +5492,14 @@ static void dispatch_request(
   if (strcmp(path, "/api/search/radius") == 0) {
     if (strcmp(method, "POST") == 0) {
       handle_search_radius(c, body, body_len);
+      return;
+    }
+    send_error_json(c, 405, "method not allowed");
+    return;
+  }
+  if (strcmp(path, "/api/search/radius/batch") == 0) {
+    if (strcmp(method, "POST") == 0) {
+      handle_search_radius_batch(c, body, body_len);
       return;
     }
     send_error_json(c, 405, "method not allowed");

@@ -306,6 +306,36 @@ class Database {
     return out;
   }
 
+  std::vector<std::vector<nbase_result_t>> search_radius_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      float max_distance,
+      uint32_t max_results,
+      const nbase_search_opts_t *opts = nullptr) const {
+    if (query_count == 0U) {
+      return {};
+    }
+    if (dim == 0U ||
+        queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<nbase_result_t> flat(
+        static_cast<size_t>(query_count) * static_cast<size_t>(max_results));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_search_radius_batch(
+        db_,
+        queries.data(),
+        query_count,
+        dim,
+        max_distance,
+        max_results,
+        opts,
+        max_results > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, query_count, max_results);
+  }
+
   std::vector<nbase_result_t> find_similar(
       uint64_t id,
       uint32_t k,
@@ -1414,6 +1444,34 @@ class Lsh {
     return out;
   }
 
+  std::vector<std::vector<nbase_result_t>> find_similar_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t k,
+      uint32_t multi_probe = 1U,
+      uint32_t num_threads = 0U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr) const {
+    if (ids.empty()) {
+      return {};
+    }
+    uint32_t cnt = static_cast<uint32_t>(ids.size());
+    std::vector<nbase_result_t> flat(
+        static_cast<size_t>(cnt) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(cnt, 0U);
+    detail::check(nbase_lsh_find_similar_batch(
+        ptr_,
+        ids.data(),
+        cnt,
+        k,
+        multi_probe,
+        num_threads,
+        filter,
+        filter_ctx,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, cnt, k);
+  }
+
   std::vector<std::vector<nbase_result_t>> search_batch(
       const std::vector<float> &queries,
       uint32_t query_count,
@@ -1640,6 +1698,36 @@ class PartitionedDatabase {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_result_t>> search_radius_batch(
+      const std::vector<float> &queries,
+      uint32_t query_count,
+      uint32_t dim,
+      float max_distance,
+      uint32_t max_results,
+      const nbase_pdb_search_opts_t *opts = nullptr) const {
+    if (query_count == 0U) {
+      return {};
+    }
+    if (dim == 0U ||
+        queries.size() != static_cast<size_t>(query_count) * static_cast<size_t>(dim)) {
+      throw Error(NBASE_ERR_DIM_MISMATCH);
+    }
+    std::vector<nbase_result_t> flat(
+        static_cast<size_t>(query_count) * static_cast<size_t>(max_results));
+    std::vector<uint32_t> counts(query_count, 0U);
+    detail::check(nbase_pdb_search_radius_batch(
+        pdb_,
+        queries.data(),
+        query_count,
+        dim,
+        max_distance,
+        max_results,
+        opts,
+        max_results > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, query_count, max_results);
   }
 
   void set_meta(uint64_t id, const nbase_meta_field_t *fields, uint32_t count) {
@@ -2495,6 +2583,34 @@ class ClusteredDatabase {
         &count));
     out.resize(count);
     return out;
+  }
+
+  std::vector<std::vector<nbase_result_t>> find_similar_batch(
+      const std::vector<uint64_t> &ids,
+      uint32_t k,
+      uint32_t nprobe = 4U,
+      uint32_t num_threads = 0U,
+      nbase_filter_fn filter = nullptr,
+      void *filter_ctx = nullptr) const {
+    if (ids.empty()) {
+      return {};
+    }
+    uint32_t cnt = static_cast<uint32_t>(ids.size());
+    std::vector<nbase_result_t> flat(
+        static_cast<size_t>(cnt) * static_cast<size_t>(k));
+    std::vector<uint32_t> counts(cnt, 0U);
+    detail::check(nbase_clustered_find_similar_batch(
+        ptr_,
+        ids.data(),
+        cnt,
+        k,
+        nprobe,
+        num_threads,
+        filter,
+        filter_ctx,
+        k > 0U ? flat.data() : nullptr,
+        counts.data()));
+    return detail::unpack_batch_results(flat, counts, cnt, k);
   }
 
   std::vector<std::vector<nbase_result_t>> search_batch(
