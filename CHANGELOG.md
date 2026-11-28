@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [Node.js SDK 1.0.0] - 2026-11-28
+
 ### Added & Changed
-- Added Python and Node.js SDK clients for the `nbased` REST API. The Node.js client replaces the former embedded TypeScript API under the existing npm package name `@n2flowjs/nbase`; this breaking API change is prepared as npm `1.0.0`. Added an npm workflow with isolated `npm-v*` tags so Node.js package releases do not trigger native C releases.
+- Added Python and Node.js SDK clients for the `nbased` REST API. The Node.js client replaces the former embedded TypeScript API under the existing npm package name `@n2flowjs/nbase`, a breaking API change. Published npm `1.0.0`; its release workflow uses isolated `npm-v*` tags so npm releases do not trigger native C releases.
 
 ## [1.22.0] - 2026-11-27
 
