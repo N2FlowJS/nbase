@@ -1,0 +1,54 @@
+name: Publish Node.js SDK to npm
+
+on:
+  push:
+    tags: ['npm-v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify the npm tarball without publishing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: sdk/nodejs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org/
+      - name: Check release tag and package version
+        if: startsWith(github.ref, 'refs/tags/npm-v')
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#npm-v}"
+          test "$PACKAGE_VERSION" = "$TAG_VERSION" || {
+            echo "Tag npm-v$TAG_VERSION does not match package version $PACKAGE_VERSION"
+            exit 1
+          }
+      - name: Verify npm package contents
+        run: |
+          set -euo pipefail
+          npm pack --dry-run > /tmp/nbase-npm-pack.txt 2>&1
+          grep -q 'src/index.js' /tmp/nbase-npm-pack.txt
+          grep -q 'types/index.d.ts' /tmp/nbase-npm-pack.txt
+          cat /tmp/nbase-npm-pack.txt
+      - name: Publish to npm
+        if: inputs.dry_run != true
+        run: npm publish --access public --provenance

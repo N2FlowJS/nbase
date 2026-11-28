@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nbase-sdk"
+version = "1.0.0"
+description = "Python client for the nbase vector database HTTP API"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "nbase contributors"}]
+
+[tool.setuptools]
+packages = ["nbase"]

@@ -61,6 +61,26 @@ ctest --test-dir /tmp/nbase-tsan --output-on-failure
 docker compose up -d --build
 ```
 
+## Node.js & Python SDKs
+
+The `sdk/` directory contains Node.js and Python HTTP clients for the `nbased` REST API. The npm package keeps the name `@n2flowjs/nbase` and replaces its previous embedded TypeScript API with this SDK.
+
+```js
+import { NBaseClient } from "@n2flowjs/nbase";
+const db = new NBaseClient({ url: "http://localhost:1307", apiKey: process.env.NBASE_API_KEY });
+await db.add(1, [0.1, 0.2, 0.3], { metadata: { category: "demo" } });
+const hits = await db.search([0.1, 0.2, 0.3], 5);
+```
+
+```python
+from nbase import NBaseClient
+db = NBaseClient("http://localhost:1307", api_key="secret")
+db.add(1, [0.1, 0.2, 0.3], metadata={"category": "demo"})
+hits = db.search([0.1, 0.2, 0.3], k=5)
+```
+
+See [`sdk/README.md`](sdk/README.md) for package details and [`sdk/python/README.md`](sdk/python/README.md) for the Python client.
+
 ## Example Usage (Metadata Filter & Parallel Batch Search)
 
 ```c

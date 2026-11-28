@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added & Changed
+- Added Python and Node.js SDK clients for the `nbased` REST API. The Node.js client replaces the former embedded TypeScript API under the existing npm package name `@n2flowjs/nbase`; this breaking API change is prepared as npm `1.0.0`. Added an npm workflow with isolated `npm-v*` tags so Node.js package releases do not trigger native C releases.
+
 ## [1.22.0] - 2026-11-27
 
 Parallel `search_radius_batch` parity across standalone clustered, IVF-PQ, and LSH indexes, reusable IVF-PQ worker scratch buffers & partial probe selection, SIMD-batched HNSW upper-layer greedy descent, `maxDistance` support across all HTTP `similar` endpoints, and enriched batch CLI `get-batch` / `export`.
